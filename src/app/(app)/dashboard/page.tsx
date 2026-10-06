@@ -107,7 +107,7 @@ export default function DashboardPage() {
         }
       />
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" data-tour="stats">
         <StatCard
           label="Cash & bank"
           value={fmtCurrency(data.cash)}
@@ -138,6 +138,7 @@ export default function DashboardPage() {
 
       <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
         <Panel
+          tour="profit-chart"
           title="Revenue vs expenses"
           subtitle="Posted activity by month, 2026"
           className="xl:col-span-2"
@@ -155,7 +156,7 @@ export default function DashboardPage() {
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2 xl:grid-cols-3">
-        <Panel title="Needs attention" subtitle="Work waiting on the finance team">
+        <Panel tour="attention" title="Needs attention" subtitle="Work waiting on the finance team">
           {attention.length === 0 ? (
             <p className="text-sm text-neutral-500">All clear. Nothing is waiting.</p>
           ) : (
@@ -240,6 +241,7 @@ export default function DashboardPage() {
         </Panel>
 
         <Panel
+          tour="integration-health"
           title="Integration health"
           subtitle={`${connected.length} of ${state.dataSources.length} sources connected`}
           actions={
@@ -288,6 +290,7 @@ export default function DashboardPage() {
         </Panel>
 
         <Panel
+          tour="recent-activity"
           title="Recent activity"
           subtitle="Latest changes across the ledger"
           className="xl:col-span-2"

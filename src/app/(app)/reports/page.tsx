@@ -76,7 +76,7 @@ export default function ReportsPage() {
         description="Every report is calculated live from posted journals, so it always agrees with the ledger and with every other report."
       />
       {groups.map((g) => (
-        <section key={g.title} className="mb-8">
+        <section key={g.title} className="mb-8" data-tour="report-group">
           <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">{g.title}</h2>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {g.cards.map((c) => (

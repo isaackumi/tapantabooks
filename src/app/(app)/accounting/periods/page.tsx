@@ -59,13 +59,13 @@ export default function PeriodsPage() {
         description={`Financial year ${today.slice(0, 4)}. Lock a month while you review it, close it when the numbers are final.`}
       />
 
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3" data-tour="stats">
         <StatCard label="Open" value={count("OPEN")} sub="Accept postings" tone="success" />
         <StatCard label="Locked" value={count("LOCKED")} sub="Under review" tone="warning" />
         <StatCard label="Closed" value={count("CLOSED")} sub="Final" />
       </div>
 
-      <div className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 dark:border-neutral-700 dark:bg-neutral-800">
+      <div className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 dark:border-neutral-700 dark:bg-neutral-800" data-tour="period-locks">
         <Toggle
           checked={state.org.block_posting_to_locked_periods}
           onChange={(v) => {
@@ -77,7 +77,7 @@ export default function PeriodsPage() {
         />
       </div>
 
-      <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-800">
+      <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-800" data-tour="periods-table">
         <table className="min-w-full text-sm">
           <thead className="bg-neutral-50/60 text-left text-neutral-500 dark:bg-neutral-800 dark:text-neutral-300">
             <tr>

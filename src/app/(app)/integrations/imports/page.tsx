@@ -101,7 +101,7 @@ export default function ImportsPage() {
         }
       />
 
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" data-tour="stats">
         <StatCard label="Batches" value={rows.length} sub={`${rows.reduce((s, r) => s + r.records.length, 0)} rows received`} />
         <StatCard label="Rows posted" value={rows.reduce((s, r) => s + r.posted, 0)} tone="success" />
         <StatCard label="Rows held" value={rows.reduce((s, r) => s + r.errors, 0)} tone="danger" sub="Failed validation" />

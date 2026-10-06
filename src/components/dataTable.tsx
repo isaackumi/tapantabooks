@@ -83,7 +83,7 @@ const DataTable = <T extends object>({
   const last = Math.min(data.length, (pageIndex + 1) * pagination.pageSize);
 
   return (
-    <div className="w-full">
+    <div className="w-full" data-tour="table">
       <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-800">
         <table className="min-w-full divide-y divide-neutral-200 dark:divide-neutral-700">
           <thead className="bg-neutral-50/60 dark:bg-neutral-800">

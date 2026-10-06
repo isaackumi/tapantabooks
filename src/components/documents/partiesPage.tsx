@@ -195,7 +195,7 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
         }
       />
 
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" data-tour="stats">
         <StatCard label={`Active ${label}s`} value={rows.filter((r) => r.status === "ACTIVE").length} sub={`${rows.length} in total`} />
         <StatCard label={isCustomer ? "Owed to you" : "You owe"} value={fmtCurrency(totalOutstanding)} sub={`${rows.filter((r) => r.outstanding > 0).length} with a balance`} />
         <StatCard label="Overdue" value={fmtCurrency(totalOverdue)} tone={totalOverdue ? "warning" : "default"} sub={`${rows.filter((r) => r.overdue > 0).length} ${label}s`} />

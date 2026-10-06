@@ -9,6 +9,7 @@ import { useGlobalState } from "@/utils/globalStateContext";
 import { ALL_USERS, periodForDate, useCurrentUser, useLedger } from "@/store/ledgerStore";
 import { todayIso } from "@/utils/dates";
 import { DarkModeToggle, EntitySwitcher, FullScreenToggle, SidebarModeToggle } from "./headerControls";
+import { TourButton } from "@/tour/tourCenter";
 
 const initials = (name: string) =>
   name
@@ -49,7 +50,7 @@ const Header = ({ setSidebarOpen }: { setSidebarOpen: (open: boolean) => void })
       <Separator />
 
       <div className="flex flex-1 gap-x-4 self-stretch lg:gap-x-6">
-        <div className="hidden flex-1 max-w-xs m-auto sm:block">
+        <div className="hidden flex-1 max-w-xs m-auto sm:block" data-tour="global-search">
           <label htmlFor="global-search" className="sr-only">
             Search
           </label>
@@ -72,6 +73,7 @@ const Header = ({ setSidebarOpen }: { setSidebarOpen: (open: boolean) => void })
           {period && (
             <Link
               href="/accounting/periods"
+              data-tour="period-pill"
               className="hidden xl:inline-flex items-center gap-2 rounded-full bg-neutral-100 px-3 py-1 text-xs font-medium text-neutral-700 hover:bg-neutral-200 dark:bg-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-600"
             >
               <span
@@ -82,11 +84,12 @@ const Header = ({ setSidebarOpen }: { setSidebarOpen: (open: boolean) => void })
           )}
           <EntitySwitcher />
           <Separator />
+          <TourButton />
           <FullScreenToggle />
           <DarkModeToggle />
           <Separator />
 
-          <Menu as="div" className="relative">
+          <Menu as="div" className="relative" data-tour="user-menu">
             <MenuButton className="-m-1.5 flex items-center gap-2 p-1.5">
               <span className="sr-only">Open user menu</span>
               <Avatar name={user.name} />

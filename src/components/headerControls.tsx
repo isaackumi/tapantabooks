@@ -124,7 +124,7 @@ export const EntitySwitcher = () => {
   const branchName = branch === "all" ? "All branches" : branches.find((b) => b.id === branch)?.name ?? "";
 
   return (
-    <Menu as="div" className="relative hidden md:block">
+    <Menu as="div" className="relative hidden md:block" data-tour="entity-switcher">
       <MenuButton className="flex items-center gap-2 rounded-lg border border-neutral-200 px-3 py-1.5 text-left hover:bg-neutral-50 dark:border-neutral-600 dark:hover:bg-neutral-700">
         <HiOutlineBuildingOffice2 className="h-5 w-5 text-brand-600 dark:text-brand-400" />
         <span className="leading-tight">

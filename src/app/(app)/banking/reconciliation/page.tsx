@@ -92,7 +92,7 @@ export default function ReconciliationPage() {
         description="Match each statement line to the ledger. Lines with no ledger entry (bank charges, interest, unknown deposits) can be posted from here."
         actions={
           <>
-            <select value={bankId} onChange={(e) => setBankId(e.target.value)} className={`${compactInputClass} w-60`}>
+            <select value={bankId} onChange={(e) => setBankId(e.target.value)} className={`${compactInputClass} w-60`} data-tour="rec-bank">
               {state.bankAccounts.map((b) => (
                 <option key={b.id} value={b.id}>
                   {b.name}
@@ -101,6 +101,7 @@ export default function ReconciliationPage() {
             </select>
             <Button
               icon={FiCheckCircle}
+              data-tour="rec-complete"
               disabled={review.length > 0 || lines.length === 0}
               title={review.length ? "Match every line first" : undefined}
               onClick={() => run(actions.completeReconciliation(bank.id))}
@@ -119,7 +120,7 @@ export default function ReconciliationPage() {
       ) : (
         <>
           <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
-            <Panel title="Reconciliation summary" subtitle={`Statement to ${fmtDate(bank.statement_date)}`} className="xl:col-span-2">
+            <Panel tour="rec-summary" title="Reconciliation summary" subtitle={`Statement to ${fmtDate(bank.statement_date)}`} className="xl:col-span-2">
               <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
                 <dl className="space-y-2 text-sm">
                   <div className="flex justify-between">
@@ -176,7 +177,7 @@ export default function ReconciliationPage() {
               </div>
             </Panel>
 
-            <Panel title="Not yet on statement" subtitle="Posted in the ledger, waiting to clear">
+            <Panel tour="rec-transit" title="Not yet on statement" subtitle="Posted in the ledger, waiting to clear">
               {rec.inTransit.length === 0 ? (
                 <p className="text-sm text-neutral-500">Nothing outstanding.</p>
               ) : (
@@ -215,7 +216,7 @@ export default function ReconciliationPage() {
             }
           />
 
-          <div className="mt-4 overflow-x-auto rounded-xl border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-800">
+          <div className="mt-4 overflow-x-auto rounded-xl border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-800" data-tour="rec-lines">
             <table className="min-w-full text-sm">
               <thead className="bg-neutral-50/60 text-left text-neutral-500 dark:bg-neutral-800 dark:text-neutral-300">
                 <tr>

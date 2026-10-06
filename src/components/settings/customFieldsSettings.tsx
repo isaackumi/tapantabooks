@@ -328,13 +328,13 @@ export const CustomFieldsSettings = () => {
 
   return (
     <div className="space-y-6">
-      <Callout tone="info" icon={FiInfo}>
+      <Callout tone="info" icon={FiInfo} tour="cf-intro">
         <strong>Financial</strong> fields can be used to filter and report. <strong>Source reference</strong> fields keep the
         original system&apos;s identifiers so any record can be traced back. Neither kind changes how an entry posts, so values
         can still be corrected on approved documents and posted journals.
       </Callout>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2" data-tour="cf-entities">
         {CUSTOM_FIELD_ENTITIES.map((e) => {
           const count = state.customFields.filter((f) => f.entity === e && f.is_active).length;
           return (
@@ -363,12 +363,14 @@ export const CustomFieldsSettings = () => {
       </div>
 
       <Panel
+        tour="cf-table"
         title={`${entity} fields`}
         subtitle={ENTITY_HINT[entity]}
         actions={
           <Button
             size="sm"
             icon={FiPlus}
+            data-tour="cf-new"
             onClick={() => {
               setEditing(null);
               setOpen(true);

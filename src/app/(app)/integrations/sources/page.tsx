@@ -210,7 +210,7 @@ export default function SourcesPage() {
         description="Trovesuite apps, other accounting systems, files, banks and APIs. Each one feeds the same governed posting engine."
       />
 
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" data-tour="stats">
         <StatCard label="Connected" value={`${connected.length} / ${state.dataSources.length}`} sub="Sources sending data" />
         <StatCard
           label="Records received"
@@ -239,7 +239,7 @@ export default function SourcesPage() {
         onChange={setTab}
       />
 
-      <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3" data-tour="sources-grid">
         {sources.map((s) => (
           <div
             key={s.id}

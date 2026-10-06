@@ -108,6 +108,7 @@ const Sidebar = ({
         ) : (
           <Link
             href={item.href}
+            data-nav={item.href}
             onClick={() => setSidebarOpen(false)}
             className={classNames(
               "group flex items-center gap-x-3 rounded-lg p-2 text-sm font-medium transition-colors",
@@ -128,25 +129,31 @@ const Sidebar = ({
   const navList = (
     <ul role="list" className="flex flex-1 flex-col gap-y-1">
       {groupedNavigation.map((section, sectionIdx) => (
-        <Fragment key={section.title ?? `section-${sectionIdx}`}>
-          {section.title && (
-            <li className={sectionIdx > 0 ? "mt-4" : undefined}>
-              <button
-                type="button"
-                onClick={() => setCollapsedGroups((p) => ({ ...p, [section.title!]: !p[section.title!] }))}
-                className="flex w-full items-center justify-between rounded-md px-2 py-1 text-xs font-semibold uppercase tracking-wide text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300"
-              >
-                {section.title}
-                {collapsedGroups[section.title] ? (
-                  <HiChevronDown className="h-3.5 w-3.5" />
-                ) : (
-                  <HiChevronUp className="h-3.5 w-3.5" />
-                )}
-              </button>
-            </li>
-          )}
-          {(!section.title || !collapsedGroups[section.title]) && section.items.map(renderNavItem)}
-        </Fragment>
+        <li
+          key={section.title ?? `section-${sectionIdx}`}
+          className={section.title && sectionIdx > 0 ? "mt-4" : undefined}
+          data-nav-group={section.title ?? undefined}
+        >
+          <ul role="list" className="flex flex-col gap-y-1">
+            {section.title && (
+              <li>
+                <button
+                  type="button"
+                  onClick={() => setCollapsedGroups((p) => ({ ...p, [section.title!]: !p[section.title!] }))}
+                  className="flex w-full items-center justify-between rounded-md px-2 py-1 text-xs font-semibold uppercase tracking-wide text-neutral-400 hover:text-neutral-600 dark:text-neutral-500 dark:hover:text-neutral-300"
+                >
+                  {section.title}
+                  {collapsedGroups[section.title] ? (
+                    <HiChevronDown className="h-3.5 w-3.5" />
+                  ) : (
+                    <HiChevronUp className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              </li>
+            )}
+            {(!section.title || !collapsedGroups[section.title]) && section.items.map(renderNavItem)}
+          </ul>
+        </li>
       ))}
     </ul>
   );
@@ -178,7 +185,7 @@ const Sidebar = ({
                 <item.icon className="h-5 w-5" />
               </button>
             ) : (
-              <Link href={item.href} onClick={() => setFlyout(null)} className={iconClasses}>
+              <Link href={item.href} data-nav={item.href} onClick={() => setFlyout(null)} className={iconClasses}>
                 <item.icon className="h-5 w-5" />
                 {dot}
               </Link>
@@ -283,6 +290,7 @@ const Sidebar = ({
               "flex min-h-0 grow flex-col border-r border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-800",
               isHidden ? "shadow-2xl" : "",
             )}
+            data-tour="sidebar"
           >
             <div className={classNames("flex shrink-0 items-center pt-6", isCollapsed ? "justify-center px-2" : "px-6")}>
               <Brand collapsed={isCollapsed} />

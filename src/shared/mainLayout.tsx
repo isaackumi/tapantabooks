@@ -4,6 +4,7 @@ import { useState } from "react";
 import Header from "@/components/header";
 import Sidebar from "@/components/sidebar";
 import { useSidebar } from "@/utils/useSidebar";
+import { TourProvider } from "@/tour/tourCenter";
 
 // Desktop content offset per sidebar mode (must be literal classes for Tailwind JIT).
 const CONTENT_PADDING: Record<string, string> = {
@@ -17,18 +18,20 @@ const MainLayout = ({ children }: { children: React.ReactNode }) => {
   const { mode } = useSidebar();
 
   return (
-    <div className="min-h-screen bg-neutral-100 dark:bg-neutral-900">
-      <Sidebar sidebarOpen={sidebarOpen} setSidebarOpen={setSidebarOpen} />
-      <div
-        data-layout-content
-        className={`transition-[padding] duration-300 ease-in-out ${CONTENT_PADDING[mode] ?? "lg:pl-0"}`}
-      >
-        <Header setSidebarOpen={setSidebarOpen} />
-        <main className="py-8">
-          <div className="px-4 sm:px-6 lg:px-8">{children}</div>
-        </main>
+    <TourProvider>
+      <div className="min-h-screen bg-neutral-100 dark:bg-neutral-900">
+        <Sidebar sidebarOpen={sidebarOpen} setSidebarOpen={setSidebarOpen} />
+        <div
+          data-layout-content
+          className={`transition-[padding] duration-300 ease-in-out ${CONTENT_PADDING[mode] ?? "lg:pl-0"}`}
+        >
+          <Header setSidebarOpen={setSidebarOpen} />
+          <main className="py-8">
+            <div className="px-4 sm:px-6 lg:px-8">{children}</div>
+          </main>
+        </div>
       </div>
-    </div>
+    </TourProvider>
   );
 };
 

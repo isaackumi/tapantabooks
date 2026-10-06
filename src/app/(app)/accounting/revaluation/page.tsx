@@ -128,7 +128,7 @@ export default function RevaluationPage() {
         }
       />
 
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" data-tour="stats">
         <StatCard label="Foreign receivables" value={fmtCurrency(exposure("RECEIVABLE"))} sub={`At booked rates, ${fmtDate(asAt)}`} />
         <StatCard label="Foreign payables" value={fmtCurrency(exposure("PAYABLE"))} sub={`At booked rates, ${fmtDate(asAt)}`} />
         <StatCard label="Foreign bank balances" value={fmtCurrency(exposure("BANK"))} sub={`At booked rates, ${fmtDate(asAt)}`} />
@@ -143,7 +143,7 @@ export default function RevaluationPage() {
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-4">
         <div className="space-y-6">
-          <Panel title="Month end" bodyClassName="px-3 pb-3">
+          <Panel tour="reval-periods" title="Month end" bodyClassName="px-3 pb-3">
             <ul className="space-y-1">
               {ended.map((p) => {
                 const r = state.fxRevaluations.find((x) => x.period_id === p.id);
@@ -169,7 +169,7 @@ export default function RevaluationPage() {
             </ul>
           </Panel>
 
-          <Panel title="Closing rates" subtitle={`GH₵ per unit on ${fmtDate(asAt)}`}>
+          <Panel tour="reval-rates" title="Closing rates" subtitle={`GH₵ per unit on ${fmtDate(asAt)}`}>
             <dl className="space-y-2 text-sm">
               {Object.entries(done ? done.rates : preview.rates)
                 .filter(([c]) => preview.lines.some((l) => l.currency === c) || preview.missing.includes(c))
@@ -226,11 +226,12 @@ export default function RevaluationPage() {
           )}
 
           <Panel
+            tour="reval-preview"
             title={done ? "What was revalued" : "Preview"}
             subtitle={`${preview.lines.length} open foreign balance${preview.lines.length === 1 ? "" : "s"} at ${fmtDate(asAt)}`}
             actions={
               !done && (
-                <Button icon={FiRefreshCw} disabled={!!blocked || preview.missing.length > 0 || changed.length === 0} onClick={() => setConfirmOpen(true)}>
+                <Button icon={FiRefreshCw} data-tour="reval-post" disabled={!!blocked || preview.missing.length > 0 || changed.length === 0} onClick={() => setConfirmOpen(true)}>
                   Post revaluation
                 </Button>
               )
@@ -251,7 +252,7 @@ export default function RevaluationPage() {
           </Panel>
 
           {!done && journalLines.length > 0 && (
-            <Panel title="Journal to be posted" subtitle={`Dated ${fmtDate(asAt)} · reversed automatically on ${fmtDate(addDays(asAt, 1))}`} bodyClassName="px-0 pb-2">
+            <Panel tour="reval-journal" title="Journal to be posted" subtitle={`Dated ${fmtDate(asAt)} · reversed automatically on ${fmtDate(addDays(asAt, 1))}`} bodyClassName="px-0 pb-2">
               <table className="min-w-full text-sm">
                 <thead className="text-left text-neutral-500 dark:text-neutral-400">
                   <tr>
@@ -280,7 +281,7 @@ export default function RevaluationPage() {
             </Panel>
           )}
 
-          <Panel title="History" subtitle="Every revaluation and its automatic reversal" bodyClassName="px-0 pb-2">
+          <Panel tour="reval-history" title="History" subtitle="Every revaluation and its automatic reversal" bodyClassName="px-0 pb-2">
             {state.fxRevaluations.length === 0 ? (
               <p className="px-6 py-4 text-sm text-neutral-500">No revaluations posted yet.</p>
             ) : (

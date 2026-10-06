@@ -42,7 +42,7 @@ export default function TrialBalancePage() {
         ]}
       />
 
-      <div className="mx-auto mb-4 max-w-4xl" data-no-print>
+      <div className="mx-auto mb-4 max-w-4xl" data-no-print data-tour="tb-status">
         {balanced ? (
           <Callout tone="success" icon={FiCheckCircle} title="In balance">
             Debits and credits both total {fmtCurrency(tb.totals.debit)} across {tb.rows.length} accounts.

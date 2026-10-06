@@ -207,20 +207,20 @@ const DocumentsPage = ({ kind }: { kind: "invoice" | "bill" }) => {
         }
         actions={
           <>
-            <Button variant="secondary" icon={FiDownload} onClick={exportCsv}>
+            <Button variant="secondary" icon={FiDownload} onClick={exportCsv} data-tour="export">
               Export
             </Button>
-            <Button variant="secondary" icon={FiDollarSign} onClick={() => setPayOpen(true)}>
+            <Button variant="secondary" icon={FiDollarSign} onClick={() => setPayOpen(true)} data-tour="doc-pay">
               {isInvoice ? "Record receipt" : "Record payment"}
             </Button>
-            <Button icon={FiPlus} onClick={() => setNewOpen(true)}>
+            <Button icon={FiPlus} onClick={() => setNewOpen(true)} data-tour="doc-new">
               {isInvoice ? "New invoice" : "New bill"}
             </Button>
           </>
         }
       />
 
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" data-tour="stats">
         <StatCard label="Outstanding" value={fmtCurrency(outstanding)} sub={`${rows.filter((r) => r.outstanding > 0).length} open documents`} />
         <StatCard
           label="Overdue"

@@ -138,14 +138,14 @@ export default function JournalsPage() {
             <Button variant="secondary" icon={FiDownload} onClick={exportCsv}>
               Export
             </Button>
-            <Button icon={FiPlus} onClick={newJournal}>
+            <Button icon={FiPlus} onClick={newJournal} data-tour="journal-new">
               New journal entry
             </Button>
           </>
         }
       />
 
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" data-tour="stats">
         <StatCard label="Posted this month" value={thisMonth.length} sub={fmtCurrency(thisMonth.reduce((s, j) => s + j.total, 0))} />
         <StatCard
           label="Awaiting approval"

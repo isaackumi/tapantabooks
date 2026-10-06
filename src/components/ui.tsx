@@ -23,7 +23,7 @@ export const PageHeader = ({
   backHref?: string;
   backLabel?: string;
 }) => (
-  <div className="mb-6">
+  <div className="mb-6" data-tour="page-header">
     {backHref && (
       <Link
         href={backHref}
@@ -40,7 +40,7 @@ export const PageHeader = ({
         {description && <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">{description}</p>}
       </div>
       {actions && (
-        <div className="flex flex-wrap items-center gap-2" data-no-print>
+        <div className="flex flex-wrap items-center gap-2" data-no-print data-tour="page-actions">
           {actions}
         </div>
       )}
@@ -55,6 +55,7 @@ export const Panel = ({
   children,
   className,
   bodyClassName,
+  tour,
 }: {
   title?: React.ReactNode;
   subtitle?: React.ReactNode;
@@ -62,8 +63,11 @@ export const Panel = ({
   children: React.ReactNode;
   className?: string;
   bodyClassName?: string;
+  /** Anchor for guided tours (`data-tour`). */
+  tour?: string;
 }) => (
   <section
+    data-tour={tour}
     className={classNames(
       "rounded-xl border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-800",
       className,
@@ -245,12 +249,14 @@ export const Callout = ({
   title,
   children,
   className,
+  tour,
 }: {
   tone?: "info" | "success" | "warning" | "danger";
   icon?: IconType;
   title?: React.ReactNode;
   children?: React.ReactNode;
   className?: string;
+  tour?: string;
 }) => {
   const tones = {
     info: "bg-brand-50 border-brand-200 text-brand-800 dark:bg-brand-900/20 dark:border-brand-800 dark:text-brand-300",
@@ -260,7 +266,7 @@ export const Callout = ({
     danger: "bg-red-50 border-red-200 text-red-800 dark:bg-red-900/20 dark:border-red-800 dark:text-red-300",
   };
   return (
-    <div className={classNames("flex items-start gap-3 rounded-xl border p-4", tones[tone], className)}>
+    <div data-tour={tour} className={classNames("flex items-start gap-3 rounded-xl border p-4", tones[tone], className)}>
       {Icon && <Icon className="mt-0.5 h-5 w-5 shrink-0" />}
       <div className="text-sm">
         {title && <p className="font-semibold">{title}</p>}

@@ -105,6 +105,7 @@ const RateHistory = ({ code }: { code: string }) => {
 
   return (
     <Panel
+      tour="fx-history"
       title={`${code} rate history`}
       subtitle={`GH₵ per 1 ${code}. Each document keeps the rate it was posted at; new rates only affect new documents and revaluations.`}
     >
@@ -228,7 +229,7 @@ const FxPostingPanel = () => {
     toast.success("Exchange settings saved");
   };
   return (
-    <Panel title="Exchange differences" subtitle="Where gains and losses post, and how far a document rate may stray from the day's rate">
+    <Panel tour="fx-posting" title="Exchange differences" subtitle="Where gains and losses post, and how far a document rate may stray from the day's rate">
       <FormError message={error} />
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <Field label="Realised gain / loss account" hint="Posted when a foreign document is paid at a different rate">
@@ -300,7 +301,10 @@ export const CurrencySettings = () => {
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="rounded-xl border border-brand-200 bg-gradient-to-br from-brand-50 to-white p-5 dark:border-brand-900 dark:from-brand-950/40 dark:to-neutral-800">
+        <div
+          className="rounded-xl border border-brand-200 bg-gradient-to-br from-brand-50 to-white p-5 dark:border-brand-900 dark:from-brand-950/40 dark:to-neutral-800"
+          data-tour="fx-base"
+        >
           <p className="text-xs font-semibold uppercase tracking-wide text-brand-700 dark:text-brand-300">Base currency</p>
           <p className="mt-2 text-3xl font-bold">
             {currencySymbol(base)} <span className="text-lg font-medium text-neutral-500">{base}</span>
@@ -310,7 +314,7 @@ export const CurrencySettings = () => {
             once transactions exist.
           </p>
         </div>
-        <div className="rounded-xl border border-neutral-200 bg-white p-5 lg:col-span-2 dark:border-neutral-700 dark:bg-neutral-800">
+        <div className="rounded-xl border border-neutral-200 bg-white p-5 lg:col-span-2 dark:border-neutral-700 dark:bg-neutral-800" data-tour="fx-reference">
           <div className="flex items-start justify-between gap-4">
             <div>
               <p className="text-sm font-semibold">Daily reference rates</p>
@@ -351,10 +355,11 @@ export const CurrencySettings = () => {
       </div>
 
       <Panel
+        tour="fx-currencies"
         title="Currencies"
         subtitle="Active currencies can be chosen on customers, suppliers, documents and bank accounts"
         actions={
-          <Button size="sm" variant="secondary" icon={FiPlus} onClick={() => setAdding(true)}>
+          <Button size="sm" variant="secondary" icon={FiPlus} onClick={() => setAdding(true)} data-tour="fx-add">
             Add currency
           </Button>
         }

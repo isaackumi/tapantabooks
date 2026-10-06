@@ -18,8 +18,8 @@ interface TabsProps {
 
 /** Segmented tab strip in the loandrift style; the page renders the active panel. */
 export const Tabs = ({ tabs, value, onChange, actions }: TabsProps) => (
-  <div className="flex flex-wrap items-center justify-between gap-3">
-    <div className="w-full sm:w-fit overflow-x-auto rounded-lg bg-neutral-100 p-1 transition dark:bg-neutral-700">
+  <div className="flex flex-wrap items-center justify-between gap-3" data-tour="tabs">
+    <div className="w-full sm:w-fit overflow-x-auto rounded-lg bg-neutral-100 p-1 transition dark:bg-neutral-700" data-tour="tab-strip">
       <nav className="flex min-w-max gap-x-1" role="tablist">
         {tabs.map((tab) => {
           const selected = tab.id === value;
@@ -29,6 +29,7 @@ export const Tabs = ({ tabs, value, onChange, actions }: TabsProps) => (
               type="button"
               role="tab"
               aria-selected={selected}
+              data-tour-tab={tab.id}
               onClick={() => onChange(tab.id)}
               className={`inline-flex items-center gap-x-2 whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium outline-none transition-colors ${
                 selected
@@ -53,7 +54,11 @@ export const Tabs = ({ tabs, value, onChange, actions }: TabsProps) => (
         })}
       </nav>
     </div>
-    {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+    {actions && (
+      <div className="flex flex-wrap items-center gap-2" data-tour="tab-filters">
+        {actions}
+      </div>
+    )}
   </div>
 );
 
