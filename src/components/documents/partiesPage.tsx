@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { FiEdit2, FiPlus, FiUsers } from "react-icons/fi";
+import { FiDownload, FiEdit2, FiPlus, FiUsers } from "react-icons/fi";
 import { Button, DetailRow, PageHeader } from "@/components/ui";
 import { Tabs } from "@/components/tabs";
 import StatCard from "@/components/statCard";
@@ -17,9 +17,22 @@ import { billRows, invoiceRows, outstandingByParty } from "@/store/selectors";
 import type { Party } from "@/models/accounting";
 import { matchesSearch, useGlobalState } from "@/utils/globalStateContext";
 import { useQueryParam } from "@/utils/useQueryParam";
-import { fmtCurrency, fmtDate, fmtDateTime, humanize } from "@/utils/format";
+import { BASE_CURRENCY, fmtCurrency, fmtDate, fmtDateTime, fmtMoney } from "@/utils/format";
+import { downloadCsv } from "@/utils/csv";
+import { todayIso } from "@/utils/dates";
+import {
+  CustomFieldDetails,
+  CustomFieldFilters,
+  EditCustomFieldsModal,
+  customCsvHeaders,
+  customCsvValues,
+  customFieldColumns,
+  customSearchText,
+  matchesCustomFilters,
+  useEntityFields,
+} from "@/components/customFields";
 
-type Row = Party & { outstanding: number; overdue: number; open: number };
+type Row = Party & { outstanding: number; overdue: number; open: number; outstanding_fc: number };
 
 const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
   const { state } = useLedger();
@@ -30,7 +43,11 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
   const [editing, setEditing] = useState<Party | null>(null);
   const [viewId, setViewId] = useState<string | null>(null);
   const [docOpen, setDocOpen] = useState(false);
+  const [editCustom, setEditCustom] = useState(false);
+  const [cfFilters, setCfFilters] = useState<Record<string, string>>({});
   useQueryParam("open", setViewId);
+  const entity = isCustomer ? "Customer" : "Supplier";
+  const fields = useEntityFields(entity);
 
   const docs = useMemo(() => (isCustomer ? invoiceRows(state) : billRows(state)), [state, isCustomer]);
   const balances = useMemo(
@@ -41,7 +58,20 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
     [state, isCustomer],
   );
   const parties = isCustomer ? state.customers : state.suppliers;
-  const rows: Row[] = parties.map((p) => ({ ...p, ...(balances.get(p.id) ?? { outstanding: 0, overdue: 0, open: 0 }) }));
+  const fcOutstanding = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const d of docs) {
+      if (d.currency === BASE_CURRENCY || !d.party || d.outstanding_fc <= 0) continue;
+      if (d.currency !== d.party.currency) continue;
+      m.set(d.party.id, (m.get(d.party.id) ?? 0) + d.outstanding_fc);
+    }
+    return m;
+  }, [docs]);
+  const rows: Row[] = parties.map((p) => ({
+    ...p,
+    ...(balances.get(p.id) ?? { outstanding: 0, overdue: 0, open: 0 }),
+    outstanding_fc: fcOutstanding.get(p.id) ?? 0,
+  }));
 
   const filtered = rows
     .filter((r) =>
@@ -53,7 +83,29 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
             ? r.overdue > 0
             : r.status === "INACTIVE",
     )
-    .filter((r) => matchesSearch(searchQuery, r.code, r.name, r.email, r.city, r.tin, r.external_reference));
+    .filter((r) => matchesCustomFilters(r.custom_fields, cfFilters))
+    .filter((r) =>
+      matchesSearch(searchQuery, r.code, r.name, r.email, r.city, r.tin, r.external_reference, r.currency, customSearchText(r.custom_fields)),
+    );
+
+  const exportCsv = () =>
+    downloadCsv(`${label}s-${todayIso()}.csv`, [
+      ["Code", "Name", "Email", "Phone", "City", "TIN", "Currency", "Terms (days)", "Outstanding (GHS)", "Overdue (GHS)", "Status", ...customCsvHeaders(fields)],
+      ...filtered.map((r) => [
+        r.code,
+        r.name,
+        r.email,
+        r.phone,
+        r.city,
+        r.tin,
+        r.currency,
+        r.payment_terms_days,
+        r.outstanding,
+        r.overdue,
+        r.status,
+        ...customCsvValues(fields, r.custom_fields),
+      ]),
+    ]);
 
   const totalOutstanding = rows.reduce((s, r) => s + r.outstanding, 0);
   const totalOverdue = rows.reduce((s, r) => s + r.overdue, 0);
@@ -69,7 +121,14 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
       header: "Name",
       cell: ({ row }) => (
         <div>
-          <p className="font-medium">{row.original.name}</p>
+          <p className="flex items-center gap-1.5 font-medium">
+            {row.original.name}
+            {row.original.currency !== BASE_CURRENCY && (
+              <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
+                {row.original.currency}
+              </span>
+            )}
+          </p>
           <p className="text-xs text-neutral-500 dark:text-neutral-400">{row.original.email || row.original.phone}</p>
         </div>
       ),
@@ -80,7 +139,14 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
       accessorKey: "outstanding",
       header: "Outstanding",
       align: "right",
-      cell: ({ row }) => <span className="tabular-nums">{row.original.outstanding ? fmtCurrency(row.original.outstanding) : "—"}</span>,
+      cell: ({ row }) => (
+        <div className="tabular-nums">
+          <p>{row.original.outstanding ? fmtCurrency(row.original.outstanding) : "—"}</p>
+          {row.original.outstanding_fc > 0 && (
+            <p className="text-xs text-neutral-500 dark:text-neutral-400">{fmtMoney(row.original.outstanding_fc, row.original.currency)}</p>
+          )}
+        </div>
+      ),
     },
     {
       accessorKey: "overdue",
@@ -98,6 +164,7 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
       accessorFn: (r) => r.source,
       cell: ({ row }) => <SourceBadge type={row.original.source} />,
     },
+    ...customFieldColumns<Row>(fields, (r) => r.custom_fields),
     { accessorKey: "status", header: "Status", cell: ({ row }) => <StatusBadge status={row.original.status} /> },
   ];
 
@@ -111,15 +178,20 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
             : "Who you buy from. Balances come from approved bills less payments."
         }
         actions={
-          <Button
-            icon={FiPlus}
-            onClick={() => {
-              setEditing(null);
-              setFormOpen(true);
-            }}
-          >
-            New {label}
-          </Button>
+          <>
+            <Button variant="secondary" icon={FiDownload} onClick={exportCsv}>
+              Export
+            </Button>
+            <Button
+              icon={FiPlus}
+              onClick={() => {
+                setEditing(null);
+                setFormOpen(true);
+              }}
+            >
+              New {label}
+            </Button>
+          </>
         }
       />
 
@@ -144,6 +216,7 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
         ]}
         value={tab}
         onChange={setTab}
+        actions={<CustomFieldFilters fields={fields} value={cfFilters} onChange={setCfFilters} />}
       />
       <div className="mt-4">
         <DataTable
@@ -190,6 +263,11 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
               <div className="rounded-xl bg-brand-50 p-3 dark:bg-brand-900/20">
                 <p className="text-xs text-brand-700 dark:text-brand-300">Outstanding</p>
                 <p className="mt-0.5 font-semibold tabular-nums">{fmtCurrency(viewing.outstanding)}</p>
+                {viewing.outstanding_fc > 0 && (
+                  <p className="text-xs tabular-nums text-brand-700/80 dark:text-brand-300/80">
+                    incl. {fmtMoney(viewing.outstanding_fc, viewing.currency)} at booking rates
+                  </p>
+                )}
               </div>
               <div className="rounded-xl bg-orange-50 p-3 dark:bg-orange-900/20">
                 <p className="text-xs text-orange-700 dark:text-orange-300">Overdue</p>
@@ -217,6 +295,7 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
               <DetailRow label="Phone">{viewing.phone || "—"}</DetailRow>
               <DetailRow label="TIN">{viewing.tin || "—"}</DetailRow>
               <DetailRow label="Payment terms">{viewing.payment_terms_days} days</DetailRow>
+              <DetailRow label="Default currency">{viewing.currency}</DetailRow>
               <DetailRow label="Source">
                 <SourceBadge type={viewing.source} reference={viewing.external_reference ?? undefined} />
               </DetailRow>
@@ -224,18 +303,7 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
                 <StatusBadge status={viewing.status} />
               </DetailRow>
             </div>
-            {viewing.custom_fields && Object.keys(viewing.custom_fields).length > 0 && (
-              <div>
-                <h4 className="mb-2 text-sm font-semibold">Custom fields</h4>
-                <div className="rounded-xl border border-neutral-200 px-4 py-1 divide-y divide-neutral-100 dark:border-neutral-700 dark:divide-neutral-700">
-                  {Object.entries(viewing.custom_fields).map(([k, v]) => (
-                    <DetailRow key={k} label={state.customFields.find((f) => f.key === k)?.label ?? humanize(k)}>
-                      {v}
-                    </DetailRow>
-                  ))}
-                </div>
-              </div>
-            )}
+            <CustomFieldDetails entity={entity} values={viewing.custom_fields} onEdit={() => setEditCustom(true)} />
             <div>
               <h4 className="mb-2 text-sm font-semibold">Recent {isCustomer ? "invoices" : "bills"}</h4>
               <ul className="divide-y divide-neutral-100 rounded-xl border border-neutral-200 dark:divide-neutral-700 dark:border-neutral-700">
@@ -250,7 +318,7 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
                           <span className="ml-2 text-neutral-500">{fmtDate(d.doc.issue_date)}</span>
                         </span>
                         <span className="flex items-center gap-3">
-                          <span className="tabular-nums">{fmtCurrency(d.totals.total)}</span>
+                          <span className="tabular-nums">{fmtMoney(d.totals.total, d.currency)}</span>
                           <StatusBadge status={d.status} />
                         </span>
                       </Link>
@@ -269,6 +337,16 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
         )}
       </RightDrawer>
 
+      {viewing && (
+        <EditCustomFieldsModal
+          entity={entity}
+          recordId={viewing.id}
+          recordLabel={viewing.name}
+          values={viewing.custom_fields}
+          open={editCustom}
+          onClose={() => setEditCustom(false)}
+        />
+      )}
       <PartyFormModal kind={kind} open={formOpen} onClose={() => setFormOpen(false)} party={editing} />
       <DocumentFormModal
         kind={isCustomer ? "invoice" : "bill"}

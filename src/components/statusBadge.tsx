@@ -31,6 +31,8 @@ const STATUS_COLORS: Record<string, string> = {
   // integrations
   CONNECTED: GREEN,
   WARNING: AMBER,
+  INFO: BLUE,
+  NEUTRAL: NEUTRAL,
   ERROR: RED,
   NOT_CONNECTED: NEUTRAL,
   SUCCESS: GREEN,

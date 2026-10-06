@@ -6,6 +6,9 @@ import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { Field, FormError, Toggle, inputClass } from "@/components/ui";
 import { useLedger } from "@/store/ledgerStore";
 import type { Party } from "@/models/accounting";
+import { CustomFieldInputs } from "@/components/customFields";
+import { defaultCustomValues } from "@/lib/customFields";
+import { BASE_CURRENCY } from "@/utils/format";
 
 interface PartyFormModalProps {
   kind: "customer" | "supplier";
@@ -22,6 +25,7 @@ const empty = {
   tin: "",
   payment_terms_days: "30",
   credit_limit: "0",
+  currency: BASE_CURRENCY,
   active: true,
 };
 
@@ -31,7 +35,8 @@ const PartyFormModal = ({ kind, open, onClose, party }: PartyFormModalProps) => 
   const [custom, setCustom] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const entity = kind === "customer" ? "Customer" : "Supplier";
-  const customFields = state.customFields.filter((f) => f.entity === entity);
+  const currencies = state.currencies.filter((c) => c.is_active || c.code === party?.currency);
+  const hasDocs = !!party && (kind === "customer" ? state.invoices.some((d) => d.customer_id === party.id) : state.bills.some((d) => d.supplier_id === party.id));
 
   useEffect(() => {
     if (!open) return;
@@ -46,19 +51,19 @@ const PartyFormModal = ({ kind, open, onClose, party }: PartyFormModalProps) => 
             tin: party.tin ?? "",
             payment_terms_days: String(party.payment_terms_days),
             credit_limit: String(party.credit_limit),
+            currency: party.currency,
             active: party.status === "ACTIVE",
           }
         : empty,
     );
-    setCustom(party?.custom_fields ?? {});
+    setCustom(party ? (party.custom_fields ?? {}) : defaultCustomValues(state.customFields, entity));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, party]);
 
-  const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
+  const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const submit = () => {
-    const missing = customFields.find((f) => f.required && !custom[f.key]?.trim());
-    if (missing) return setError(`${missing.label} is required.`);
     const res = actions.saveParty(
       kind,
       {
@@ -69,6 +74,7 @@ const PartyFormModal = ({ kind, open, onClose, party }: PartyFormModalProps) => 
         tin: form.tin || undefined,
         payment_terms_days: Number(form.payment_terms_days) || 0,
         credit_limit: Number(form.credit_limit) || 0,
+        currency: form.currency,
         status: form.active ? "ACTIVE" : "INACTIVE",
         custom_fields: custom,
       },
@@ -110,40 +116,28 @@ const PartyFormModal = ({ kind, open, onClose, party }: PartyFormModalProps) => 
         <Field label="Payment terms (days)">
           <input type="number" min={0} value={form.payment_terms_days} onChange={set("payment_terms_days")} className={inputClass} />
         </Field>
-        <Field label={kind === "customer" ? "Credit limit" : "Spend limit"} hint="0 means no limit">
+        <Field label={kind === "customer" ? "Credit limit (GH₵)" : "Spend limit (GH₵)"} hint="0 means no limit">
           <input type="number" min={0} value={form.credit_limit} onChange={set("credit_limit")} className={inputClass} />
         </Field>
+        <Field
+          label="Default currency"
+          hint={hasDocs ? "Changing it only affects new documents" : "Pre-selected on new invoices and bills; can be changed per document"}
+        >
+          <select value={form.currency} onChange={set("currency")} className={inputClass}>
+            {currencies.map((c) => (
+              <option key={c.code} value={c.code}>
+                {c.code} · {c.name}
+              </option>
+            ))}
+          </select>
+        </Field>
 
-        {customFields.length > 0 && (
-          <div className="sm:col-span-2 mt-2 border-t border-neutral-200 pt-4 dark:border-neutral-700">
-            <p className="mb-3 text-sm font-semibold">Custom fields</p>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              {customFields.map((f) => (
-                <Field key={f.id} label={f.label} required={f.required} hint={f.scope === "SOURCE_REFERENCE" ? "Reference from a source system" : undefined}>
-                  {f.type === "SELECT" ? (
-                    <select
-                      value={custom[f.key] ?? ""}
-                      onChange={(e) => setCustom((c) => ({ ...c, [f.key]: e.target.value }))}
-                      className={inputClass}
-                    >
-                      <option value="">—</option>
-                      {f.options?.map((o) => (
-                        <option key={o}>{o}</option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input
-                      type={f.type === "NUMBER" ? "number" : f.type === "DATE" ? "date" : "text"}
-                      value={custom[f.key] ?? ""}
-                      onChange={(e) => setCustom((c) => ({ ...c, [f.key]: e.target.value }))}
-                      className={inputClass}
-                    />
-                  )}
-                </Field>
-              ))}
-            </div>
-          </div>
-        )}
+        <CustomFieldInputs
+          entity={entity}
+          values={custom}
+          onChange={setCustom}
+          className="sm:col-span-2 mt-2 border-t border-neutral-200 pt-4 dark:border-neutral-700"
+        />
 
         {party && (
           <div className="sm:col-span-2">

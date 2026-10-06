@@ -7,13 +7,16 @@ import type {
   BankAccount,
   BankStatementLine,
   CurrentUser,
+  Currency,
   CustomField,
   Customer,
   DataSource,
   Dimension,
   DocumentLine,
+  ExchangeRate,
   FieldMapping,
   FiscalPeriod,
+  FxRevaluation,
   ImportBatch,
   JournalEntry,
   JournalStatus,
@@ -28,6 +31,7 @@ import type {
   TaxCode,
 } from "@/models/accounting";
 import { documentTotals } from "@/lib/documents";
+import { accountBalances, carryingBaseFor, documentJournalLines, rateOn, settlementLines, toBase, type FxLine } from "@/lib/fx";
 import { round2 } from "@/utils/format";
 import { addDays, DEMO_TODAY } from "@/utils/dates";
 
@@ -90,6 +94,7 @@ export const ACC = {
   gcb: "acc_1020",
   eco: "acc_1030",
   momo: "acc_1040",
+  usd: "acc_1050",
   ar: "acc_1100",
   loans: "acc_1150",
   inventory: "acc_1200",
@@ -123,6 +128,8 @@ export const ACC = {
   repairs: "acc_6100",
   telecom: "acc_6110",
   interestExp: "acc_6120",
+  fxRealised: "acc_6130",
+  fxUnrealised: "acc_6140",
 } as const;
 
 const coaStamp = stamp("2026-01-02T08:00:00.000Z", USERS.ama);
@@ -152,12 +159,35 @@ const A = (
 const G = (code: string, name: string, type: AccountType) =>
   A(code, name, type, "GROUP", null, { is_group: true });
 
-const buildAccounts = (): Account[] => [
+const LEGACY_ACCOUNT_CODES: Record<string, string> = {
+  "1010": "QB-1000",
+  "1020": "QB-1001",
+  "1100": "QB-1200",
+  "1200": "QB-1300",
+  "1500": "QB-1500",
+  "2010": "QB-2000",
+  "2100": "QB-2200",
+  "4010": "QB-4000",
+  "5010": "QB-5000",
+  "6010": "QB-6000",
+  "6020": "QB-6100",
+};
+
+const buildAccounts = (): Account[] =>
+  chartOfAccounts().map((a) =>
+    LEGACY_ACCOUNT_CODES[a.code] ? { ...a, custom_fields: { legacy_account_code: LEGACY_ACCOUNT_CODES[a.code] } } : a,
+  );
+
+const chartOfAccounts = (): Account[] => [
   G("1000", "Assets", "ASSET"),
   A("1010", "Cash on Hand", "ASSET", "CASH", "1000", { is_bank: true }),
   A("1020", "GCB Bank – Operating", "ASSET", "CASH", "1000", { is_bank: true }),
   A("1030", "Ecobank – Payroll", "ASSET", "CASH", "1000", { is_bank: true }),
   A("1040", "MTN MoMo Merchant Wallet", "ASSET", "CASH", "1000", { is_bank: true }),
+  A("1050", "Ecobank – USD Domiciliary", "ASSET", "CASH", "1000", {
+    is_bank: true,
+    description: "Held in US dollars. Carried in GH₵ and revalued at each month end.",
+  }),
   A("1100", "Accounts Receivable", "ASSET", "RECEIVABLE", "1000", {
     is_control: true,
     description: "Control account. Posted only through sales invoices and receipts.",
@@ -206,6 +236,12 @@ const buildAccounts = (): Account[] => [
   A("6100", "Repairs & Maintenance", "EXPENSE", "OPERATING_EXPENSE", "6000"),
   A("6110", "Internet & Telephone", "EXPENSE", "OPERATING_EXPENSE", "6000"),
   A("6120", "Interest Expense", "EXPENSE", "OPERATING_EXPENSE", "6000"),
+  A("6130", "Exchange Gains & Losses – Realised", "EXPENSE", "OPERATING_EXPENSE", "6000", {
+    description: "Difference between the rate on a foreign invoice or bill and the rate on the day it was settled. A credit balance is a net gain.",
+  }),
+  A("6140", "Exchange Gains & Losses – Unrealised", "EXPENSE", "OPERATING_EXPENSE", "6000", {
+    description: "Month-end revaluation of open foreign balances. Reversed on the first day of the next month.",
+  }),
 ];
 
 // ---------------------------------------------------------------------------
@@ -340,6 +376,53 @@ const buildPeriods = (): FiscalPeriod[] =>
   });
 
 // ---------------------------------------------------------------------------
+// Currencies and exchange rates (GH₵ per unit)
+// ---------------------------------------------------------------------------
+
+const buildCurrencies = (): Currency[] => [
+  { code: "GHS", name: "Ghana cedi", symbol: "GH₵", is_active: true },
+  { code: "USD", name: "US dollar", symbol: "US$", is_active: true },
+  { code: "EUR", name: "Euro", symbol: "€", is_active: true },
+  { code: "GBP", name: "British pound", symbol: "£", is_active: true },
+  { code: "NGN", name: "Nigerian naira", symbol: "₦", is_active: false },
+  { code: "XOF", name: "West African CFA franc", symbol: "CFA", is_active: false },
+];
+
+const RATE_CURVES: Record<string, { start: number; end: number; wobble: number }> = {
+  USD: { start: 12.2, end: 12.86, wobble: 0.07 },
+  EUR: { start: 13.3, end: 14.04, wobble: 0.09 },
+  GBP: { start: 15.5, end: 16.31, wobble: 0.1 },
+};
+
+/** Weekly Bank of Ghana reference rates, then daily up to the last business day before the demo date. */
+const buildExchangeRates = (): ExchangeRate[] => {
+  const rng = mulberry32(4471);
+  const dates: string[] = [];
+  for (let day = "2026-01-02"; day <= "2026-09-18"; day = addDays(day, 7)) dates.push(day);
+  for (let day = "2026-09-21"; day < DEMO_TODAY; day = addDays(day, 1)) {
+    const dow = new Date(`${day}T00:00:00Z`).getUTCDay();
+    if (dow !== 0 && dow !== 6) dates.push(day);
+  }
+  const span = (Date.parse(`${DEMO_TODAY}T00:00:00Z`) - Date.parse("2026-01-02T00:00:00Z")) / 86400000;
+  const out: ExchangeRate[] = [];
+  for (const [currency, c] of Object.entries(RATE_CURVES)) {
+    for (const date of dates) {
+      const t = (Date.parse(`${date}T00:00:00Z`) - Date.parse("2026-01-02T00:00:00Z")) / 86400000 / span;
+      const rate = c.start + (c.end - c.start) * t + c.wobble * Math.sin(t * 9) + (rng() - 0.5) * 0.04;
+      out.push({
+        id: `fx_${currency}_${date}`,
+        currency,
+        date,
+        rate: Math.round(rate * 10000) / 10000,
+        source: "BANK_OF_GHANA",
+        ...stamp(ts(date, 8, 30), SYSTEM),
+      });
+    }
+  }
+  return out;
+};
+
+// ---------------------------------------------------------------------------
 // Parties
 // ---------------------------------------------------------------------------
 
@@ -365,6 +448,7 @@ const party = (
   status: "ACTIVE",
   external_reference: null,
   source: "MANUAL",
+  currency: "GHS",
   ...stamp("2026-01-03T10:00:00.000Z", USERS.efua),
   ...extra,
 });
@@ -373,7 +457,7 @@ const buildCustomers = (): Customer[] => [
   party("cus_01", "C-0001", "Adom Supermarket Ltd", "Kumasi", 30, 120000, {
     source: "STORE_MANAGEMENT",
     external_reference: "SM-CUST-0045",
-    custom_fields: { sales_region: "Ashanti", store_customer_no: "SM-CUST-0045" },
+    custom_fields: { sales_region: "Ashanti", key_account: "true", store_customer_no: "SM-CUST-0045" },
   }),
   party("cus_02", "C-0002", "Nyame Dua Hardware", "Kumasi", 30, 80000, {
     custom_fields: { sales_region: "Ashanti" },
@@ -388,12 +472,12 @@ const buildCustomers = (): Customer[] => [
   }),
   party("cus_05", "C-0005", "Takoradi Harbour Traders", "Takoradi", 45, 150000, {
     tin: "C0004417821",
-    custom_fields: { sales_region: "Western" },
+    custom_fields: { sales_region: "Western", key_account: "true" },
   }),
   party("cus_06", "C-0006", "Akwaaba Hotels Group", "Accra", 30, 100000, {
     source: "IMPORT",
     external_reference: "QB-CUS-131",
-    custom_fields: { sales_region: "Greater Accra", quickbooks_id: "131" },
+    custom_fields: { sales_region: "Greater Accra", key_account: "true", quickbooks_id: "131" },
   }),
   party("cus_07", "C-0007", "Bekwai Rural Bank", "Bekwai", 30, 40000, {
     custom_fields: { sales_region: "Ashanti" },
@@ -416,23 +500,45 @@ const buildCustomers = (): Customer[] => [
     status: "INACTIVE",
     custom_fields: { sales_region: "Central" },
   }),
+  party("cus_13", "C-0013", "Lomé Distribution SARL", "Lomé", 30, 15000, {
+    currency: "EUR",
+    email: "compta@lomedistribution.tg",
+    phone: "+228 22 21 4471",
+    custom_fields: { sales_region: "Volta" },
+  }),
+  party("cus_14", "C-0014", "Sahel Agro Exports", "Ouagadougou", 45, 25000, {
+    currency: "USD",
+    email: "finance@sahelagro.bf",
+    phone: "+226 25 30 1188",
+    custom_fields: { sales_region: "Northern", key_account: "true" },
+  }),
 ];
 
-const buildSuppliers = (): Supplier[] => [
-  party("sup_01", "S-0001", "Tema Wholesale Foods Ltd", "Tema", 30, 0, { tin: "C0001982245" }),
-  party("sup_02", "S-0002", "Kumasi Packaging Co.", "Kumasi", 30, 0),
-  party("sup_03", "S-0003", "Volta Power Distribution", "Kumasi", 14, 0),
-  party("sup_04", "S-0004", "Aqua Supply Ghana", "Kumasi", 14, 0),
-  party("sup_05", "S-0005", "AfriNet Telecoms", "Accra", 14, 0),
-  party("sup_06", "S-0006", "Adinkra Logistics", "Kumasi", 30, 0, {
-    source: "IMPORT",
-    external_reference: "QB-VEN-022",
-  }),
-  party("sup_07", "S-0007", "Sika Media Advertising", "Accra", 30, 0),
-  party("sup_08", "S-0008", "Boateng & Partners Chartered Accountants", "Kumasi", 30, 0),
-  party("sup_09", "S-0009", "Prime Office Supplies", "Kumasi", 14, 0),
-  party("sup_10", "S-0010", "Nkwanta Motors Workshop", "Kumasi", 14, 0),
-];
+const buildSuppliers = (): Supplier[] => {
+  const cat = (supplier_category: string) => ({ custom_fields: { supplier_category } });
+  return [
+    party("sup_01", "S-0001", "Tema Wholesale Foods Ltd", "Tema", 30, 0, { tin: "C0001982245", ...cat("Goods for resale") }),
+    party("sup_02", "S-0002", "Kumasi Packaging Co.", "Kumasi", 30, 0, cat("Goods for resale")),
+    party("sup_03", "S-0003", "Volta Power Distribution", "Kumasi", 14, 0, cat("Utilities")),
+    party("sup_04", "S-0004", "Aqua Supply Ghana", "Kumasi", 14, 0, cat("Utilities")),
+    party("sup_05", "S-0005", "AfriNet Telecoms", "Accra", 14, 0, cat("Utilities")),
+    party("sup_06", "S-0006", "Adinkra Logistics", "Kumasi", 30, 0, {
+      source: "IMPORT",
+      external_reference: "QB-VEN-022",
+      ...cat("Logistics"),
+    }),
+    party("sup_07", "S-0007", "Sika Media Advertising", "Accra", 30, 0, cat("Professional services")),
+    party("sup_08", "S-0008", "Boateng & Partners Chartered Accountants", "Kumasi", 30, 0, cat("Professional services")),
+    party("sup_09", "S-0009", "Prime Office Supplies", "Kumasi", 14, 0, cat("Office & admin")),
+    party("sup_10", "S-0010", "Nkwanta Motors Workshop", "Kumasi", 14, 0, cat("Professional services")),
+    party("sup_11", "S-0011", "Guangzhou Packaging Industries", "Guangzhou", 60, 0, {
+      currency: "USD",
+      email: "export@gzpackaging.cn",
+      phone: "+86 20 8391 4471",
+      ...cat("Imports"),
+    }),
+  ];
+};
 
 // ---------------------------------------------------------------------------
 // Ledger seed
@@ -483,7 +589,12 @@ const actorFor = (type: SourceType): Actor => {
   }
 };
 
-const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: TaxCode[]): SeedState => {
+const buildLedger = (
+  customers: Customer[],
+  suppliers: Supplier[],
+  taxCodes: TaxCode[],
+  rates: ExchangeRate[],
+): SeedState => {
   const rng = mulberry32(20261005);
   const int = (min: number, max: number) => Math.floor(min + rng() * (max - min + 1));
   const money = (min: number, max: number, step = 10) => Math.round((min + rng() * (max - min)) / step) * step;
@@ -498,12 +609,13 @@ const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: Tax
     date: string;
     memo: string;
     source: SourceRef;
-    lines: LineSpec[];
+    lines: (LineSpec | FxLine)[];
     by?: Actor;
     status?: JournalStatus;
     branch?: string;
     reference?: string;
     hour?: number;
+    custom_fields?: Record<string, string>;
   }) => {
     jSeq += 1;
     const id = `jn_${jSeq}`;
@@ -522,17 +634,19 @@ const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: Tax
       source: p.source,
       branch_id: branch,
       lines: p.lines
-        .filter(([, dr, cr]) => round2(dr) !== 0 || round2(cr) !== 0)
-        .map(([account_id, debit, credit, description]) => {
+        .map((l): FxLine => (Array.isArray(l) ? { account_id: l[0], debit: l[1], credit: l[2], description: l[3] } : l))
+        .filter((l) => round2(l.debit) !== 0 || round2(l.credit) !== 0)
+        .map((l) => {
           lSeq += 1;
           return {
             id: `jl_${lSeq}`,
-            account_id,
-            debit: round2(debit),
-            credit: round2(credit),
-            description,
+            account_id: l.account_id,
+            debit: round2(l.debit),
+            credit: round2(l.credit),
+            description: l.description,
             branch_id: branch,
             cost_centre_id: null,
+            ...(l.currency ? { currency: l.currency, amount_fc: l.amount_fc ?? null } : {}),
           };
         }),
       posted_at: posted ? at : null,
@@ -540,6 +654,7 @@ const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: Tax
       approved_by: null,
       reversal_of_id: null,
       reversed_by_id: null,
+      custom_fields: p.custom_fields,
       ...stamp(at, by),
     };
     journals.push(entry);
@@ -650,6 +765,8 @@ const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: Tax
       }
     }
     const branch = customer.city === "Accra" ? BR.osu : customer.city === "Takoradi" ? BR.tkd : BR.adum;
+    const route =
+      customer.city === "Tamale" ? "Northern" : branch === BR.osu ? "Accra corridor" : branch === BR.tkd ? "Western" : "Kumasi metro";
     const invoice: SalesInvoice = {
       id: `inv_${invSeq}`,
       number: `INV-2026-${String(invSeq).padStart(4, "0")}`,
@@ -658,10 +775,17 @@ const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: Tax
       due_date: addDays(issue, customer.payment_terms_days),
       state: draft ? "DRAFT" : "APPROVED",
       lines,
+      currency: "GHS",
+      exchange_rate: 1,
       amount_paid: 0,
+      amount_paid_base: 0,
       journal_id: null,
       branch_id: branch,
       source: { type: "MANUAL" },
+      custom_fields: {
+        delivery_route: route,
+        ...(invSeq % 3 === 0 ? { customer_po: `PO-${customer.code.slice(2)}-${String(invSeq).padStart(3, "0")}` } : {}),
+      },
       ...stamp(ts(issue, 10, invSeq % 60), USERS.efua),
     };
     invoices.push(invoice);
@@ -710,10 +834,14 @@ const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: Tax
       due_date: addDays(issue, supplier.payment_terms_days),
       state: "APPROVED",
       lines: docLines,
+      currency: "GHS",
+      exchange_rate: 1,
       amount_paid: 0,
+      amount_paid_base: 0,
       journal_id: null,
       branch_id: BR.adum,
       source: { type: "MANUAL" },
+      custom_fields: { purchase_order_no: `PO-2026-${String(billSeq).padStart(3, "0")}` },
       ...stamp(ts(issue, 11, billSeq % 60), USERS.kofi),
     };
     bills.push(bill);
@@ -739,7 +867,101 @@ const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: Tax
 
   const cust = (id: string) => customers.find((c) => c.id === id)!;
   const sup = (id: string) => suppliers.find((s) => s.id === id)!;
-  const activeCustomers = customers.filter((c) => c.status === "ACTIVE");
+  const activeCustomers = customers.filter((c) => c.status === "ACTIVE" && c.currency === "GHS");
+
+  const fx = (currency: string, date: string) => rateOn(rates, currency, date)!.rate;
+  const pay = (kind: "RECEIPT" | "PAYMENT", doc: SalesInvoice | PurchaseBill, date: string, amount: number, bank: string) =>
+    plannedPayments.push({ kind, doc, date, amount, method: "BANK_TRANSFER", bank });
+
+  const createForeignInvoice = (customer: Customer, issue: string, line: Omit<DocumentLine, "id">, po: string) => {
+    invSeq += 1;
+    const rate = fx(customer.currency, issue);
+    const lines = [{ ...line, id: `il_${invSeq}_0` }];
+    const invoice: SalesInvoice = {
+      id: `inv_${invSeq}`,
+      number: `INV-2026-${String(invSeq).padStart(4, "0")}`,
+      customer_id: customer.id,
+      issue_date: issue,
+      due_date: addDays(issue, customer.payment_terms_days),
+      state: "APPROVED",
+      lines,
+      currency: customer.currency,
+      exchange_rate: rate,
+      amount_paid: 0,
+      amount_paid_base: 0,
+      journal_id: null,
+      branch_id: BR.adum,
+      source: { type: "MANUAL" },
+      custom_fields: { customer_po: po, delivery_route: "Export" },
+      ...stamp(ts(issue, 10, invSeq % 60), USERS.efua),
+    };
+    invoices.push(invoice);
+    const cost = round2(toBase(line.quantity * line.unit_price, rate) * 0.6);
+    const journal = J({
+      date: issue,
+      memo: `Sales invoice ${invoice.number} – ${customer.name}`,
+      source: { type: "SALES", reference: invoice.number, document_id: invoice.id },
+      lines: [
+        ...documentJournalLines({
+          lines,
+          taxCodes,
+          currency: invoice.currency,
+          rate,
+          partyAccount: ACC.ar,
+          partyName: customer.name,
+          kind: "SALE",
+          fallbackTaxAccount: ACC.vatOut,
+        }),
+        [ACC.cogs, cost, 0, "Cost of goods delivered"],
+        [ACC.inventory, 0, cost],
+      ],
+    });
+    invoice.journal_id = journal.id;
+    return invoice;
+  };
+
+  const createForeignBill = (supplier: Supplier, issue: string, line: Omit<DocumentLine, "id">, ref: string) => {
+    billSeq += 1;
+    const rate = fx(supplier.currency, issue);
+    const lines = [{ ...line, id: `bl_${billSeq}_0` }];
+    const bill: PurchaseBill = {
+      id: `bill_${billSeq}`,
+      number: `BILL-2026-${String(billSeq).padStart(4, "0")}`,
+      supplier_reference: ref,
+      supplier_id: supplier.id,
+      issue_date: issue,
+      due_date: addDays(issue, supplier.payment_terms_days),
+      state: "APPROVED",
+      lines,
+      currency: supplier.currency,
+      exchange_rate: rate,
+      amount_paid: 0,
+      amount_paid_base: 0,
+      journal_id: null,
+      branch_id: BR.adum,
+      source: { type: "MANUAL" },
+      custom_fields: { purchase_order_no: `PO-2026-${String(billSeq).padStart(3, "0")}` },
+      ...stamp(ts(issue, 11, billSeq % 60), USERS.kofi),
+    };
+    bills.push(bill);
+    const journal = J({
+      date: issue,
+      memo: `Supplier bill ${bill.number} – ${supplier.name}`,
+      source: { type: "PURCHASES", reference: bill.number, document_id: bill.id },
+      lines: documentJournalLines({
+        lines,
+        taxCodes,
+        currency: bill.currency,
+        rate,
+        partyAccount: ACC.ap,
+        partyName: supplier.name,
+        kind: "PURCHASE",
+        fallbackTaxAccount: ACC.vatIn,
+      }),
+    });
+    bill.journal_id = journal.id;
+    return bill;
+  };
 
   for (let m = 1; m <= 10; m++) {
     const monthName = MONTH_NAMES[m - 1];
@@ -813,6 +1035,44 @@ const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: Tax
       ], `ADL-${int(1000, 9999)}`);
     }
 
+    // Foreign-currency trade: imports from China in US$, exports to Togo (EUR) and Burkina Faso (US$)
+    if (m === 4) {
+      const b = createForeignBill(sup("sup_11"), d(4, 10), {
+        description: "PET preform bottles – carton of 1,000", quantity: 130, unit_price: 50, tax_code_id: TAX.zero, account_id: ACC.inventory,
+      }, "GZP-2604-118");
+      pay("PAYMENT", b, d(6, 5), 6500, "ba_gcb");
+    }
+    if (m === 5) {
+      const i = createForeignInvoice(cust("cus_13"), d(5, 6), {
+        description: "Rice – 25kg bags (export)", quantity: 400, unit_price: 24.5, tax_code_id: TAX.zero, account_id: ACC.sales,
+      }, "LD-PO-0512");
+      pay("RECEIPT", i, d(6, 10), 9800, "ba_gcb");
+    }
+    if (m === 7) {
+      const i = createForeignInvoice(cust("cus_14"), d(7, 14), {
+        description: "Granulated sugar – 50kg bags (export)", quantity: 150, unit_price: 80, tax_code_id: TAX.zero, account_id: ACC.sales,
+      }, "SAE-PO-2214");
+      pay("RECEIPT", i, d(8, 25), 12000, "ba_usd");
+    }
+    if (m === 8) {
+      const b = createForeignBill(sup("sup_11"), d(8, 12), {
+        description: "Shrink film rolls – 500mm", quantity: 205, unit_price: 40, tax_code_id: TAX.zero, account_id: ACC.inventory,
+      }, "GZP-2608-203");
+      pay("PAYMENT", b, d(9, 20), 4000, "ba_usd");
+    }
+    if (m === 9) {
+      createForeignInvoice(cust("cus_13"), d(9, 8), {
+        description: "Golden Palm vegetable oil – 25L (export)", quantity: 149, unit_price: 50, tax_code_id: TAX.zero, account_id: ACC.sales,
+      }, "LD-PO-0577");
+      const i = createForeignInvoice(cust("cus_14"), d(9, 16), {
+        description: "Rice – 25kg bags (export)", quantity: 300, unit_price: 31, tax_code_id: TAX.zero, account_id: ACC.sales,
+      }, "SAE-PO-2291");
+      pay("RECEIPT", i, d(9, 29), 5000, "ba_usd");
+      createForeignBill(sup("sup_11"), d(9, 22), {
+        description: "Printed labels & shipping cartons", quantity: 1800, unit_price: 3, tax_code_id: TAX.zero, account_id: ACC.inventory,
+      }, "GZP-2609-247");
+    }
+
     // Rent
     if (inMonth(1)) {
       J({
@@ -849,6 +1109,7 @@ const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: Tax
         date: d(m, 10),
         memo: `Loan repayments batch – ${monthName} (LoanDrift)`,
         source: { type: "LOANS", reference: `LD-REPAY-2026-${pad(m)}` },
+        custom_fields: { loan_reference: `LD-BATCH-2026-${pad(m)}` },
         lines: [
           [ACC.gcb, principal + interest + fees, 0],
           [ACC.loans, 0, principal, "Principal recovered"],
@@ -995,10 +1256,33 @@ const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: Tax
     date: d(1, 15),
     memo: "Annual fire & burglary insurance – Gye Nyame Insurance",
     source: { type: "MANUAL", reference: "GNI-POL-2026-0117" },
+    custom_fields: { supporting_document: "PV-2026-0117 · Finance cabinet A" },
     lines: [
       [ACC.prepaid, 9600, 0],
       [ACC.gcb, 0, 9600],
     ],
+  });
+  const fundRate = fx("USD", d(2, 3));
+  J({
+    date: d(2, 3),
+    memo: "Purchase of US$5,000 for import payments (GCB → Ecobank USD)",
+    source: { type: "BANKING", reference: "FX-BUY-0203" },
+    by: USERS.ama,
+    lines: [
+      { account_id: ACC.usd, debit: toBase(5000, fundRate), credit: 0, currency: "USD", amount_fc: 5000 },
+      [ACC.gcb, 0, toBase(5000, fundRate)],
+    ],
+  });
+  const chargeRate = fx("USD", d(9, 30));
+  J({
+    date: d(9, 30),
+    memo: "Ecobank USD account maintenance fee – September",
+    source: { type: "BANKING", reference: "ECO-USD-CHG-09" },
+    lines: [
+      [ACC.bankCharges, toBase(35, chargeRate), 0],
+      { account_id: ACC.usd, debit: 0, credit: toBase(35, chargeRate), currency: "USD", amount_fc: 35 },
+    ],
+    hour: 21,
   });
   J({
     date: d(5, 12),
@@ -1089,13 +1373,29 @@ const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: Tax
   plannedPayments.sort((a, b) => a.date.localeCompare(b.date));
   const receipts: Payment[] = [];
   const supplierPayments: Payment[] = [];
-  const bankGl: Record<string, string> = { ba_gcb: ACC.gcb, ba_momo: ACC.momo };
+  const bankGl: Record<string, string> = { ba_gcb: ACC.gcb, ba_momo: ACC.momo, ba_usd: ACC.usd };
+  const bankCurrency: Record<string, string> = { ba_usd: "USD" };
   for (const p of plannedPayments) {
     const isReceipt = p.kind === "RECEIPT";
     const list = isReceipt ? receipts : supplierPayments;
     const number = `${isReceipt ? "RCT" : "PAY"}-2026-${String(list.length + 1).padStart(4, "0")}`;
     const partyId = isReceipt ? (p.doc as SalesInvoice).customer_id : (p.doc as PurchaseBill).supplier_id;
     const partyName = (isReceipt ? customers : suppliers).find((x) => x.id === partyId)!.name;
+    const total = documentTotals(p.doc.lines, taxCodes).total;
+    const payRate = p.doc.currency === "GHS" ? 1 : fx(p.doc.currency, p.date);
+    const carrying = carryingBaseFor(p.doc, total, p.amount);
+    const settlement = settlementLines({
+      kind: p.kind,
+      currency: p.doc.currency,
+      amountFc: p.amount,
+      payRate,
+      carryingBase: carrying,
+      bankGl: bankGl[p.bank],
+      bankCurrency: bankCurrency[p.bank] ?? "GHS",
+      partyAccount: isReceipt ? ACC.ar : ACC.ap,
+      partyName,
+      fxAccount: ACC.fxRealised,
+    });
     const journal = J({
       date: p.date,
       memo: isReceipt
@@ -1103,17 +1403,10 @@ const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: Tax
         : `Payment ${number} to ${partyName} for ${p.doc.number}`,
       source: { type: isReceipt ? "SALES" : "PURCHASES", reference: number, document_id: p.doc.id },
       branch: p.doc.branch_id ?? BR.adum,
-      lines: isReceipt
-        ? [
-            [bankGl[p.bank], p.amount, 0],
-            [ACC.ar, 0, p.amount, partyName],
-          ]
-        : [
-            [ACC.ap, p.amount, 0, partyName],
-            [bankGl[p.bank], 0, p.amount],
-          ],
+      lines: settlement.lines,
     });
     p.doc.amount_paid = round2(p.doc.amount_paid + p.amount);
+    p.doc.amount_paid_base = round2(p.doc.amount_paid_base + carrying);
     list.push({
       id: `${isReceipt ? "rcp" : "pmt"}_${list.length + 1}`,
       number,
@@ -1121,6 +1414,10 @@ const buildLedger = (customers: Customer[], suppliers: Supplier[], taxCodes: Tax
       document_id: p.doc.id,
       date: p.date,
       amount: p.amount,
+      currency: p.doc.currency,
+      exchange_rate: payRate,
+      base_amount: settlement.bankBase,
+      fx_gain_loss: settlement.fxGainLoss,
       method: p.method,
       bank_account_id: p.bank,
       reference: p.method === "CHEQUE" ? `CHQ ${int(100000, 999999)}` : `TRF${int(10000000, 99999999)}`,
@@ -1286,6 +1583,18 @@ const buildBanking = (journals: JournalEntry[]) => {
       statement_balance: ledgerBalance(ACC.momo, statementTo),
       statement_date: statementTo,
       last_reconciled_at: "2026-10-01T10:12:00.000Z",
+      ...bankStamp,
+    },
+    {
+      id: "ba_usd",
+      name: "Ecobank USD Domiciliary",
+      bank: "Ecobank Ghana",
+      account_number: "••••7702",
+      gl_account_id: ACC.usd,
+      currency: "USD",
+      statement_balance: accountBalances(journals, ACC.usd, statementTo).fc,
+      statement_date: statementTo,
+      last_reconciled_at: "2026-10-01T10:20:00.000Z",
       ...bankStamp,
     },
     {
@@ -1709,31 +2018,73 @@ const buildFieldMappings = (): FieldMapping[] => [
 
 const CF = (
   id: string,
-  entity: string,
+  entity: CustomField["entity"],
+  position: number,
   key: string,
   label: string,
   type: CustomField["type"],
   scope: CustomField["scope"],
-  options?: string[],
-  required = false,
-): CustomField => ({ id, entity, key, label, type, scope, options, required, ...stamp("2026-01-05T09:00:00.000Z", USERS.ama) });
+  extra: Partial<CustomField> = {},
+): CustomField => ({
+  id,
+  entity,
+  key,
+  label,
+  type,
+  scope,
+  required: false,
+  is_active: true,
+  position,
+  show_in_list: false,
+  ...stamp("2026-01-05T09:00:00.000Z", USERS.ama),
+  ...extra,
+});
 
 const buildCustomFields = (): CustomField[] => [
-  CF("cf_1", "Customer", "sales_region", "Sales region", "SELECT", "FINANCIAL", [
-    "Ashanti",
-    "Greater Accra",
-    "Western",
-    "Central",
-    "Northern",
-    "Volta",
-  ]),
-  CF("cf_2", "Customer", "store_customer_no", "Store customer number", "TEXT", "SOURCE_REFERENCE"),
-  CF("cf_3", "Customer", "quickbooks_id", "QuickBooks customer ID", "TEXT", "SOURCE_REFERENCE"),
-  CF("cf_4", "Invoice", "pos_terminal", "POS terminal", "TEXT", "SOURCE_REFERENCE"),
-  CF("cf_5", "Bill", "purchase_order_no", "Purchase order number", "TEXT", "FINANCIAL", undefined, true),
-  CF("cf_6", "Journal line", "legacy_account_code", "Legacy account code", "TEXT", "SOURCE_REFERENCE"),
-  CF("cf_7", "Journal line", "loan_reference", "Loan reference", "TEXT", "SOURCE_REFERENCE"),
-  CF("cf_8", "Supplier", "ghipss_branch_code", "Bank branch sort code", "TEXT", "SOURCE_REFERENCE"),
+  CF("cf_1", "Customer", 1, "sales_region", "Sales region", "SELECT", "FINANCIAL", {
+    options: ["Ashanti", "Greater Accra", "Western", "Central", "Northern", "Volta"],
+    show_in_list: true,
+    description: "Used for regional sales reporting.",
+  }),
+  CF("cf_9", "Customer", 2, "key_account", "Key account", "BOOLEAN", "FINANCIAL", {
+    show_in_list: true,
+    default_value: "false",
+    description: "Key accounts have a named relationship manager and quarterly reviews.",
+  }),
+  CF("cf_2", "Customer", 3, "store_customer_no", "Store customer number", "TEXT", "SOURCE_REFERENCE", {
+    description: "Customer number in Store Management.",
+  }),
+  CF("cf_3", "Customer", 4, "quickbooks_id", "QuickBooks customer ID", "TEXT", "SOURCE_REFERENCE"),
+  CF("cf_10", "Supplier", 1, "supplier_category", "Supplier category", "SELECT", "FINANCIAL", {
+    options: ["Goods for resale", "Imports", "Utilities", "Logistics", "Professional services", "Office & admin"],
+    show_in_list: true,
+    description: "Groups spend for purchasing reviews.",
+  }),
+  CF("cf_8", "Supplier", 2, "ghipss_branch_code", "Bank branch sort code", "TEXT", "SOURCE_REFERENCE"),
+  CF("cf_11", "Invoice", 1, "customer_po", "Customer PO number", "TEXT", "FINANCIAL", {
+    show_in_list: true,
+    description: "The customer's purchase order number. Printed on the invoice.",
+  }),
+  CF("cf_12", "Invoice", 2, "delivery_route", "Delivery route", "SELECT", "FINANCIAL", {
+    options: ["Kumasi metro", "Accra corridor", "Western", "Northern", "Export"],
+    show_in_list: true,
+  }),
+  CF("cf_4", "Invoice", 3, "pos_terminal", "POS terminal", "TEXT", "SOURCE_REFERENCE"),
+  CF("cf_5", "Bill", 1, "purchase_order_no", "Purchase order number", "TEXT", "FINANCIAL", {
+    required: true,
+    show_in_list: true,
+    description: "Our PO number. Bills without one cannot be approved.",
+  }),
+  CF("cf_7", "Journal", 1, "loan_reference", "Loan batch reference", "TEXT", "SOURCE_REFERENCE", {
+    description: "Filled in by LoanDrift for repayment and disbursement batches.",
+  }),
+  CF("cf_13", "Journal", 2, "supporting_document", "Supporting document", "TEXT", "FINANCIAL", {
+    description: "Voucher number and where the paper copy is filed.",
+  }),
+  CF("cf_6", "Account", 1, "legacy_account_code", "Legacy account code", "TEXT", "SOURCE_REFERENCE", {
+    show_in_list: true,
+    description: "Account code in QuickBooks before go-live. Used to map imported history.",
+  }),
 ];
 
 const ruleStamp = stamp("2026-01-04T12:00:00.000Z", USERS.ama);
@@ -2015,6 +2366,9 @@ const buildOrg = (): OrgSettings => ({
   invoice_prefix: "INV-2026-",
   bill_prefix: "BILL-2026-",
   journal_prefix: "JE-2026-",
+  fx_realised_account_id: ACC.fxRealised,
+  fx_unrealised_account_id: ACC.fxUnrealised,
+  fx_rate_tolerance_pct: 2,
 });
 
 export const buildSeed = () => {
@@ -2022,7 +2376,8 @@ export const buildSeed = () => {
   const taxCodes = buildTaxCodes();
   const customers = buildCustomers();
   const suppliers = buildSuppliers();
-  const ledger = buildLedger(customers, suppliers, taxCodes);
+  const exchangeRates = buildExchangeRates();
+  const ledger = buildLedger(customers, suppliers, taxCodes, exchangeRates);
   const banking = buildBanking(ledger.journals);
   return {
     accounts,
@@ -2037,6 +2392,9 @@ export const buildSeed = () => {
     importBatches: buildImportBatches(ledger.journals),
     fieldMappings: buildFieldMappings(),
     customFields: buildCustomFields(),
+    currencies: buildCurrencies(),
+    exchangeRates,
+    fxRevaluations: [] as FxRevaluation[],
     rules: buildRules(),
     auditEvents: buildAuditEvents(ledger.journals),
     org: buildOrg(),

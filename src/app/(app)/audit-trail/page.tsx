@@ -38,8 +38,20 @@ const entityHref = (e: AuditEvent): string | null => {
     case "Accounting rule":
       return "/integrations/rules";
     case "Field mapping":
-    case "Custom field":
       return "/integrations/mappings";
+    case "Custom field":
+      return "/settings?tab=fields";
+    case "Currency":
+    case "Exchange rate":
+      return "/settings?tab=currencies";
+    case "FX revaluation":
+      return "/accounting/revaluation";
+    case "Customer":
+      return `/sales/customers?open=${e.entity_id}`;
+    case "Supplier":
+      return `/purchases/suppliers?open=${e.entity_id}`;
+    case "Journal":
+      return `/accounting/journals?open=${e.entity_id}`;
     case "Bank account":
     case "Statement line":
       return "/banking/reconciliation";

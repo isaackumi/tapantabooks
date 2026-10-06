@@ -10,6 +10,8 @@ import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { ALL_USERS, useCurrentUser, useLedger } from "@/store/ledgerStore";
 import type { Dimension, OrgSettings } from "@/models/accounting";
 import { useQueryParam } from "@/utils/useQueryParam";
+import { CurrencySettings } from "@/components/settings/currencySettings";
+import { CustomFieldsSettings } from "@/components/settings/customFieldsSettings";
 import { classNames, fmtCurrency } from "@/utils/format";
 
 const DIMENSION_KINDS: { id: Dimension["kind"]; label: string; hint: string }[] = [
@@ -68,7 +70,7 @@ const OrganisationTab = () => {
           <Field label="TIN">
             <input value={form.tin} onChange={(e) => set("tin", e.target.value)} className={`${inputClass} font-mono`} />
           </Field>
-          <Field label="Base currency" hint="Fixed once transactions exist">
+          <Field label="Base currency" hint="Fixed once transactions exist. Foreign currencies are under the Currencies tab.">
             <input value={form.base_currency} disabled className={`${inputClass} opacity-70`} />
           </Field>
           <Field label="Email">
@@ -330,10 +332,12 @@ export default function SettingsPage() {
 
   return (
     <div>
-      <PageHeader title="Settings" description="Organisation details, ledger controls, reporting dimensions and team access." />
+      <PageHeader title="Settings" description="Organisation details, ledger controls, currencies, custom fields, reporting dimensions and team access." />
       <Tabs
         tabs={[
           { id: "ORG", label: "Organisation & controls" },
+          { id: "CURRENCIES", label: "Currencies", count: state.currencies.filter((c) => c.is_active).length },
+          { id: "FIELDS", label: "Custom fields", count: state.customFields.filter((f) => f.is_active).length },
           { id: "DIMENSIONS", label: "Dimensions", count: state.dimensions.length },
           { id: "USERS", label: "Users & roles", count: ALL_USERS.length },
         ]}
@@ -342,6 +346,8 @@ export default function SettingsPage() {
       />
       <div className="mt-6">
         {tab === "ORG" && <OrganisationTab />}
+        {tab === "CURRENCIES" && <CurrencySettings />}
+        {tab === "FIELDS" && <CustomFieldsSettings />}
         {tab === "DIMENSIONS" && <DimensionsTab />}
         {tab === "USERS" && <UsersTab />}
       </div>

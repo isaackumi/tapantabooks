@@ -1,8 +1,26 @@
 export const CURRENCY_SYMBOL = "GH₵";
+export const BASE_CURRENCY = "GHS";
+
+export const CURRENCY_SYMBOLS: Record<string, string> = {
+  GHS: "GH₵",
+  USD: "US$",
+  EUR: "€",
+  GBP: "£",
+  NGN: "₦",
+  XOF: "CFA",
+  CNY: "CN¥",
+  ZAR: "R",
+  AED: "AED",
+};
 
 const numberFormatter = new Intl.NumberFormat("en-GH", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
+});
+
+const rateFormatter = new Intl.NumberFormat("en-GH", {
+  minimumFractionDigits: 4,
+  maximumFractionDigits: 4,
 });
 
 export const round2 = (value: number) => Math.round(value * 100) / 100;
@@ -15,6 +33,18 @@ export const fmtCurrency = (value: number) => {
     ? `-${CURRENCY_SYMBOL} ${numberFormatter.format(Math.abs(v))}`
     : `${CURRENCY_SYMBOL} ${numberFormatter.format(v)}`;
 };
+
+export const currencySymbol = (code: string) => CURRENCY_SYMBOLS[code] ?? code;
+
+/** Amount in any currency; falls back to the base-currency format. */
+export const fmtMoney = (value: number, currency: string = BASE_CURRENCY) => {
+  if (currency === BASE_CURRENCY) return fmtCurrency(value);
+  const v = round2(value);
+  const symbol = currencySymbol(currency);
+  return v < 0 ? `-${symbol} ${numberFormatter.format(Math.abs(v))}` : `${symbol} ${numberFormatter.format(v)}`;
+};
+
+export const fmtRate = (value: number) => rateFormatter.format(value);
 
 /** Accounting style for statements: negatives in brackets, zero as a dash. */
 export const fmtAccounting = (value: number) => {

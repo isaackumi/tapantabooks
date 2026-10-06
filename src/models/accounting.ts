@@ -25,6 +25,7 @@ export interface Account extends AuditFields {
   is_control: boolean;
   is_bank: boolean;
   description?: string;
+  custom_fields?: Record<string, string>;
 }
 
 export type SourceType =
@@ -36,6 +37,7 @@ export type SourceType =
   | "LOANS"
   | "HR"
   | "IMPORT"
+  | "FX_REVALUATION"
   | "SYSTEM";
 
 export interface SourceRef {
@@ -55,6 +57,10 @@ export interface JournalLine {
   credit: number;
   branch_id?: string | null;
   cost_centre_id?: string | null;
+  /** Set on lines that carry a foreign-currency amount (foreign AR/AP, foreign bank accounts). */
+  currency?: string | null;
+  /** Foreign amount on the same side as the debit or credit. */
+  amount_fc?: number | null;
 }
 
 export interface JournalEntry extends AuditFields {
@@ -72,6 +78,7 @@ export interface JournalEntry extends AuditFields {
   approved_by?: string | null;
   reversal_of_id?: string | null;
   reversed_by_id?: string | null;
+  custom_fields?: Record<string, string>;
 }
 
 export type PartyStatus = "ACTIVE" | "INACTIVE";
@@ -89,6 +96,8 @@ export interface Party extends AuditFields {
   status: PartyStatus;
   external_reference?: string | null;
   source: SourceType;
+  /** Default currency for new documents with this party. */
+  currency: string;
   custom_fields?: Record<string, string>;
 }
 
@@ -124,11 +133,18 @@ export interface SalesInvoice extends AuditFields {
   due_date: string;
   state: DocumentState;
   lines: DocumentLine[];
+  currency: string;
+  /** Base currency per one unit of the document currency, fixed when the document is approved. */
+  exchange_rate: number;
+  /** In the document currency. */
   amount_paid: number;
+  /** Base-currency carrying value already settled, at the document rate. */
+  amount_paid_base: number;
   journal_id: string | null;
   branch_id: string | null;
   notes?: string;
   source: SourceRef;
+  custom_fields?: Record<string, string>;
 }
 
 export interface PurchaseBill extends AuditFields {
@@ -140,11 +156,15 @@ export interface PurchaseBill extends AuditFields {
   due_date: string;
   state: DocumentState;
   lines: DocumentLine[];
+  currency: string;
+  exchange_rate: number;
   amount_paid: number;
+  amount_paid_base: number;
   journal_id: string | null;
   branch_id: string | null;
   notes?: string;
   source: SourceRef;
+  custom_fields?: Record<string, string>;
 }
 
 export type PaymentMethod = "BANK_TRANSFER" | "MOBILE_MONEY" | "CASH" | "CHEQUE";
@@ -155,7 +175,14 @@ export interface Payment extends AuditFields {
   party_id: string;
   document_id: string;
   date: string;
+  /** In the document currency. */
   amount: number;
+  currency: string;
+  /** Rate on the payment date. */
+  exchange_rate: number;
+  base_amount: number;
+  /** Realised exchange difference in base currency: positive is a gain, negative a loss. */
+  fx_gain_loss: number;
   method: PaymentMethod;
   bank_account_id: string;
   reference?: string;
@@ -277,15 +304,69 @@ export interface FieldMapping {
 
 export type CustomFieldScope = "FINANCIAL" | "SOURCE_REFERENCE";
 
+export const CUSTOM_FIELD_ENTITIES = ["Customer", "Supplier", "Invoice", "Bill", "Journal", "Account"] as const;
+export type CustomFieldEntity = (typeof CUSTOM_FIELD_ENTITIES)[number];
+
+export type CustomFieldType = "TEXT" | "LONG_TEXT" | "NUMBER" | "DATE" | "SELECT" | "BOOLEAN";
+
 export interface CustomField extends AuditFields {
   id: string;
-  entity: string;
+  entity: CustomFieldEntity;
   key: string;
   label: string;
-  type: "TEXT" | "NUMBER" | "DATE" | "SELECT";
+  type: CustomFieldType;
   scope: CustomFieldScope;
   options?: string[];
   required: boolean;
+  /** Help text shown under the input. */
+  description?: string;
+  default_value?: string;
+  is_active: boolean;
+  /** Order within the entity, lowest first. */
+  position: number;
+  show_in_list: boolean;
+}
+
+export interface Currency {
+  code: string;
+  name: string;
+  symbol: string;
+  is_active: boolean;
+}
+
+export type ExchangeRateSource = "MANUAL" | "BANK_OF_GHANA";
+
+export interface ExchangeRate extends AuditFields {
+  id: string;
+  currency: string;
+  date: string;
+  /** Base currency per one unit of `currency`. */
+  rate: number;
+  source: ExchangeRateSource;
+}
+
+export interface FxRevaluationLine {
+  kind: "RECEIVABLE" | "PAYABLE" | "BANK";
+  currency: string;
+  label: string;
+  account_id: string;
+  amount_fc: number;
+  carrying_base: number;
+  rate: number;
+  revalued_base: number;
+  /** Positive is a gain. */
+  difference: number;
+}
+
+export interface FxRevaluation extends AuditFields {
+  id: string;
+  period_id: string;
+  as_at: string;
+  rates: Record<string, number>;
+  lines: FxRevaluationLine[];
+  net_difference: number;
+  journal_id: string;
+  reversal_journal_id: string;
 }
 
 export type RuleAmountBasis = "TOTAL" | "SUBTOTAL" | "TAX" | "COST" | "PRINCIPAL" | "INTEREST" | "FEES";
@@ -340,6 +421,10 @@ export interface OrgSettings {
   invoice_prefix: string;
   bill_prefix: string;
   journal_prefix: string;
+  fx_realised_account_id: string;
+  fx_unrealised_account_id: string;
+  /** Warn when a rate typed on a document differs from the latest reference rate by more than this. */
+  fx_rate_tolerance_pct: number;
 }
 
 export interface CurrentUser {

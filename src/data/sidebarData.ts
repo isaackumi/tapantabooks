@@ -21,6 +21,7 @@ import {
   FiTrendingUp,
   FiActivity,
   FiClock,
+  FiGlobe,
 } from "react-icons/fi";
 import { TbScale, TbFileImport } from "react-icons/tb";
 
@@ -47,6 +48,7 @@ export const navigation: NavigationItem[] = [
   { name: "Journals", href: "/accounting/journals", icon: FiBookOpen, group: "Accounting" },
   { name: "General Ledger", href: "/accounting/general-ledger", icon: FiLayers, group: "Accounting" },
   { name: "Trial Balance", href: "/accounting/trial-balance", icon: TbScale, group: "Accounting" },
+  { name: "Currency Revaluation", href: "/accounting/revaluation", icon: FiGlobe, group: "Accounting" },
   { name: "Fiscal Periods", href: "/accounting/periods", icon: FiCalendar, group: "Accounting" },
 
   { name: "Customers", href: "/sales/customers", icon: FiUsers, group: "Sales" },

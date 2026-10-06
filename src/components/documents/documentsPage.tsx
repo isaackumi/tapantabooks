@@ -1,8 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { FiDollarSign, FiFileText, FiPlus } from "react-icons/fi";
-import { Button, PageHeader } from "@/components/ui";
+import { FiDollarSign, FiDownload, FiFileText, FiPlus } from "react-icons/fi";
+import { Button, PageHeader, compactInputClass } from "@/components/ui";
 import { Tabs } from "@/components/tabs";
 import StatCard from "@/components/statCard";
 import StatusBadge from "@/components/statusBadge";
@@ -16,7 +16,17 @@ import { billRows, invoiceRows, type DocumentRow } from "@/store/selectors";
 import type { DocumentDisplayStatus, PurchaseBill, SalesInvoice } from "@/models/accounting";
 import { matchesSearch, useGlobalState } from "@/utils/globalStateContext";
 import { useQueryParam } from "@/utils/useQueryParam";
-import { fmtCurrency, fmtDate } from "@/utils/format";
+import { BASE_CURRENCY, fmtCurrency, fmtDate, fmtMoney, fmtRate } from "@/utils/format";
+import { downloadCsv } from "@/utils/csv";
+import {
+  CustomFieldFilters,
+  customCsvHeaders,
+  customCsvValues,
+  customFieldColumns,
+  customSearchText,
+  matchesCustomFilters,
+  useEntityFields,
+} from "@/components/customFields";
 import { addDays, daysBetween, monthKey, todayIso } from "@/utils/dates";
 
 type Doc = SalesInvoice | PurchaseBill;
@@ -40,27 +50,70 @@ const DocumentsPage = ({ kind }: { kind: "invoice" | "bill" }) => {
   const [newOpen, setNewOpen] = useState(false);
   const [payOpen, setPayOpen] = useState(false);
   const [viewId, setViewId] = useState<string | null>(null);
+  const [currency, setCurrency] = useState("");
+  const [cfFilters, setCfFilters] = useState<Record<string, string>>({});
   useQueryParam("tab", setTab);
   useQueryParam("open", setViewId);
   const today = todayIso();
+  const entity = isInvoice ? "Invoice" : "Bill";
+  const fields = useEntityFields(entity);
 
   const rows = useMemo<Row[]>(() => (isInvoice ? invoiceRows(state) : billRows(state)), [state, isInvoice]);
   const filtered = rows.filter(
     (r) =>
       (tab === "ALL" || r.status === tab) &&
+      (!currency || r.currency === currency) &&
+      matchesCustomFilters(r.doc.custom_fields, cfFilters) &&
       matchesSearch(
         searchQuery,
         r.doc.number,
         r.party?.name,
         r.doc.source.reference,
+        r.currency,
+        customSearchText(r.doc.custom_fields),
         isInvoice ? undefined : (r.doc as PurchaseBill).supplier_reference,
       ),
   );
+  const currenciesInUse = [...new Set(rows.map((r) => r.currency))].sort();
+
+  const exportCsv = () =>
+    downloadCsv(`${isInvoice ? "invoices" : "bills"}-${today}.csv`, [
+      [
+        isInvoice ? "Invoice" : "Bill",
+        ...(isInvoice ? [] : ["Supplier invoice no."]),
+        isInvoice ? "Customer" : "Supplier",
+        "Issue date",
+        "Due date",
+        "Currency",
+        "Rate",
+        "Total",
+        "Balance due",
+        "Total (GHS)",
+        "Balance due (GHS)",
+        "Status",
+        ...customCsvHeaders(fields),
+      ],
+      ...filtered.map((r) => [
+        r.doc.number,
+        ...(isInvoice ? [] : [(r.doc as PurchaseBill).supplier_reference]),
+        r.party?.name,
+        r.doc.issue_date,
+        r.doc.due_date,
+        r.currency,
+        r.doc.exchange_rate,
+        r.totals.total,
+        r.outstanding_fc,
+        r.total_base,
+        r.outstanding,
+        r.status,
+        ...customCsvValues(fields, r.doc.custom_fields),
+      ]),
+    ]);
 
   const outstanding = rows.reduce((s, r) => s + r.outstanding, 0);
   const overdue = rows.filter((r) => r.status === "OVERDUE");
   const payments = isInvoice ? state.receipts : state.supplierPayments;
-  const settledThisMonth = payments.filter((p) => monthKey(p.date) === monthKey(today)).reduce((s, p) => s + p.amount, 0);
+  const settledThisMonth = payments.filter((p) => monthKey(p.date) === monthKey(today)).reduce((s, p) => s + p.base_amount, 0);
   const dueThisWeek = rows
     .filter((r) => r.outstanding > 0 && r.doc.due_date >= today && r.doc.due_date <= addDays(today, 7))
     .reduce((s, r) => s + r.outstanding, 0);
@@ -109,17 +162,37 @@ const DocumentsPage = ({ kind }: { kind: "invoice" | "bill" }) => {
       id: "total",
       header: "Total",
       align: "right",
-      accessorFn: (r) => r.totals.total,
-      cell: ({ row }) => <span className="tabular-nums">{fmtCurrency(row.original.totals.total)}</span>,
+      accessorFn: (r) => r.total_base,
+      cell: ({ row }) => {
+        const r = row.original;
+        return (
+          <div className="tabular-nums">
+            <p>{fmtMoney(r.totals.total, r.currency)}</p>
+            {r.currency !== BASE_CURRENCY && (
+              <p className="text-xs text-neutral-500 dark:text-neutral-400" title={`Booked at ${fmtRate(r.doc.exchange_rate)}`}>
+                {fmtCurrency(r.total_base)}
+              </p>
+            )}
+          </div>
+        );
+      },
     },
     {
       accessorKey: "outstanding",
       header: "Balance due",
       align: "right",
-      cell: ({ row }) => (
-        <span className="tabular-nums font-medium">{row.original.outstanding ? fmtCurrency(row.original.outstanding) : "—"}</span>
-      ),
+      cell: ({ row }) => {
+        const r = row.original;
+        if (!r.outstanding) return <span className="text-neutral-400">—</span>;
+        return (
+          <div className="tabular-nums">
+            <p className="font-medium">{fmtMoney(r.outstanding_fc, r.currency)}</p>
+            {r.currency !== BASE_CURRENCY && <p className="text-xs text-neutral-500 dark:text-neutral-400">{fmtCurrency(r.outstanding)}</p>}
+          </div>
+        );
+      },
     },
+    ...customFieldColumns<Row>(fields, (r) => r.doc.custom_fields),
     { accessorKey: "status", header: "Status", cell: ({ row }) => <StatusBadge status={row.original.status} /> },
   ];
 
@@ -134,6 +207,9 @@ const DocumentsPage = ({ kind }: { kind: "invoice" | "bill" }) => {
         }
         actions={
           <>
+            <Button variant="secondary" icon={FiDownload} onClick={exportCsv}>
+              Export
+            </Button>
             <Button variant="secondary" icon={FiDollarSign} onClick={() => setPayOpen(true)}>
               {isInvoice ? "Record receipt" : "Record payment"}
             </Button>
@@ -164,6 +240,19 @@ const DocumentsPage = ({ kind }: { kind: "invoice" | "bill" }) => {
         tabs={TABS.map((t) => ({ ...t, count: t.id === "ALL" ? rows.length : rows.filter((r) => r.status === t.id).length }))}
         value={tab}
         onChange={setTab}
+        actions={
+          <div className="flex flex-wrap gap-2">
+            {currenciesInUse.length > 1 && (
+              <select value={currency} onChange={(e) => setCurrency(e.target.value)} className={`${compactInputClass.replace("w-full ", "")} w-auto`} aria-label="Currency">
+                <option value="">All currencies</option>
+                {currenciesInUse.map((c) => (
+                  <option key={c}>{c}</option>
+                ))}
+              </select>
+            )}
+            <CustomFieldFilters fields={fields} value={cfFilters} onChange={setCfFilters} />
+          </div>
+        }
       />
       <div className="mt-4">
         <DataTable

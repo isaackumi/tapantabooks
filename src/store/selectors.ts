@@ -7,6 +7,7 @@ import type {
 } from "@/models/accounting";
 import { documentTotals, displayStatus, type DocumentTotals } from "@/lib/documents";
 import { balancesByAccount } from "@/lib/ledger";
+import { accountBalances, isForeign, toBase } from "@/lib/fx";
 import { round2 } from "@/utils/format";
 import { todayIso } from "@/utils/dates";
 import type { LedgerState } from "./ledgerStore";
@@ -14,10 +15,30 @@ import type { LedgerState } from "./ledgerStore";
 export interface DocumentRow<T> {
   doc: T;
   party: Party | undefined;
+  /** In the document currency. */
   totals: DocumentTotals;
   status: DocumentDisplayStatus;
+  /** Base currency at the document rate; every total, ageing and report uses this. */
   outstanding: number;
+  /** In the document currency. */
+  outstanding_fc: number;
+  total_base: number;
+  currency: string;
 }
+
+const money = (
+  doc: { state: string; currency: string; exchange_rate: number; amount_paid: number; amount_paid_base: number },
+  totals: DocumentTotals,
+) => {
+  const open = doc.state === "APPROVED";
+  const total_base = toBase(totals.total, doc.exchange_rate);
+  return {
+    total_base,
+    currency: doc.currency,
+    outstanding: open ? round2(total_base - doc.amount_paid_base) : 0,
+    outstanding_fc: open ? round2(totals.total - doc.amount_paid) : 0,
+  };
+};
 
 export const invoiceRows = (s: LedgerState): DocumentRow<SalesInvoice>[] => {
   const parties = new Map(s.customers.map((c) => [c.id, c]));
@@ -30,7 +51,7 @@ export const invoiceRows = (s: LedgerState): DocumentRow<SalesInvoice>[] => {
         party: parties.get(doc.customer_id),
         totals,
         status,
-        outstanding: doc.state === "APPROVED" ? round2(totals.total - doc.amount_paid) : 0,
+        ...money(doc, totals),
       };
     })
     .sort((a, b) => b.doc.issue_date.localeCompare(a.doc.issue_date) || b.doc.number.localeCompare(a.doc.number));
@@ -47,7 +68,7 @@ export const billRows = (s: LedgerState): DocumentRow<PurchaseBill>[] => {
         party: parties.get(doc.supplier_id),
         totals,
         status,
-        outstanding: doc.state === "APPROVED" ? round2(totals.total - doc.amount_paid) : 0,
+        ...money(doc, totals),
       };
     })
     .sort((a, b) => b.doc.issue_date.localeCompare(a.doc.issue_date) || b.doc.number.localeCompare(a.doc.number));
@@ -76,7 +97,17 @@ export const postableAccounts = (s: LedgerState, opts: { includeControl?: boolea
 
 export const accountLabel = (a: Account | undefined) => (a ? `${a.code} · ${a.name}` : "—");
 
-export const bankLedgerBalances = (s: LedgerState) => {
+/** Ledger balance of each bank account in its own currency. */
+export const bankLedgerBalances = (s: LedgerState, asAt?: string) =>
+  new Map(
+    s.bankAccounts.map((b) => {
+      const bal = accountBalances(s.journals, b.gl_account_id, asAt);
+      return [b.id, isForeign(b.currency) ? bal.fc : bal.base];
+    }),
+  );
+
+/** Ledger balance of each bank account in base currency. */
+export const bankBaseBalances = (s: LedgerState) => {
   const balances = balancesByAccount(s.accounts, s.journals);
   return new Map(s.bankAccounts.map((b) => [b.id, balances.get(b.gl_account_id) ?? 0]));
 };

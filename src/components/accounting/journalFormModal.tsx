@@ -11,7 +11,10 @@ import { dimensionsOf } from "@/store/selectors";
 import { lineTotals } from "@/lib/ledger";
 import type { JournalEntry } from "@/models/accounting";
 import { todayIso } from "@/utils/dates";
-import { fmtCurrency, round2 } from "@/utils/format";
+import { currencySymbol, fmtCurrency, round2 } from "@/utils/format";
+import { CustomFieldInputs } from "@/components/customFields";
+import { defaultCustomValues } from "@/lib/customFields";
+import { isForeign } from "@/lib/fx";
 
 interface LineState {
   key: number;
@@ -20,6 +23,7 @@ interface LineState {
   debit: string;
   credit: string;
   cost_centre_id: string;
+  amount_fc: string;
 }
 
 let lineKey = 0;
@@ -30,6 +34,7 @@ const blankLine = (): LineState => ({
   debit: "",
   credit: "",
   cost_centre_id: "",
+  amount_fc: "",
 });
 
 interface JournalFormModalProps {
@@ -47,7 +52,12 @@ const JournalFormModal = ({ open, onClose, draft, onSaved }: JournalFormModalPro
   const [reference, setReference] = useState("");
   const [branchId, setBranchId] = useState("");
   const [lines, setLines] = useState<LineState[]>([blankLine(), blankLine()]);
+  const [custom, setCustom] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
+  const foreignGl = useMemo(
+    () => new Map(state.bankAccounts.filter((b) => isForeign(b.currency)).map((b) => [b.gl_account_id, b.currency])),
+    [state.bankAccounts],
+  );
 
   const branches = dimensionsOf(state, "BRANCH");
   const costCentres = dimensionsOf(state, "COST_CENTRE");
@@ -68,14 +78,17 @@ const JournalFormModal = ({ open, onClose, draft, onSaved }: JournalFormModalPro
           debit: l.debit ? String(l.debit) : "",
           credit: l.credit ? String(l.credit) : "",
           cost_centre_id: l.cost_centre_id ?? "",
+          amount_fc: l.amount_fc ? String(l.amount_fc) : "",
         })),
       );
+      setCustom(draft.custom_fields ?? {});
     } else {
       setDate(todayIso());
       setMemo("");
       setReference("");
       setBranchId(branches[0]?.id ?? "");
       setLines([blankLine(), blankLine()]);
+      setCustom(defaultCustomValues(state.customFields, "Journal"));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, draft]);
@@ -102,6 +115,7 @@ const JournalFormModal = ({ open, onClose, draft, onSaved }: JournalFormModalPro
     memo,
     reference: reference || undefined,
     branch_id: branchId || null,
+    custom_fields: custom,
     lines: lines
       .filter((l) => l.account_id || l.debit || l.credit)
       .map((l) => ({
@@ -110,6 +124,9 @@ const JournalFormModal = ({ open, onClose, draft, onSaved }: JournalFormModalPro
         debit: Number(l.debit) || 0,
         credit: Number(l.credit) || 0,
         cost_centre_id: l.cost_centre_id || null,
+        ...(foreignGl.has(l.account_id)
+          ? { currency: foreignGl.get(l.account_id)!, amount_fc: Number(l.amount_fc) || 0 }
+          : {}),
       })),
   });
 
@@ -225,6 +242,22 @@ const JournalFormModal = ({ open, onClose, draft, onSaved }: JournalFormModalPro
                     className={compactInputClass}
                     placeholder="Line note"
                   />
+                  {foreignGl.has(l.account_id) && (
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <span className="whitespace-nowrap text-xs text-neutral-500">
+                        {currencySymbol(foreignGl.get(l.account_id)!)} amount
+                      </span>
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={l.amount_fc}
+                        onChange={(e) => update(l.key, { amount_fc: e.target.value })}
+                        className={`${compactInputClass} text-right tabular-nums`}
+                        aria-label="Foreign currency amount"
+                      />
+                    </div>
+                  )}
                 </td>
                 <td className="px-3 py-2">
                   <select
@@ -325,6 +358,13 @@ const JournalFormModal = ({ open, onClose, draft, onSaved }: JournalFormModalPro
           </span>
         )}
       </div>
+
+      <CustomFieldInputs
+        entity="Journal"
+        values={custom}
+        onChange={setCustom}
+        className="mt-6 rounded-xl border border-neutral-200 p-4 dark:border-neutral-700"
+      />
     </Modal>
   );
 };

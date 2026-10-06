@@ -12,7 +12,11 @@ import { documentTotals, lineAmount } from "@/lib/documents";
 import type { AccountType, DocumentLine } from "@/models/accounting";
 import { ACC, TAX } from "@/mock/seed";
 import { todayIso } from "@/utils/dates";
-import { fmtCurrency } from "@/utils/format";
+import { BASE_CURRENCY, fmtCurrency, fmtMoney } from "@/utils/format";
+import { FxRateField, useFxRate } from "@/components/fxRateField";
+import { CustomFieldInputs } from "@/components/customFields";
+import { defaultCustomValues } from "@/lib/customFields";
+import { isForeign, toBase } from "@/lib/fx";
 
 export type DocumentKind = "invoice" | "bill";
 
@@ -61,7 +65,12 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
   const [branchId, setBranchId] = useState("");
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState<LineState[]>([blank(kind)]);
+  const [currency, setCurrency] = useState(BASE_CURRENCY);
+  const [custom, setCustom] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
+  const fx = useFxRate(currency, issueDate, open);
+  const entity = isInvoice ? "Invoice" : "Bill";
+  const currencies = state.currencies.filter((c) => c.is_active);
 
   useEffect(() => {
     if (!open) return;
@@ -73,6 +82,8 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
     setBranchId(branches[0]?.id ?? "");
     setNotes("");
     setLines([blank(kind)]);
+    setCurrency(party?.currency ?? BASE_CURRENCY);
+    setCustom(defaultCustomValues(state.customFields, isInvoice ? "Invoice" : "Bill"));
     setError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -80,7 +91,10 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
   const chooseParty = (id: string) => {
     setPartyId(id);
     const party = parties.find((p) => p.id === id);
-    if (party) setDueDate(defaultDueDate(issueDate, party.payment_terms_days));
+    if (party) {
+      setDueDate(defaultDueDate(issueDate, party.payment_terms_days));
+      setCurrency(party.currency);
+    }
   };
 
   const docLines: DocumentLine[] = lines.map((l) => ({
@@ -105,6 +119,9 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
       supplier_reference: supplierRef,
       branch_id: branchId || null,
       notes: notes || undefined,
+      currency,
+      exchange_rate: fx.rateValue,
+      custom_fields: custom,
       lines: docLines.map((l) => ({
         description: l.description,
         quantity: l.quantity,
@@ -174,6 +191,20 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
             />
           </Field>
         )}
+        <Field
+          label="Currency"
+          required
+          hint={party && party.currency !== currency ? `${party.name} usually trades in ${party.currency}` : undefined}
+        >
+          <select value={currency} onChange={(e) => setCurrency(e.target.value)} className={inputClass}>
+            {currencies.map((c) => (
+              <option key={c.code} value={c.code}>
+                {c.code} · {c.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <FxRateField currency={currency} fx={fx} className="md:col-span-2" />
         <Field label="Branch">
           <select value={branchId} onChange={(e) => setBranchId(e.target.value)} className={inputClass}>
             <option value="">No branch</option>
@@ -184,7 +215,12 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
             ))}
           </select>
         </Field>
-        <Field label="Notes" className={isInvoice ? "md:col-span-3" : "md:col-span-2"}>
+        <Field
+          label="Notes"
+          className={
+            isForeign(currency) ? (isInvoice ? "md:col-span-4" : "md:col-span-3") : isInvoice ? "md:col-span-2" : "md:col-span-1"
+          }
+        >
           <input
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
@@ -260,7 +296,7 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
                   </select>
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums text-neutral-700 dark:text-neutral-200">
-                  {fmtCurrency(lineAmount({ quantity: Number(l.quantity), unit_price: Number(l.unit_price) }))}
+                  {fmtMoney(lineAmount({ quantity: Number(l.quantity), unit_price: Number(l.unit_price) }), currency)}
                 </td>
                 <td className="px-2 py-2 text-center">
                   <button
@@ -288,23 +324,36 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
           <dl className="w-full max-w-xs space-y-1 text-sm">
             <div className="flex justify-between">
               <dt className="text-neutral-500 dark:text-neutral-400">Subtotal</dt>
-              <dd className="tabular-nums">{fmtCurrency(totals.subtotal)}</dd>
+              <dd className="tabular-nums">{fmtMoney(totals.subtotal, currency)}</dd>
             </div>
             {totals.taxByCode.map((t) => (
               <div key={t.tax_code_id} className="flex justify-between">
                 <dt className="text-neutral-500 dark:text-neutral-400">
                   {state.taxCodes.find((c) => c.id === t.tax_code_id)?.name}
                 </dt>
-                <dd className="tabular-nums">{fmtCurrency(t.amount)}</dd>
+                <dd className="tabular-nums">{fmtMoney(t.amount, currency)}</dd>
               </div>
             ))}
             <div className="flex justify-between border-t border-neutral-200 pt-1 text-base font-semibold dark:border-neutral-700">
               <dt>Total</dt>
-              <dd className="tabular-nums">{fmtCurrency(totals.total)}</dd>
+              <dd className="tabular-nums">{fmtMoney(totals.total, currency)}</dd>
             </div>
+            {isForeign(currency) && (
+              <div className="flex justify-between text-xs text-neutral-500 dark:text-neutral-400">
+                <dt>Posts to the ledger as</dt>
+                <dd className="tabular-nums">{fx.rateValue > 0 ? fmtCurrency(toBase(totals.total, fx.rateValue)) : "—"}</dd>
+              </div>
+            )}
           </dl>
         </div>
       </div>
+
+      <CustomFieldInputs
+        entity={entity}
+        values={custom}
+        onChange={setCustom}
+        className="mt-6 rounded-xl border border-neutral-200 p-4 dark:border-neutral-700"
+      />
     </Modal>
   );
 };

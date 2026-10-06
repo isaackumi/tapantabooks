@@ -8,7 +8,11 @@ import type {
   AuditEvent,
   AuditFields,
   Customer,
+  Currency,
   CustomField,
+  CustomFieldEntity,
+  ExchangeRate,
+  FxRevaluation,
   Dimension,
   DocumentLine,
   FieldMapping,
@@ -28,7 +32,18 @@ import type {
 import { buildSeed, CURRENT_USER, USERS, ACC, stamp, type SeedData } from "@/mock/seed";
 import { isBalanced, lineTotals } from "@/lib/ledger";
 import { documentTotals } from "@/lib/documents";
-import { fmtCurrency, round2 } from "@/utils/format";
+import {
+  carryingBaseFor,
+  documentJournalLines,
+  isForeign,
+  rateOn,
+  revaluationJournalLines,
+  revaluationLines,
+  settlementLines,
+  toBase,
+} from "@/lib/fx";
+import { customFieldUsage, normaliseCustomValues, recordsForEntity, validateCustomValues } from "@/lib/customFields";
+import { BASE_CURRENCY, fmtCurrency, fmtMoney, fmtRate, round2 } from "@/utils/format";
 import { addDays, nowIso, todayIso } from "@/utils/dates";
 
 export type LedgerState = SeedData & { currentUserId: string };
@@ -48,6 +63,8 @@ export interface JournalDraftLine {
   debit: number;
   credit: number;
   cost_centre_id?: string | null;
+  currency?: string | null;
+  amount_fc?: number | null;
 }
 
 export interface JournalDraftInput {
@@ -56,6 +73,7 @@ export interface JournalDraftInput {
   reference?: string;
   branch_id: string | null;
   lines: JournalDraftLine[];
+  custom_fields?: Record<string, string>;
 }
 
 export type JournalIntent = "DRAFT" | "POST";
@@ -67,13 +85,19 @@ export interface DocumentInput {
   supplier_reference?: string;
   branch_id: string | null;
   notes?: string;
+  currency: string;
+  exchange_rate: number;
   lines: Omit<DocumentLine, "id">[];
+  custom_fields?: Record<string, string>;
 }
 
 export interface PaymentInput {
   document_id: string;
   date: string;
+  /** In the document currency. */
   amount: number;
+  /** Rate on the payment date; ignored for base-currency documents. */
+  exchange_rate: number;
   method: PaymentMethod;
   bank_account_id: string;
   reference?: string;
@@ -157,6 +181,10 @@ const validateLines = (
     if (dr < 0 || cr < 0) return `Line ${n}: amounts cannot be negative.`;
     if (dr > 0 && cr > 0) return `Line ${n}: enter a debit or a credit, not both.`;
     if (dr === 0 && cr === 0) return `Line ${n}: enter an amount.`;
+    const bank = s.bankAccounts.find((b) => b.gl_account_id === account.id);
+    if (bank && isForeign(bank.currency) && !(l.currency === bank.currency && (Number(l.amount_fc) || 0) > 0)) {
+      return `Line ${n}: ${account.name} is held in ${bank.currency}. Enter the ${bank.currency} amount as well.`;
+    }
   }
   if (!isBalanced(used)) {
     const t = lineTotals(used);
@@ -198,7 +226,9 @@ const writeJournal = (
         credit: round2(Number(l.credit) || 0),
         branch_id: input.branch_id,
         cost_centre_id: l.cost_centre_id ?? null,
+        ...(l.currency ? { currency: l.currency, amount_fc: l.amount_fc ?? null } : {}),
       })),
+    custom_fields: input.custom_fields && Object.keys(input.custom_fields).length ? input.custom_fields : undefined,
     posted_at: posted ? at : null,
     posted_by: posted ? user.name : null,
     approved_by: null,
@@ -220,44 +250,42 @@ const touch = <T extends { updated_at: string; updated_by: string | null; update
   row.updated_by_id = user.id;
 };
 
-const invoiceJournalLines = (
+const docJournalLines = (
   s: LedgerState,
-  lines: DocumentLine[],
+  doc: { lines: DocumentLine[]; currency: string; exchange_rate: number },
   partyAccount: string,
   partyName: string,
   kind: "SALE" | "PURCHASE",
-): JournalDraftLine[] => {
-  const totals = documentTotals(lines, s.taxCodes);
-  const byAccount = new Map<string, number>();
-  for (const l of lines) {
-    byAccount.set(l.account_id, round2((byAccount.get(l.account_id) ?? 0) + l.quantity * l.unit_price));
-  }
-  const taxLines = totals.taxByCode.map((t) => {
-    const code = s.taxCodes.find((c) => c.id === t.tax_code_id)!;
-    return {
-      account_id: (kind === "SALE" ? code.output_account_id : code.input_account_id) ?? ACC.vatOut,
-      amount: t.amount,
-      label: code.code,
-    };
+): JournalDraftLine[] =>
+  documentJournalLines({
+    lines: doc.lines,
+    taxCodes: s.taxCodes,
+    currency: doc.currency,
+    rate: doc.exchange_rate,
+    partyAccount,
+    partyName,
+    kind,
+    fallbackTaxAccount: kind === "SALE" ? ACC.vatOut : ACC.vatIn,
   });
-  if (kind === "SALE") {
-    return [
-      { account_id: partyAccount, debit: totals.total, credit: 0, description: partyName },
-      ...[...byAccount.entries()].map(([account_id, amount]) => ({ account_id, debit: 0, credit: amount })),
-      ...taxLines.map((t) => ({ account_id: t.account_id, debit: 0, credit: t.amount, description: t.label })),
-    ];
-  }
-  return [
-    ...[...byAccount.entries()].map(([account_id, amount]) => ({ account_id, debit: amount, credit: 0 })),
-    ...taxLines.map((t) => ({ account_id: t.account_id, debit: t.amount, credit: 0, description: t.label })),
-    { account_id: partyAccount, debit: 0, credit: totals.total, description: partyName },
-  ];
+
+const checkCustom = (s: LedgerState, entity: CustomFieldEntity, values: Record<string, string> | undefined) =>
+  validateCustomValues(s.customFields, entity, normaliseCustomValues(values));
+
+const checkCurrency = (s: LedgerState, currency: string, rate: number): string | null => {
+  if (currency === BASE_CURRENCY) return null;
+  const c = s.currencies.find((x) => x.code === currency);
+  if (!c) return `${currency} is not set up. Add it in Settings → Currencies.`;
+  if (!c.is_active) return `${currency} is switched off. Turn it on in Settings → Currencies.`;
+  if (!(rate > 0)) return `Enter the ${currency} exchange rate.`;
+  return null;
 };
 
 const validateDocument = (s: LedgerState, input: DocumentInput, partyLabel: string): string | null => {
   if (!input.party_id) return `Choose a ${partyLabel}.`;
   if (!input.issue_date) return "Choose an issue date.";
   if (!input.due_date) return "Choose a due date.";
+  const currencyError = checkCurrency(s, input.currency, input.exchange_rate);
+  if (currencyError) return currencyError;
   if (input.due_date < input.issue_date) return "The due date cannot be before the issue date.";
   if (input.lines.length === 0) return "Add at least one line.";
   for (const [i, l] of input.lines.entries()) {
@@ -268,7 +296,7 @@ const validateDocument = (s: LedgerState, input: DocumentInput, partyLabel: stri
     if (!l.account_id) return `Line ${n}: choose an account.`;
     if (!l.tax_code_id) return `Line ${n}: choose a tax code.`;
   }
-  return null;
+  return checkCustom(s, partyLabel === "customer" ? "Invoice" : "Bill", input.custom_fields);
 };
 
 const reverseInto = (s: LedgerState, original: JournalEntry, date: string, reason: string) => {
@@ -285,6 +313,8 @@ const reverseInto = (s: LedgerState, original: JournalEntry, date: string, reaso
         debit: l.credit,
         credit: l.debit,
         cost_centre_id: l.cost_centre_id,
+        currency: l.currency,
+        amount_fc: l.amount_fc,
       })),
     },
     "POSTED",
@@ -342,8 +372,11 @@ const useLedgerActions = (
         subtype: string;
         description?: string;
         is_bank?: boolean;
+        custom_fields?: Record<string, string>;
       }) =>
         commit((s) => {
+          const customError = checkCustom(s, "Account", input.custom_fields);
+          if (customError) return fail(customError);
           const code = input.code.trim();
           if (!/^\d{4}$/.test(code)) return fail("Account code must be four digits.");
           if (s.accounts.some((a) => a.code === code)) return fail(`Code ${code} is already used.`);
@@ -363,6 +396,7 @@ const useLedgerActions = (
             is_control: false,
             is_bank: !!input.is_bank,
             description: input.description?.trim() || undefined,
+            custom_fields: normaliseCustomValues(input.custom_fields),
             ...stamp(nowIso(), user),
           };
           s.accounts.push(account);
@@ -376,11 +410,19 @@ const useLedgerActions = (
           return ok(account, `${account.code} ${account.name} added`);
         }),
 
-      updateAccount: (id: string, patch: { name?: string; description?: string; is_active?: boolean }) =>
+      updateAccount: (
+        id: string,
+        patch: { name?: string; description?: string; is_active?: boolean; custom_fields?: Record<string, string> },
+      ) =>
         commit((s) => {
           const account = s.accounts.find((a) => a.id === id);
           if (!account) return fail("Account not found.");
           if (patch.name !== undefined && !patch.name.trim()) return fail("Name cannot be empty.");
+          if (patch.custom_fields) {
+            const customError = checkCustom(s, "Account", patch.custom_fields);
+            if (customError) return fail(customError);
+            account.custom_fields = normaliseCustomValues(patch.custom_fields, account.custom_fields);
+          }
           const changes: NonNullable<AuditEvent["changes"]> = [];
           if (patch.name !== undefined && patch.name.trim() !== account.name) {
             changes.push({ field: "name", from: account.name, to: patch.name.trim() });
@@ -408,6 +450,9 @@ const useLedgerActions = (
         commit((s) => {
           if (!input.memo.trim()) return fail("Add a memo describing the entry.");
           if (!input.date) return fail("Choose a date.");
+          const customError = checkCustom(s, "Journal", input.custom_fields);
+          if (customError) return fail(customError);
+          input = { ...input, custom_fields: normaliseCustomValues(input.custom_fields) };
           if (intent === "POST") {
             const periodError = checkPeriod(s, input.date);
             if (periodError) return fail(periodError);
@@ -441,6 +486,9 @@ const useLedgerActions = (
         commit((s) => {
           const j = s.journals.find((x) => x.id === id);
           if (!j || j.status !== "DRAFT") return fail("Only drafts can be edited.");
+          const customError = checkCustom(s, "Journal", input.custom_fields);
+          if (customError) return fail(customError);
+          j.custom_fields = normaliseCustomValues(input.custom_fields, j.custom_fields);
           j.date = input.date;
           j.memo = input.memo.trim();
           j.reference = input.reference?.trim() || undefined;
@@ -453,6 +501,7 @@ const useLedgerActions = (
             credit: round2(Number(l.credit) || 0),
             branch_id: input.branch_id,
             cost_centre_id: l.cost_centre_id ?? null,
+            ...(l.currency ? { currency: l.currency, amount_fc: l.amount_fc ?? null } : {}),
           }));
           touch(s, j);
           return ok(j, `${j.number} updated`);
@@ -618,12 +667,22 @@ const useLedgerActions = (
             return fail(`A ${kind} called ${name} already exists.`);
           }
           if ((input.payment_terms_days ?? 0) < 0) return fail("Payment terms cannot be negative.");
+          const currency = input.currency ?? BASE_CURRENCY;
+          if (currency !== BASE_CURRENCY && !s.currencies.some((c) => c.code === currency && c.is_active)) {
+            return fail(`${currency} is not an active currency.`);
+          }
+          const customError = checkCustom(s, kind === "customer" ? "Customer" : "Supplier", input.custom_fields);
+          if (customError) return fail(customError);
           if ((input.credit_limit ?? 0) < 0) return fail("Credit limit cannot be negative.");
           const user = actorOf(s);
           if (id) {
             const existing = list.find((p) => p.id === id);
             if (!existing) return fail(`${kind} not found.`);
-            Object.assign(existing, { ...input, name });
+            Object.assign(existing, {
+              ...input,
+              name,
+              custom_fields: normaliseCustomValues(input.custom_fields, existing.custom_fields),
+            });
             touch(s, existing);
             audit(s, {
               action: `${kind.toUpperCase()}.UPDATED`,
@@ -651,7 +710,8 @@ const useLedgerActions = (
             status: "ACTIVE",
             external_reference: input.external_reference || null,
             source: "MANUAL",
-            custom_fields: input.custom_fields ?? {},
+            currency,
+            custom_fields: normaliseCustomValues(input.custom_fields),
             ...stamp(nowIso(), user),
           };
           list.push(created);
@@ -689,11 +749,15 @@ const useLedgerActions = (
             due_date: input.due_date,
             state: approve ? "APPROVED" : "DRAFT",
             lines,
+            currency: input.currency,
+            exchange_rate: input.currency === BASE_CURRENCY ? 1 : input.exchange_rate,
             amount_paid: 0,
+            amount_paid_base: 0,
             journal_id: null,
             branch_id: input.branch_id,
             notes: input.notes,
             source: { type: "MANUAL" },
+            custom_fields: normaliseCustomValues(input.custom_fields),
             ...stamp(nowIso(), user),
           };
           if (approve) {
@@ -703,7 +767,7 @@ const useLedgerActions = (
                 date: invoice.issue_date,
                 memo: `Sales invoice ${invoice.number} – ${customer.name}`,
                 branch_id: invoice.branch_id,
-                lines: invoiceJournalLines(s, lines, ACC.ar, customer.name, "SALE"),
+                lines: docJournalLines(s, invoice, ACC.ar, customer.name, "SALE"),
               },
               "POSTED",
               { type: "SALES", reference: invoice.number, document_id: invoice.id },
@@ -716,7 +780,7 @@ const useLedgerActions = (
             entity_type: "Invoice",
             entity_id: invoice.id,
             entity_label: invoice.number,
-            summary: `${invoice.number} for ${customer.name} · ${fmtCurrency(documentTotals(lines, s.taxCodes).total)}`,
+            summary: `${invoice.number} for ${customer.name} · ${fmtMoney(documentTotals(lines, s.taxCodes).total, invoice.currency)}`,
           });
           return ok(invoice, approve ? `${invoice.number} approved and posted` : `${invoice.number} saved as draft`);
         }),
@@ -725,6 +789,8 @@ const useLedgerActions = (
         commit((s) => {
           const invoice = s.invoices.find((i) => i.id === id);
           if (!invoice || invoice.state !== "DRAFT") return fail("Only draft invoices can be approved.");
+          const invCurrencyError = checkCurrency(s, invoice.currency, invoice.exchange_rate);
+          if (invCurrencyError) return fail(invCurrencyError);
           const periodError = checkPeriod(s, invoice.issue_date);
           if (periodError) return fail(periodError);
           const customer = s.customers.find((c) => c.id === invoice.customer_id)!;
@@ -734,7 +800,7 @@ const useLedgerActions = (
               date: invoice.issue_date,
               memo: `Sales invoice ${invoice.number} – ${customer.name}`,
               branch_id: invoice.branch_id,
-              lines: invoiceJournalLines(s, invoice.lines, ACC.ar, customer.name, "SALE"),
+              lines: docJournalLines(s, invoice, ACC.ar, customer.name, "SALE"),
             },
             "POSTED",
             { type: "SALES", reference: invoice.number, document_id: invoice.id },
@@ -794,11 +860,17 @@ const useLedgerActions = (
           const amount = round2(Number(input.amount) || 0);
           if (amount <= 0) return fail("Enter an amount greater than zero.");
           if (amount > outstanding + 0.005) {
-            return fail(`Amount is more than the ${fmtCurrency(outstanding)} outstanding.`);
+            return fail(`Amount is more than the ${fmtMoney(outstanding, doc.currency)} outstanding.`);
           }
           if (input.date < doc.issue_date) return fail("Payment date cannot be before the document date.");
           const bank = s.bankAccounts.find((b) => b.id === input.bank_account_id);
           if (!bank) return fail("Choose the bank or cash account.");
+          if (isForeign(bank.currency) && bank.currency !== doc.currency) {
+            return fail(`${bank.name} holds ${bank.currency}. Use it only for ${bank.currency} documents.`);
+          }
+          const foreign = isForeign(doc.currency);
+          const payRate = foreign ? round2((Number(input.exchange_rate) || 0) * 10000) / 10000 : 1;
+          if (foreign && !(payRate > 0)) return fail(`Enter the ${doc.currency} rate on the payment date.`);
           const periodError = checkPeriod(s, input.date);
           if (periodError) return fail(periodError);
 
@@ -809,6 +881,19 @@ const useLedgerActions = (
             list.map((p) => p.number),
             isReceipt ? "RCT-2026-" : "PAY-2026-",
           );
+          const carrying = carryingBaseFor(doc, total, amount);
+          const settlement = settlementLines({
+            kind: isReceipt ? "RECEIPT" : "PAYMENT",
+            currency: doc.currency,
+            amountFc: amount,
+            payRate,
+            carryingBase: carrying,
+            bankGl: bank.gl_account_id,
+            bankCurrency: bank.currency,
+            partyAccount: isReceipt ? ACC.ar : ACC.ap,
+            partyName: party.name,
+            fxAccount: s.org.fx_realised_account_id,
+          });
           const j = writeJournal(
             s,
             {
@@ -818,15 +903,7 @@ const useLedgerActions = (
                 : `Payment ${number} to ${party.name} for ${doc.number}`,
               reference: input.reference,
               branch_id: doc.branch_id,
-              lines: isReceipt
-                ? [
-                    { account_id: bank.gl_account_id, debit: amount, credit: 0 },
-                    { account_id: ACC.ar, debit: 0, credit: amount, description: party.name },
-                  ]
-                : [
-                    { account_id: ACC.ap, debit: amount, credit: 0, description: party.name },
-                    { account_id: bank.gl_account_id, debit: 0, credit: amount },
-                  ],
+              lines: settlement.lines,
             },
             "POSTED",
             { type: isReceipt ? "SALES" : "PURCHASES", reference: number, document_id: doc.id },
@@ -839,6 +916,10 @@ const useLedgerActions = (
             document_id: doc.id,
             date: input.date,
             amount,
+            currency: doc.currency,
+            exchange_rate: payRate,
+            base_amount: settlement.bankBase,
+            fx_gain_loss: settlement.fxGainLoss,
             method: input.method,
             bank_account_id: bank.id,
             reference: input.reference?.trim() || undefined,
@@ -847,15 +928,20 @@ const useLedgerActions = (
           };
           list.push(payment);
           doc.amount_paid = round2(doc.amount_paid + amount);
+          doc.amount_paid_base = round2(doc.amount_paid_base + carrying);
           touch(s, doc);
+          const fxNote =
+            settlement.fxGainLoss === 0
+              ? ""
+              : ` Realised exchange ${settlement.fxGainLoss > 0 ? "gain" : "loss"} ${fmtCurrency(Math.abs(settlement.fxGainLoss))}.`;
           audit(s, {
             action: isReceipt ? "RECEIPT.RECORDED" : "PAYMENT.RECORDED",
             entity_type: isReceipt ? "Receipt" : "Supplier payment",
             entity_id: payment.id,
             entity_label: number,
-            summary: `${fmtCurrency(amount)} ${isReceipt ? "from" : "to"} ${party.name} against ${doc.number}.`,
+            summary: `${fmtMoney(amount, doc.currency)} ${isReceipt ? "from" : "to"} ${party.name} against ${doc.number}.${fxNote}`,
           });
-          return ok(payment, `${number} recorded · ${fmtCurrency(amount)}`);
+          return ok(payment, `${number} recorded · ${fmtMoney(amount, doc.currency)}${fxNote}`);
         }),
 
       // ---- Purchase bills ---------------------------------------------------
@@ -890,11 +976,15 @@ const useLedgerActions = (
             due_date: input.due_date,
             state: approve ? "APPROVED" : "DRAFT",
             lines,
+            currency: input.currency,
+            exchange_rate: input.currency === BASE_CURRENCY ? 1 : input.exchange_rate,
             amount_paid: 0,
+            amount_paid_base: 0,
             journal_id: null,
             branch_id: input.branch_id,
             notes: input.notes,
             source: { type: "MANUAL" },
+            custom_fields: normaliseCustomValues(input.custom_fields),
             ...stamp(nowIso(), user),
           };
           if (approve) {
@@ -904,7 +994,7 @@ const useLedgerActions = (
                 date: bill.issue_date,
                 memo: `Supplier bill ${bill.number} – ${supplier.name}`,
                 branch_id: bill.branch_id,
-                lines: invoiceJournalLines(s, lines, ACC.ap, supplier.name, "PURCHASE"),
+                lines: docJournalLines(s, bill, ACC.ap, supplier.name, "PURCHASE"),
               },
               "POSTED",
               { type: "PURCHASES", reference: bill.number, document_id: bill.id },
@@ -917,7 +1007,7 @@ const useLedgerActions = (
             entity_type: "Bill",
             entity_id: bill.id,
             entity_label: bill.number,
-            summary: `${bill.number} from ${supplier.name} · ${fmtCurrency(documentTotals(lines, s.taxCodes).total)}`,
+            summary: `${bill.number} from ${supplier.name} · ${fmtMoney(documentTotals(lines, s.taxCodes).total, bill.currency)}`,
           });
           return ok(bill, approve ? `${bill.number} approved and posted` : `${bill.number} saved as draft`);
         }),
@@ -926,6 +1016,10 @@ const useLedgerActions = (
         commit((s) => {
           const bill = s.bills.find((b) => b.id === id);
           if (!bill || bill.state !== "DRAFT") return fail("Only draft bills can be approved.");
+          const billCurrencyError = checkCurrency(s, bill.currency, bill.exchange_rate);
+          if (billCurrencyError) return fail(billCurrencyError);
+          const billCustomError = checkCustom(s, "Bill", bill.custom_fields);
+          if (billCustomError) return fail(billCustomError);
           const periodError = checkPeriod(s, bill.issue_date);
           if (periodError) return fail(periodError);
           const supplier = s.suppliers.find((c) => c.id === bill.supplier_id)!;
@@ -935,7 +1029,7 @@ const useLedgerActions = (
               date: bill.issue_date,
               memo: `Supplier bill ${bill.number} – ${supplier.name}`,
               branch_id: bill.branch_id,
-              lines: invoiceJournalLines(s, bill.lines, ACC.ap, supplier.name, "PURCHASE"),
+              lines: docJournalLines(s, bill, ACC.ap, supplier.name, "PURCHASE"),
             },
             "POSTED",
             { type: "PURCHASES", reference: bill.number, document_id: bill.id },
@@ -954,7 +1048,8 @@ const useLedgerActions = (
         }),
 
       // ---- Banking ----------------------------------------------------------
-      transferFunds: (input: { from: string; to: string; amount: number; date: string; memo: string }) =>
+      /** `amount` is in the currency of the account the money leaves; `rate` converts the foreign side. */
+      transferFunds: (input: { from: string; to: string; amount: number; date: string; memo: string; rate?: number }) =>
         commit((s) => {
           if (input.from === input.to) return fail("Choose two different accounts.");
           const from = s.bankAccounts.find((b) => b.id === input.from);
@@ -962,17 +1057,28 @@ const useLedgerActions = (
           if (!from || !to) return fail("Choose both accounts.");
           const amount = round2(Number(input.amount) || 0);
           if (amount <= 0) return fail("Enter an amount greater than zero.");
+          const foreignCurrencies = [...new Set([from.currency, to.currency].filter(isForeign))];
+          if (foreignCurrencies.length > 1) return fail("Transfers between two different foreign currencies are not supported.");
+          const fc = foreignCurrencies[0];
+          const rate = fc ? Number(input.rate) || 0 : 1;
+          if (fc && !(rate > 0)) return fail(`Enter the ${fc} rate for this transfer.`);
           const periodError = checkPeriod(s, input.date);
           if (periodError) return fail(periodError);
+          const fromForeign = isForeign(from.currency);
+          const base = fromForeign ? toBase(amount, rate) : amount;
+          const fcAmount = fc ? (fromForeign ? amount : round2(amount / rate)) : 0;
+          const tag = (b: typeof from) => (isForeign(b.currency) ? { currency: b.currency, amount_fc: fcAmount } : {});
           const j = writeJournal(
             s,
             {
               date: input.date,
-              memo: input.memo.trim() || `Transfer from ${from.name} to ${to.name}`,
+              memo:
+                input.memo.trim() ||
+                `Transfer from ${from.name} to ${to.name}${fc ? ` (${fmtMoney(fcAmount, fc)} @ ${fmtRate(rate)})` : ""}`,
               branch_id: null,
               lines: [
-                { account_id: to.gl_account_id, debit: amount, credit: 0 },
-                { account_id: from.gl_account_id, debit: 0, credit: amount },
+                { account_id: to.gl_account_id, debit: base, credit: 0, ...tag(to) },
+                { account_id: from.gl_account_id, debit: 0, credit: base, ...tag(from) },
               ],
             },
             "POSTED",
@@ -983,7 +1089,7 @@ const useLedgerActions = (
             entity_type: "Journal",
             entity_id: j.id,
             entity_label: j.number,
-            summary: `${fmtCurrency(amount)} from ${from.name} to ${to.name}.`,
+            summary: `${fmtMoney(amount, from.currency)} from ${from.name} to ${to.name}.`,
           });
           return ok(j, `Transfer posted as ${j.number}`);
         }),
@@ -1198,7 +1304,9 @@ const useLedgerActions = (
           return ok(undefined, "Mapping removed");
         }),
 
-      addCustomField: (input: Omit<CustomField, "id" | keyof AuditFields>) =>
+      addCustomField: (
+        input: Omit<CustomField, "id" | "position" | "is_active" | keyof AuditFields>,
+      ) =>
         commit((s) => {
           const key = input.key.trim();
           if (!/^[a-z][a-z0-9_]*$/.test(key)) return fail("Key must be lower_snake_case and start with a letter.");
@@ -1206,10 +1314,20 @@ const useLedgerActions = (
           if (s.customFields.some((f) => f.entity === input.entity && f.key === key)) {
             return fail(`${input.entity} already has a field called ${key}.`);
           }
-          if (input.type === "SELECT" && (!input.options || input.options.length < 2)) {
-            return fail("A select field needs at least two options.");
-          }
-          const f: CustomField = { id: newId("cf"), ...input, key, ...stamp(nowIso(), actorOf(s)) };
+          const optionError = checkFieldOptions(input);
+          if (optionError) return fail(optionError);
+          const position = Math.max(0, ...s.customFields.filter((f) => f.entity === input.entity).map((f) => f.position)) + 1;
+          const f: CustomField = {
+            id: newId("cf"),
+            ...input,
+            key,
+            label: input.label.trim(),
+            description: input.description?.trim() || undefined,
+            default_value: input.default_value?.trim() || undefined,
+            is_active: true,
+            position,
+            ...stamp(nowIso(), actorOf(s)),
+          };
           s.customFields.push(f);
           audit(s, {
             action: "CUSTOM_FIELD.CREATED",
@@ -1219,6 +1337,294 @@ const useLedgerActions = (
             summary: `Added ${f.label} to ${f.entity} (${f.scope === "FINANCIAL" ? "financial" : "source reference"}).`,
           });
           return ok(f, `${f.label} added to ${f.entity}`);
+        }),
+
+      /** Key and entity never change; type only while no record holds a value. */
+      updateCustomField: (
+        id: string,
+        patch: Partial<
+          Pick<
+            CustomField,
+            "label" | "description" | "type" | "scope" | "options" | "required" | "default_value" | "show_in_list" | "is_active"
+          >
+        >,
+      ) =>
+        commit((s) => {
+          const f = s.customFields.find((x) => x.id === id);
+          if (!f) return fail("Field not found.");
+          if (patch.label !== undefined && !patch.label.trim()) return fail("Label is required.");
+          const used = customFieldUsage(s, f);
+          if (patch.type && patch.type !== f.type && used > 0) {
+            return fail(`${used} record(s) already hold a ${f.label}. Its type cannot change; add a new field instead.`);
+          }
+          const next = { ...f, ...patch };
+          const optionError = checkFieldOptions(next);
+          if (optionError) return fail(optionError);
+          if (next.type === "SELECT" && f.type === "SELECT" && f.options) {
+            const removed = f.options.filter((o) => !next.options?.includes(o));
+            const inUse = removed.find((o) =>
+              recordsForEntity(s, f.entity).some((r) => r.custom_fields?.[f.key] === o),
+            );
+            if (inUse) return fail(`"${inUse}" is still used on some records. Change those first or keep the option.`);
+          }
+          const changes = (Object.keys(patch) as (keyof typeof patch)[])
+            .filter((k) => JSON.stringify(patch[k]) !== JSON.stringify(f[k]))
+            .map((k) => ({ field: k, from: f[k] === undefined ? null : String(f[k]), to: patch[k] === undefined ? null : String(patch[k]) }));
+          Object.assign(f, {
+            ...patch,
+            label: next.label.trim(),
+            description: next.description?.trim() || undefined,
+            default_value: next.default_value?.trim() || undefined,
+            options: next.type === "SELECT" ? next.options : undefined,
+          });
+          touch(s, f);
+          if (changes.length) {
+            audit(s, {
+              action: "CUSTOM_FIELD.UPDATED",
+              entity_type: "Custom field",
+              entity_id: f.id,
+              entity_label: `${f.entity}.${f.key}`,
+              summary: `Updated ${f.label}.`,
+              changes,
+            });
+          }
+          return ok(f, `${f.label} saved`);
+        }),
+
+      deleteCustomField: (id: string) =>
+        commit((s) => {
+          const f = s.customFields.find((x) => x.id === id);
+          if (!f) return fail("Field not found.");
+          const used = customFieldUsage(s, f);
+          if (used > 0) return fail(`${used} record(s) hold a ${f.label}. Deactivate it instead so the history is kept.`);
+          const mapped = s.fieldMappings.find((m) => m.target_field === `custom.${f.key}`);
+          if (mapped) return fail(`${f.label} is the target of a field mapping (${mapped.source_field}). Remove the mapping first.`);
+          s.customFields = s.customFields.filter((x) => x.id !== id);
+          audit(s, {
+            action: "CUSTOM_FIELD.DELETED",
+            entity_type: "Custom field",
+            entity_id: f.id,
+            entity_label: `${f.entity}.${f.key}`,
+            summary: `Deleted unused field ${f.label}.`,
+          });
+          return ok(undefined, `${f.label} deleted`);
+        }),
+
+      moveCustomField: (id: string, direction: -1 | 1) =>
+        commit((s) => {
+          const f = s.customFields.find((x) => x.id === id);
+          if (!f) return fail("Field not found.");
+          const siblings = s.customFields.filter((x) => x.entity === f.entity).sort((a, b) => a.position - b.position);
+          const i = siblings.indexOf(f);
+          const other = siblings[i + direction];
+          if (!other) return ok(f);
+          siblings.splice(i, 1);
+          siblings.splice(i + direction, 0, f);
+          siblings.forEach((x, n) => (x.position = n + 1));
+          return ok(f);
+        }),
+
+      /** Custom values never touch the ledger, so they can be edited on posted documents too. */
+      setCustomFieldValues: (entity: CustomFieldEntity, id: string, values: Record<string, string>) =>
+        commit((s) => {
+          const record = recordsForEntity(s, entity).find((r) => (r as { id?: string }).id === id) as
+            | ({ id: string; custom_fields?: Record<string, string>; updated_at: string; updated_by: string | null; updated_by_id: string | null } & Record<string, unknown>)
+            | undefined;
+          if (!record) return fail(`${entity} not found.`);
+          const customError = checkCustom(s, entity, values);
+          if (customError) return fail(customError);
+          const before = record.custom_fields ?? {};
+          const after = normaliseCustomValues(values, before);
+          const labels = new Map(s.customFields.filter((f) => f.entity === entity).map((f) => [f.key, f.label]));
+          const changes = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+            .filter((k) => (before[k] ?? "") !== (after[k] ?? ""))
+            .map((k) => ({ field: labels.get(k) ?? k, from: before[k] ?? null, to: after[k] ?? null }));
+          if (changes.length === 0) return ok(record, "Nothing changed");
+          record.custom_fields = after;
+          touch(s, record);
+          const label = String(record.number ?? record.name ?? record.code ?? id);
+          audit(s, {
+            action: "CUSTOM_FIELDS.UPDATED",
+            entity_type: entity,
+            entity_id: id,
+            entity_label: label,
+            summary: `Updated ${changes.map((c) => c.field).join(", ")}.`,
+            changes,
+          });
+          return ok(record, "Details saved");
+        }),
+
+      // ---- Currencies -------------------------------------------------------
+      addCurrency: (input: { code: string; name: string; symbol: string }) =>
+        commit((s) => {
+          const code = input.code.trim().toUpperCase();
+          if (!/^[A-Z]{3}$/.test(code)) return fail("Use the three-letter ISO code, e.g. USD.");
+          if (s.currencies.some((c) => c.code === code)) return fail(`${code} is already set up.`);
+          if (!input.name.trim()) return fail("Name is required.");
+          const c: Currency = { code, name: input.name.trim(), symbol: input.symbol.trim() || code, is_active: true };
+          s.currencies.push(c);
+          audit(s, {
+            action: "CURRENCY.ADDED",
+            entity_type: "Currency",
+            entity_id: code,
+            entity_label: code,
+            summary: `Added ${c.name} (${code}). Record a rate before using it.`,
+          });
+          return ok(c, `${code} added`);
+        }),
+
+      toggleCurrency: (code: string) =>
+        commit((s) => {
+          const c = s.currencies.find((x) => x.code === code);
+          if (!c) return fail("Currency not found.");
+          if (code === s.org.base_currency) return fail("The base currency is always on.");
+          if (c.is_active) {
+            const bank = s.bankAccounts.find((b) => b.currency === code);
+            if (bank) return fail(`${bank.name} holds ${code}. A currency with a bank account cannot be switched off.`);
+          }
+          c.is_active = !c.is_active;
+          audit(s, {
+            action: c.is_active ? "CURRENCY.ACTIVATED" : "CURRENCY.DEACTIVATED",
+            entity_type: "Currency",
+            entity_id: code,
+            entity_label: code,
+            summary: c.is_active
+              ? `${code} can be used on new documents.`
+              : `${code} switched off for new documents. Open ${code} balances are still revalued.`,
+            changes: [{ field: "is_active", from: String(!c.is_active), to: String(c.is_active) }],
+          });
+          return ok(c, `${code} ${c.is_active ? "switched on" : "switched off"}`);
+        }),
+
+      addExchangeRate: (input: { currency: string; date: string; rate: number }) =>
+        commit((s) => {
+          const c = s.currencies.find((x) => x.code === input.currency);
+          if (!c || c.code === s.org.base_currency) return fail("Choose a foreign currency.");
+          const rate = Math.round((Number(input.rate) || 0) * 10000) / 10000;
+          if (!(rate > 0)) return fail("Enter a rate greater than zero.");
+          if (!input.date) return fail("Choose the date the rate applies from.");
+          if (input.date > todayIso()) return fail("Rates cannot be recorded for future dates.");
+          const previous = rateOn(s.exchangeRates, c.code, input.date);
+          const r: ExchangeRate = {
+            id: newId("fx"),
+            currency: c.code,
+            date: input.date,
+            rate,
+            source: "MANUAL",
+            ...stamp(nowIso(), actorOf(s)),
+          };
+          s.exchangeRates.push(r);
+          const move = previous ? ((rate - previous.rate) / previous.rate) * 100 : 0;
+          audit(s, {
+            action: "FX_RATE.RECORDED",
+            entity_type: "Exchange rate",
+            entity_id: r.id,
+            entity_label: `${c.code} ${input.date}`,
+            summary: `1 ${c.code} = ${fmtCurrency(rate)} from ${input.date}${previous ? ` (${move >= 0 ? "+" : ""}${move.toFixed(2)}%)` : ""}.`,
+            changes: previous ? [{ field: "rate", from: fmtRate(previous.rate), to: fmtRate(rate) }] : undefined,
+          });
+          return ok(r, `${c.code} rate recorded`);
+        }),
+
+      deleteExchangeRate: (id: string) =>
+        commit((s) => {
+          const r = s.exchangeRates.find((x) => x.id === id);
+          if (!r) return fail("Rate not found.");
+          if (r.source !== "MANUAL") return fail("Reference rates from Bank of Ghana cannot be deleted. Record a manual rate instead.");
+          s.exchangeRates = s.exchangeRates.filter((x) => x.id !== id);
+          audit(s, {
+            action: "FX_RATE.DELETED",
+            entity_type: "Exchange rate",
+            entity_id: r.id,
+            entity_label: `${r.currency} ${r.date}`,
+            summary: `Deleted manual ${r.currency} rate ${fmtRate(r.rate)} for ${r.date}. Documents keep the rate they were posted at.`,
+          });
+          return ok(undefined, "Rate deleted");
+        }),
+
+      /** Simulates the daily Bank of Ghana reference-rate download. */
+      fetchReferenceRates: () =>
+        commit((s) => {
+          const today = todayIso();
+          const added: string[] = [];
+          for (const c of s.currencies) {
+            if (!c.is_active || c.code === s.org.base_currency) continue;
+            if (s.exchangeRates.some((r) => r.currency === c.code && r.date === today && r.source === "BANK_OF_GHANA")) continue;
+            const last = rateOn(s.exchangeRates, c.code, today);
+            if (!last) continue;
+            const drift = 1 + (Math.sin(Date.now() / 3.6e6 + c.code.charCodeAt(0)) * 0.004);
+            s.exchangeRates.push({
+              id: newId("fx"),
+              currency: c.code,
+              date: today,
+              rate: Math.round(last.rate * drift * 10000) / 10000,
+              source: "BANK_OF_GHANA",
+              ...stamp(nowIso(), { id: "svc_integrations", name: "Trovesuite Integrations" }),
+            });
+            added.push(c.code);
+          }
+          if (added.length === 0) return ok(0, "Rates are already up to date for today");
+          audit(s, {
+            action: "FX_RATE.FETCHED",
+            entity_type: "Exchange rate",
+            entity_id: null,
+            entity_label: "Bank of Ghana",
+            summary: `Fetched reference rates for ${added.join(", ")} (${today}).`,
+          });
+          return ok(added.length, `Bank of Ghana rates fetched for ${added.join(", ")}`);
+        }),
+
+      runRevaluation: (periodId: string) =>
+        commit((s) => {
+          const period = s.periods.find((p) => p.id === periodId);
+          if (!period) return fail("Choose a month end.");
+          const asAt = period.end_date;
+          if (asAt >= todayIso()) return fail(`${period.name} has not ended yet. Revalue after the month closes.`);
+          if (s.fxRevaluations.some((r) => r.period_id === periodId)) return fail(`${period.name} has already been revalued.`);
+          const nextDay = addDays(asAt, 1);
+          const periodError = checkPeriod(s, asAt) ?? checkPeriod(s, nextDay);
+          if (periodError) return fail(periodError);
+          const preview = revaluationPreview(s, asAt);
+          if (preview.missing.length) {
+            return fail(`No ${preview.missing.join(", ")} rate on or before ${asAt}. Record one in Settings → Currencies.`);
+          }
+          const changed = preview.lines.filter((l) => l.difference !== 0);
+          if (changed.length === 0) return fail("Nothing to revalue: no open foreign balances moved.");
+          const reference = `FX-REVAL-${asAt.slice(0, 7)}`;
+          const j = writeJournal(
+            s,
+            {
+              date: asAt,
+              memo: `Foreign currency revaluation – ${period.name}`,
+              reference,
+              branch_id: null,
+              lines: revaluationJournalLines(preview.lines, s.org.fx_unrealised_account_id),
+            },
+            "POSTED",
+            { type: "FX_REVALUATION", reference },
+          );
+          const reversal = reverseInto(s, j, nextDay, "automatic reversal of month-end revaluation");
+          const net = round2(preview.lines.reduce((t, l) => t + l.difference, 0));
+          const run: FxRevaluation = {
+            id: newId("rev"),
+            period_id: period.id,
+            as_at: asAt,
+            rates: preview.rates,
+            lines: preview.lines,
+            net_difference: net,
+            journal_id: j.id,
+            reversal_journal_id: reversal.id,
+            ...stamp(nowIso(), actorOf(s)),
+          };
+          s.fxRevaluations.unshift(run);
+          audit(s, {
+            action: "FX.REVALUED",
+            entity_type: "Journal",
+            entity_id: j.id,
+            entity_label: j.number,
+            summary: `Revalued ${preview.lines.length} open foreign balance(s) at ${asAt}: net unrealised ${net >= 0 ? "gain" : "loss"} ${fmtCurrency(Math.abs(net))}. Reversed on ${nextDay} by ${reversal.number}.`,
+          });
+          return ok(run, `${period.name} revalued · ${j.number} posted, reversed on ${nextDay}`);
         }),
 
       toggleRule: (id: string) =>
@@ -1307,6 +1713,14 @@ const useLedgerActions = (
           if (patch.approval_threshold !== undefined && patch.approval_threshold < 0) {
             return fail("Approval threshold cannot be negative.");
           }
+          for (const key of ["fx_realised_account_id", "fx_unrealised_account_id"] as const) {
+            if (patch[key] === undefined) continue;
+            const a = s.accounts.find((x) => x.id === patch[key]);
+            if (!a || a.is_group || a.is_control || !a.is_active) return fail("Choose an active, postable account for exchange differences.");
+          }
+          if (patch.fx_rate_tolerance_pct !== undefined && !(patch.fx_rate_tolerance_pct >= 0)) {
+            return fail("Rate tolerance cannot be negative.");
+          }
           const changes = (Object.keys(patch) as (keyof OrgSettings)[])
             .filter((k) => String(patch[k]) !== String(s.org[k]))
             .map((k) => ({ field: k, from: String(s.org[k]), to: String(patch[k]) }));
@@ -1360,6 +1774,40 @@ const useLedgerActions = (
     }),
     [commit, stateRef, setState],
   );
+};
+
+const checkFieldOptions = (f: Pick<CustomField, "type" | "options" | "default_value" | "label">): string | null => {
+  if (f.type === "SELECT") {
+    const opts = (f.options ?? []).map((o) => o.trim()).filter(Boolean);
+    if (opts.length < 2) return "A dropdown needs at least two options.";
+    if (new Set(opts).size !== opts.length) return "Dropdown options must be unique.";
+    if (f.default_value && !opts.includes(f.default_value)) return "The default must be one of the options.";
+  }
+  if (f.type === "BOOLEAN" && f.default_value && !["true", "false"].includes(f.default_value)) {
+    return "The default for a yes/no field is yes or no.";
+  }
+  if (f.type === "NUMBER" && f.default_value && !Number.isFinite(Number(f.default_value))) {
+    return "The default must be a number.";
+  }
+  return null;
+};
+
+/** Rates as at `asAt` plus every open foreign balance revalued at them. */
+export const revaluationPreview = (s: LedgerState, asAt: string) => {
+  const rates: Record<string, number> = {};
+  for (const c of s.currencies) {
+    if (c.code === s.org.base_currency) continue;
+    const r = rateOn(s.exchangeRates, c.code, asAt);
+    if (r) rates[c.code] = r.rate;
+  }
+  const exposed = new Set<string>([
+    ...s.invoices.filter((d) => isForeign(d.currency) && d.state === "APPROVED" && d.issue_date <= asAt).map((d) => d.currency),
+    ...s.bills.filter((d) => isForeign(d.currency) && d.state === "APPROVED" && d.issue_date <= asAt).map((d) => d.currency),
+    ...s.bankAccounts.filter((b) => isForeign(b.currency)).map((b) => b.currency),
+  ]);
+  const missing = [...exposed].filter((c) => !rates[c]);
+  const lines = revaluationLines(s, asAt, rates, { ar: ACC.ar, ap: ACC.ap });
+  return { rates, lines, missing };
 };
 
 /** Turns the postable rows of an import batch into one balanced journal. */

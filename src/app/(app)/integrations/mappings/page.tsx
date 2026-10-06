@@ -2,15 +2,14 @@
 
 import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
+import Link from "next/link";
 import { FiArrowRight, FiEdit2, FiPlus, FiTrash2, FiInfo } from "react-icons/fi";
 import { Button, Callout, Field, FormError, PageHeader, Toggle, compactInputClass, inputClass } from "@/components/ui";
-import { Tabs } from "@/components/tabs";
 import StatusBadge from "@/components/statusBadge";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { useLedger } from "@/store/ledgerStore";
-import type { CustomField, FieldMapping } from "@/models/accounting";
+import type { FieldMapping } from "@/models/accounting";
 import { matchesSearch, useGlobalState } from "@/utils/globalStateContext";
-import { humanize } from "@/utils/format";
 
 const TARGETS = [
   "source.reference",
@@ -42,14 +41,12 @@ const TARGETS = [
   "dimension.cost_centre",
 ];
 
-const CUSTOM_ENTITIES = ["Customer", "Supplier", "Invoice", "Bill", "Journal line"];
-
 const MappingModal = ({ open, mapping, onClose }: { open: boolean; mapping: FieldMapping | null; onClose: () => void }) => {
   const { state, actions } = useLedger();
   const [form, setForm] = useState<Omit<FieldMapping, "id">>({ source_id: "ds_store", entity: "", source_field: "", target_field: "", transform: "—", required: false });
   const [error, setError] = useState<string | null>(null);
   const source = state.dataSources.find((s) => s.id === form.source_id);
-  const targets = [...TARGETS, ...state.customFields.map((f) => `custom.${f.key}`)];
+  const targets = [...TARGETS, ...state.customFields.filter((f) => f.is_active).map((f) => `custom.${f.key}`)];
 
   useEffect(() => {
     if (!open) return;
@@ -132,142 +129,34 @@ const MappingModal = ({ open, mapping, onClose }: { open: boolean; mapping: Fiel
   );
 };
 
-const CustomFieldModal = ({ open, onClose }: { open: boolean; onClose: () => void }) => {
-  const { actions } = useLedger();
-  const [form, setForm] = useState({ entity: "Customer", label: "", key: "", type: "TEXT" as CustomField["type"], scope: "FINANCIAL" as CustomField["scope"], options: "", required: false });
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (open) {
-      setForm({ entity: "Customer", label: "", key: "", type: "TEXT", scope: "FINANCIAL", options: "", required: false });
-      setError(null);
-    }
-  }, [open]);
-
-  const submit = () => {
-    const res = actions.addCustomField({
-      entity: form.entity,
-      label: form.label,
-      key: form.key,
-      type: form.type,
-      scope: form.scope,
-      required: form.required,
-      options: form.type === "SELECT" ? form.options.split(",").map((o) => o.trim()).filter(Boolean) : undefined,
-    });
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Added");
-    onClose();
-  };
-
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      size="xl"
-      title="New custom field"
-      description="Capture information the standard model does not have, without changing the ledger."
-      buttons={[
-        { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: "Add field", onClick: submit, className: BTN_PRIMARY },
-      ]}
-    >
-      <FormError message={error} />
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <Field label="Applies to" required>
-          <select value={form.entity} onChange={(e) => setForm((f) => ({ ...f, entity: e.target.value }))} className={inputClass}>
-            {CUSTOM_ENTITIES.map((e) => (
-              <option key={e}>{e}</option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Type" required>
-          <select value={form.type} onChange={(e) => setForm((f) => ({ ...f, type: e.target.value as CustomField["type"] }))} className={inputClass}>
-            {["TEXT", "NUMBER", "DATE", "SELECT"].map((t) => (
-              <option key={t} value={t}>
-                {humanize(t)}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Label" required>
-          <input
-            value={form.label}
-            onChange={(e) => {
-              const label = e.target.value;
-              setForm((f) => ({
-                ...f,
-                label,
-                key: f.key && f.key !== slug(f.label) ? f.key : slug(label),
-              }));
-            }}
-            placeholder="e.g. Delivery route"
-            className={inputClass}
-          />
-        </Field>
-        <Field label="Key" required hint="lower_snake_case; used in mappings as custom.<key>">
-          <input value={form.key} onChange={(e) => setForm((f) => ({ ...f, key: e.target.value }))} className={`${inputClass} font-mono`} />
-        </Field>
-        {form.type === "SELECT" && (
-          <Field label="Options" required className="sm:col-span-2" hint="Comma separated">
-            <input value={form.options} onChange={(e) => setForm((f) => ({ ...f, options: e.target.value }))} placeholder="North, South, East" className={inputClass} />
-          </Field>
-        )}
-        <div className="sm:col-span-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {(
-            [
-              { id: "FINANCIAL", title: "Financial", body: "Used for filtering and reporting, like a dimension." },
-              { id: "SOURCE_REFERENCE", title: "Source reference", body: "Kept for traceability back to the source system. Never drives postings." },
-            ] as const
-          ).map((o) => (
-            <button
-              key={o.id}
-              type="button"
-              onClick={() => setForm((f) => ({ ...f, scope: o.id }))}
-              className={`rounded-xl border p-3 text-left ${form.scope === o.id ? "border-brand-500 bg-brand-50 ring-1 ring-brand-500 dark:bg-brand-900/20" : "border-neutral-200 dark:border-neutral-700"}`}
-            >
-              <p className="text-sm font-semibold">{o.title}</p>
-              <p className="mt-0.5 text-xs text-neutral-600 dark:text-neutral-300">{o.body}</p>
-            </button>
-          ))}
-        </div>
-        <div className="sm:col-span-2">
-          <Toggle checked={form.required} onChange={(v) => setForm((f) => ({ ...f, required: v }))} label="Required" />
-        </div>
-      </div>
-    </Modal>
-  );
-};
-
-const slug = (s: string) =>
-  s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .replace(/^(\d)/, "f_$1");
-
 export default function MappingsPage() {
   const { state, actions } = useLedger();
   const { searchQuery } = useGlobalState();
-  const [tab, setTab] = useState("MAPPINGS");
   const [sourceId, setSourceId] = useState("");
   const [editing, setEditing] = useState<FieldMapping | null>(null);
   const [mappingOpen, setMappingOpen] = useState(false);
-  const [fieldOpen, setFieldOpen] = useState(false);
 
   const sourceName = new Map(state.dataSources.map((s) => [s.id, s.name]));
   const mappings = state.fieldMappings.filter(
     (m) => (!sourceId || m.source_id === sourceId) && matchesSearch(searchQuery, m.source_field, m.target_field, m.entity, m.transform),
   );
   const grouped = [...new Set(mappings.map((m) => `${m.source_id}|${m.entity}`))];
-  const fields = state.customFields.filter((f) => matchesSearch(searchQuery, f.label, f.key, f.entity));
 
   return (
     <div>
       <PageHeader
-        title="Mappings & custom fields"
+        title="Field mappings"
         description="Translate each source's fields into the Trovesuite model. Mapping is configuration, so a new source never needs code changes."
         actions={
-          tab === "MAPPINGS" ? (
+          <>
+            <select value={sourceId} onChange={(e) => setSourceId(e.target.value)} className={`${compactInputClass} w-56`}>
+              <option value="">All sources</option>
+              {[...new Set(state.fieldMappings.map((m) => m.source_id))].map((id) => (
+                <option key={id} value={id}>
+                  {sourceName.get(id)}
+                </option>
+              ))}
+            </select>
             <Button
               icon={FiPlus}
               onClick={() => {
@@ -277,37 +166,20 @@ export default function MappingsPage() {
             >
               New mapping
             </Button>
-          ) : (
-            <Button icon={FiPlus} onClick={() => setFieldOpen(true)}>
-              New custom field
-            </Button>
-          )
+          </>
         }
       />
 
-      <Tabs
-        tabs={[
-          { id: "MAPPINGS", label: "Field mappings", count: state.fieldMappings.length },
-          { id: "FIELDS", label: "Custom fields", count: state.customFields.length },
-        ]}
-        value={tab}
-        onChange={setTab}
-        actions={
-          tab === "MAPPINGS" && (
-            <select value={sourceId} onChange={(e) => setSourceId(e.target.value)} className={`${compactInputClass} w-56`}>
-              <option value="">All sources</option>
-              {[...new Set(state.fieldMappings.map((m) => m.source_id))].map((id) => (
-                <option key={id} value={id}>
-                  {sourceName.get(id)}
-                </option>
-              ))}
-            </select>
-          )
-        }
-      />
+      <Callout tone="info" icon={FiInfo} className="mb-4">
+        Source fields with no standard home can map to a custom field as <span className="font-mono">custom.&lt;key&gt;</span>.{" "}
+        {state.customFields.filter((f) => f.is_active).length} custom fields are active; manage them in{" "}
+        <Link href="/settings?tab=fields" className="font-medium underline">
+          Settings → Custom fields
+        </Link>
+        .
+      </Callout>
 
-      {tab === "MAPPINGS" ? (
-        <div className="mt-4 space-y-4">
+      <div className="space-y-4">
           {grouped.map((g) => {
             const [sid, entity] = g.split("|");
             const items = mappings.filter((m) => m.source_id === sid && m.entity === entity);
@@ -365,58 +237,9 @@ export default function MappingsPage() {
             );
           })}
           {grouped.length === 0 && <p className="py-10 text-center text-sm text-neutral-500">No mappings match.</p>}
-        </div>
-      ) : (
-        <div className="mt-4">
-          <Callout tone="info" icon={FiInfo} className="mb-4">
-            <strong>Financial</strong> fields can be used to filter and report. <strong>Source reference</strong> fields only
-            keep the original system&apos;s identifiers so any record can be traced back. Neither kind changes how an entry posts.
-          </Callout>
-          <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-800">
-            <table className="min-w-full text-sm">
-              <thead className="bg-neutral-50/60 text-left text-neutral-500 dark:bg-neutral-800 dark:text-neutral-300">
-                <tr>
-                  <th className="px-6 py-3 font-normal">Field</th>
-                  <th className="px-6 py-3 font-normal">Applies to</th>
-                  <th className="px-6 py-3 font-normal">Type</th>
-                  <th className="px-6 py-3 font-normal">Scope</th>
-                  <th className="px-6 py-3 font-normal">Required</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
-                {fields.map((f) => (
-                  <tr key={f.id}>
-                    <td className="px-6 py-3">
-                      <p className="font-medium">{f.label}</p>
-                      <p className="font-mono text-xs text-neutral-500">custom.{f.key}</p>
-                    </td>
-                    <td className="px-6 py-3">{f.entity}</td>
-                    <td className="px-6 py-3">
-                      {humanize(f.type)}
-                      {f.options && <p className="text-xs text-neutral-500">{f.options.join(", ")}</p>}
-                    </td>
-                    <td className="px-6 py-3">
-                      <span
-                        className={`rounded px-2 py-0.5 text-xs font-medium ${
-                          f.scope === "FINANCIAL"
-                            ? "bg-brand-50 text-brand-700 dark:bg-brand-900/30 dark:text-brand-300"
-                            : "bg-neutral-100 text-neutral-600 dark:bg-neutral-700 dark:text-neutral-300"
-                        }`}
-                      >
-                        {f.scope === "FINANCIAL" ? "Financial" : "Source reference"}
-                      </span>
-                    </td>
-                    <td className="px-6 py-3">{f.required ? "Yes" : "No"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      </div>
 
       <MappingModal open={mappingOpen} mapping={editing} onClose={() => setMappingOpen(false)} />
-      <CustomFieldModal open={fieldOpen} onClose={() => setFieldOpen(false)} />
     </div>
   );
 }

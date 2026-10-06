@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import toast from "react-hot-toast";
-import { FiBookOpen, FiEdit2, FiLock, FiPlus, FiSlash, FiCheckCircle } from "react-icons/fi";
+import { FiBookOpen, FiDownload, FiEdit2, FiLock, FiPlus, FiSlash, FiCheckCircle } from "react-icons/fi";
 import { Button, Field, FormError, PageHeader, Toggle, inputClass } from "@/components/ui";
 import { Tabs } from "@/components/tabs";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
@@ -15,6 +15,9 @@ import type { Account, AccountType } from "@/models/accounting";
 import { matchesSearch, useGlobalState } from "@/utils/globalStateContext";
 import { fmtAccounting, humanize } from "@/utils/format";
 import { todayIso } from "@/utils/dates";
+import { downloadCsv } from "@/utils/csv";
+import { CustomFieldInputs, customCsvHeaders, customCsvValues, customSearchText, useEntityFields } from "@/components/customFields";
+import { defaultCustomValues, formatCustomValue } from "@/lib/customFields";
 
 const SUBTYPES: Record<AccountType, string[]> = {
   ASSET: ["CASH", "RECEIVABLE", "LOAN_BOOK", "INVENTORY", "PREPAYMENT", "TAX_RECOVERABLE", "FIXED_ASSET"],
@@ -28,14 +31,17 @@ const NewAccountModal = ({ open, onClose }: { open: boolean; onClose: () => void
   const { state, actions } = useLedger();
   const groups = state.accounts.filter((a) => a.is_group);
   const [form, setForm] = useState({ code: "", name: "", parent_id: "", subtype: "", description: "", is_bank: false });
+  const [custom, setCustom] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const parent = groups.find((g) => g.id === form.parent_id);
 
   useEffect(() => {
     if (open) {
       setForm({ code: "", name: "", parent_id: "", subtype: "", description: "", is_bank: false });
+      setCustom(defaultCustomValues(state.customFields, "Account"));
       setError(null);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const suggestCode = (parentId: string) => {
@@ -47,7 +53,7 @@ const NewAccountModal = ({ open, onClose }: { open: boolean; onClose: () => void
   };
 
   const submit = () => {
-    const res = actions.createAccount({ ...form, subtype: form.subtype || SUBTYPES[parent?.type ?? "ASSET"][0] });
+    const res = actions.createAccount({ ...form, subtype: form.subtype || SUBTYPES[parent?.type ?? "ASSET"][0], custom_fields: custom });
     if (!res.ok) return setError(res.error);
     toast.success(res.message ?? "Account added");
     onClose();
@@ -137,6 +143,7 @@ const NewAccountModal = ({ open, onClose }: { open: boolean; onClose: () => void
             />
           </div>
         )}
+        <CustomFieldInputs entity="Account" values={custom} onChange={setCustom} className="sm:col-span-2 border-t border-neutral-200 pt-4 dark:border-neutral-700" />
       </div>
     </Modal>
   );
@@ -146,19 +153,21 @@ const EditAccountModal = ({ account, onClose }: { account: Account | null; onClo
   const { actions } = useLedger();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [custom, setCustom] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (account) {
       setName(account.name);
       setDescription(account.description ?? "");
+      setCustom(account.custom_fields ?? {});
       setError(null);
     }
   }, [account]);
 
   const submit = () => {
     if (!account) return;
-    const res = actions.updateAccount(account.id, { name, description });
+    const res = actions.updateAccount(account.id, { name, description, custom_fields: custom });
     if (!res.ok) return setError(res.error);
     toast.success(res.message ?? "Saved");
     onClose();
@@ -184,6 +193,7 @@ const EditAccountModal = ({ account, onClose }: { account: Account | null; onClo
         <Field label="Description">
           <textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} className={inputClass} />
         </Field>
+        <CustomFieldInputs entity="Account" values={custom} onChange={setCustom} className="border-t border-neutral-200 pt-4 dark:border-neutral-700" />
       </div>
     </Modal>
   );
@@ -197,6 +207,8 @@ export default function ChartOfAccountsPage() {
   const [showInactive, setShowInactive] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [editing, setEditing] = useState<Account | null>(null);
+  const fields = useEntityFields("Account");
+  const listFields = fields.filter((f) => f.show_in_list);
 
   const balances = useMemo(() => balancesByAccount(state.accounts, state.journals, { to: todayIso() }), [state]);
   const postedTo = useMemo(() => {
@@ -208,7 +220,7 @@ export default function ChartOfAccountsPage() {
   const visible = state.accounts
     .filter((a) => tab === "ALL" || a.type === tab)
     .filter((a) => showInactive || a.is_active)
-    .filter((a) => a.is_group || matchesSearch(searchQuery, a.code, a.name, a.subtype, a.description))
+    .filter((a) => a.is_group || matchesSearch(searchQuery, a.code, a.name, a.subtype, a.description, customSearchText(a.custom_fields)))
     .sort((a, b) => a.code.localeCompare(b.code));
 
   const counts = Object.fromEntries(
@@ -231,9 +243,34 @@ export default function ChartOfAccountsPage() {
         title="Chart of accounts"
         description="The structure every posting, report and integration rule maps onto. Balances are live from posted journals."
         actions={
-          <Button icon={FiPlus} onClick={() => setNewOpen(true)}>
-            New account
-          </Button>
+          <>
+            <Button
+              variant="secondary"
+              icon={FiDownload}
+              onClick={() =>
+                downloadCsv(`chart-of-accounts-${todayIso()}.csv`, [
+                  ["Code", "Name", "Type", "Report category", "Group", "Active", "Balance (GHS)", ...customCsvHeaders(fields)],
+                  ...visible
+                    .filter((a) => !a.is_group)
+                    .map((a) => [
+                      a.code,
+                      a.name,
+                      a.type,
+                      humanize(a.subtype),
+                      state.accounts.find((g) => g.id === a.parent_id)?.name,
+                      a.is_active ? "Yes" : "No",
+                      balances.get(a.id) ?? 0,
+                      ...customCsvValues(fields, a.custom_fields),
+                    ]),
+                ])
+              }
+            >
+              Export
+            </Button>
+            <Button icon={FiPlus} onClick={() => setNewOpen(true)}>
+              New account
+            </Button>
+          </>
         }
       />
 
@@ -264,6 +301,11 @@ export default function ChartOfAccountsPage() {
               <th className="px-6 py-3 font-normal w-24">Code</th>
               <th className="px-6 py-3 font-normal">Account</th>
               <th className="px-6 py-3 font-normal">Report category</th>
+              {listFields.map((f) => (
+                <th key={f.id} className="px-6 py-3 font-normal">
+                  {f.label}
+                </th>
+              ))}
               <th className="px-6 py-3 font-normal text-right">Balance</th>
               <th className="px-6 py-3 w-16" />
             </tr>
@@ -273,7 +315,7 @@ export default function ChartOfAccountsPage() {
               a.is_group ? (
                 <tr key={a.id} className="bg-neutral-50/80 dark:bg-neutral-900/30">
                   <td className="px-6 py-2.5 font-mono font-semibold">{a.code}</td>
-                  <td className="px-6 py-2.5 font-semibold" colSpan={2}>
+                  <td className="px-6 py-2.5 font-semibold" colSpan={2 + listFields.length}>
                     {a.name}
                   </td>
                   <td className="px-6 py-2.5 text-right font-semibold tabular-nums">
@@ -313,6 +355,11 @@ export default function ChartOfAccountsPage() {
                     )}
                   </td>
                   <td className="px-6 py-3 text-neutral-600 dark:text-neutral-300">{humanize(a.subtype)}</td>
+                  {listFields.map((f) => (
+                    <td key={f.id} className="px-6 py-3 font-mono text-xs text-neutral-500 dark:text-neutral-400">
+                      {a.custom_fields?.[f.key] ? formatCustomValue(f, a.custom_fields[f.key]) : "—"}
+                    </td>
+                  ))}
                   <td className="px-6 py-3 text-right tabular-nums">{fmtAccounting(balances.get(a.id) ?? 0)}</td>
                   <td className="px-4 py-3 text-right">
                     <ActionsDropdown

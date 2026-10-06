@@ -11,7 +11,7 @@ import { useJournalViewer } from "@/components/accounting/journalViewer";
 import { useLedger } from "@/store/ledgerStore";
 import type { Payment, PaymentMethod } from "@/models/accounting";
 import { matchesSearch, useGlobalState } from "@/utils/globalStateContext";
-import { fmtCurrency, fmtDate, humanize } from "@/utils/format";
+import { BASE_CURRENCY, fmtCurrency, fmtDate, fmtMoney, fmtRate, humanize } from "@/utils/format";
 import { monthKey, todayIso } from "@/utils/dates";
 
 type Row = Payment & { party: string; document: string; account: string };
@@ -56,7 +56,7 @@ const PaymentsPage = ({ kind }: { kind: "receipt" | "payment" }) => {
   );
   const thisMonth = rows.filter((r) => monthKey(r.date) === monthKey(today));
   const lastMonth = rows.filter((r) => monthKey(r.date) === "2026-09");
-  const total = (rs: Row[]) => rs.reduce((s, r) => s + r.amount, 0);
+  const total = (rs: Row[]) => rs.reduce((s, r) => s + r.base_amount, 0);
   const momoShare = rows.length ? Math.round((rows.filter((r) => r.method === "MOBILE_MONEY").length / rows.length) * 100) : 0;
   const docBase = isReceipt ? "/sales/invoices" : "/purchases/bills";
 
@@ -90,7 +90,23 @@ const PaymentsPage = ({ kind }: { kind: "receipt" | "payment" }) => {
       accessorKey: "amount",
       header: "Amount",
       align: "right",
-      cell: ({ row }) => <span className="font-medium tabular-nums">{fmtCurrency(row.original.amount)}</span>,
+      cell: ({ row }) => {
+        const r = row.original;
+        if (r.currency === BASE_CURRENCY) return <span className="font-medium tabular-nums">{fmtCurrency(r.amount)}</span>;
+        return (
+          <div className="tabular-nums">
+            <p className="font-medium">{fmtMoney(r.amount, r.currency)}</p>
+            <p className="text-xs text-neutral-500 dark:text-neutral-400">
+              {fmtCurrency(r.base_amount)} at {fmtRate(r.exchange_rate)}
+            </p>
+            {r.fx_gain_loss !== 0 && (
+              <p className={`text-xs ${r.fx_gain_loss > 0 ? "text-emerald-600" : "text-red-600"}`}>
+                FX {r.fx_gain_loss > 0 ? "gain" : "loss"} {fmtCurrency(Math.abs(r.fx_gain_loss))}
+              </p>
+            )}
+          </div>
+        );
+      },
     },
   ];
 
@@ -146,7 +162,7 @@ const PaymentsPage = ({ kind }: { kind: "receipt" | "payment" }) => {
           filtered.length > 0 && (
             <tr>
               <td colSpan={7} className="px-6 py-3 text-sm font-semibold">
-                Total ({filtered.length})
+                Total ({filtered.length}) in GH₵
               </td>
               <td className="px-6 py-3 text-right text-sm font-semibold tabular-nums">{fmtCurrency(total(filtered))}</td>
             </tr>
