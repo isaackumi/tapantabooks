@@ -1,0 +1,163 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import toast from "react-hot-toast";
+import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
+import { Field, FormError, Toggle, inputClass } from "@/components/ui";
+import { useLedger } from "@/store/ledgerStore";
+import type { Party } from "@/models/accounting";
+
+interface PartyFormModalProps {
+  kind: "customer" | "supplier";
+  open: boolean;
+  onClose: () => void;
+  party?: Party | null;
+}
+
+const empty = {
+  name: "",
+  email: "",
+  phone: "",
+  city: "",
+  tin: "",
+  payment_terms_days: "30",
+  credit_limit: "0",
+  active: true,
+};
+
+const PartyFormModal = ({ kind, open, onClose, party }: PartyFormModalProps) => {
+  const { state, actions } = useLedger();
+  const [form, setForm] = useState(empty);
+  const [custom, setCustom] = useState<Record<string, string>>({});
+  const [error, setError] = useState<string | null>(null);
+  const entity = kind === "customer" ? "Customer" : "Supplier";
+  const customFields = state.customFields.filter((f) => f.entity === entity);
+
+  useEffect(() => {
+    if (!open) return;
+    setError(null);
+    setForm(
+      party
+        ? {
+            name: party.name,
+            email: party.email,
+            phone: party.phone,
+            city: party.city,
+            tin: party.tin ?? "",
+            payment_terms_days: String(party.payment_terms_days),
+            credit_limit: String(party.credit_limit),
+            active: party.status === "ACTIVE",
+          }
+        : empty,
+    );
+    setCustom(party?.custom_fields ?? {});
+  }, [open, party]);
+
+  const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const submit = () => {
+    const missing = customFields.find((f) => f.required && !custom[f.key]?.trim());
+    if (missing) return setError(`${missing.label} is required.`);
+    const res = actions.saveParty(
+      kind,
+      {
+        name: form.name,
+        email: form.email,
+        phone: form.phone,
+        city: form.city,
+        tin: form.tin || undefined,
+        payment_terms_days: Number(form.payment_terms_days) || 0,
+        credit_limit: Number(form.credit_limit) || 0,
+        status: form.active ? "ACTIVE" : "INACTIVE",
+        custom_fields: custom,
+      },
+      party?.id,
+    );
+    if (!res.ok) return setError(res.error);
+    toast.success(res.message ?? "Saved");
+    onClose();
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="2xl"
+      title={party ? `Edit ${party.name}` : `New ${kind}`}
+      buttons={[
+        { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
+        { label: party ? "Save changes" : `Add ${kind}`, onClick: submit, className: BTN_PRIMARY },
+      ]}
+    >
+      <FormError message={error} />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <Field label="Name" required className="sm:col-span-2">
+          <input value={form.name} onChange={set("name")} className={inputClass} />
+        </Field>
+        <Field label="Email">
+          <input type="email" value={form.email} onChange={set("email")} className={inputClass} />
+        </Field>
+        <Field label="Phone">
+          <input value={form.phone} onChange={set("phone")} placeholder="+233…" className={inputClass} />
+        </Field>
+        <Field label="City">
+          <input value={form.city} onChange={set("city")} className={inputClass} />
+        </Field>
+        <Field label="TIN" hint="Ghana Revenue Authority taxpayer number">
+          <input value={form.tin} onChange={set("tin")} className={inputClass} />
+        </Field>
+        <Field label="Payment terms (days)">
+          <input type="number" min={0} value={form.payment_terms_days} onChange={set("payment_terms_days")} className={inputClass} />
+        </Field>
+        <Field label={kind === "customer" ? "Credit limit" : "Spend limit"} hint="0 means no limit">
+          <input type="number" min={0} value={form.credit_limit} onChange={set("credit_limit")} className={inputClass} />
+        </Field>
+
+        {customFields.length > 0 && (
+          <div className="sm:col-span-2 mt-2 border-t border-neutral-200 pt-4 dark:border-neutral-700">
+            <p className="mb-3 text-sm font-semibold">Custom fields</p>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              {customFields.map((f) => (
+                <Field key={f.id} label={f.label} required={f.required} hint={f.scope === "SOURCE_REFERENCE" ? "Reference from a source system" : undefined}>
+                  {f.type === "SELECT" ? (
+                    <select
+                      value={custom[f.key] ?? ""}
+                      onChange={(e) => setCustom((c) => ({ ...c, [f.key]: e.target.value }))}
+                      className={inputClass}
+                    >
+                      <option value="">—</option>
+                      {f.options?.map((o) => (
+                        <option key={o}>{o}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type={f.type === "NUMBER" ? "number" : f.type === "DATE" ? "date" : "text"}
+                      value={custom[f.key] ?? ""}
+                      onChange={(e) => setCustom((c) => ({ ...c, [f.key]: e.target.value }))}
+                      className={inputClass}
+                    />
+                  )}
+                </Field>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {party && (
+          <div className="sm:col-span-2">
+            <Toggle
+              checked={form.active}
+              onChange={(v) => setForm((f) => ({ ...f, active: v }))}
+              label="Active"
+              description={`Inactive ${kind}s keep their history but cannot be used on new documents.`}
+            />
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+};
+
+export default PartyFormModal;
