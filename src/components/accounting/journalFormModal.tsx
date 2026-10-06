@@ -54,6 +54,7 @@ const JournalFormModal = ({ open, onClose, draft, onSaved }: JournalFormModalPro
   const [lines, setLines] = useState<LineState[]>([blankLine(), blankLine()]);
   const [custom, setCustom] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const foreignGl = useMemo(
     () => new Map(state.bankAccounts.filter((b) => isForeign(b.currency)).map((b) => [b.gl_account_id, b.currency])),
     [state.bankAccounts],
@@ -130,31 +131,36 @@ const JournalFormModal = ({ open, onClose, draft, onSaved }: JournalFormModalPro
       })),
   });
 
-  const save = (intent: "DRAFT" | "POST") => {
+  const save = async (intent: "DRAFT" | "POST") => {
     const input = toInput();
-    if (draft) {
-      const res = actions.updateDraftJournal(draft.id, input);
-      if (!res.ok) return setError(res.error);
-      if (intent === "POST") {
-        const posted = actions.submitJournal(draft.id);
-        if (!posted.ok) {
-          setError(`Draft saved, but it could not be posted: ${posted.error}`);
-          return;
+    setBusy(true);
+    try {
+      if (draft) {
+        const res = await actions.updateDraftJournal(draft.id, input);
+        if (!res.ok) return setError(res.error);
+        if (intent === "POST") {
+          const posted = await actions.submitJournal(draft.id);
+          if (!posted.ok) {
+            setError(`Draft saved, but it could not be posted: ${posted.error}`);
+            return;
+          }
+          toast.success(posted.message ?? "Posted");
+          onSaved?.(posted.data);
+        } else {
+          toast.success(res.message ?? "Saved");
+          onSaved?.(res.data);
         }
-        toast.success(posted.message ?? "Posted");
-        onSaved?.(posted.data);
-      } else {
-        toast.success(res.message ?? "Saved");
-        onSaved?.(res.data);
+        onClose();
+        return;
       }
+      const res = await actions.createJournal(input, intent);
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Saved", { duration: 5000 });
+      onSaved?.(res.data);
       onClose();
-      return;
+    } finally {
+      setBusy(false);
     }
-    const res = actions.createJournal(input, intent);
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Saved", { duration: 5000 });
-    onSaved?.(res.data);
-    onClose();
   };
 
   return (
@@ -166,12 +172,12 @@ const JournalFormModal = ({ open, onClose, draft, onSaved }: JournalFormModalPro
       description="Manual double-entry journal. Debits must equal credits. Customer and supplier control accounts are posted through invoices, bills and payments."
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: "Save draft", onClick: () => save("DRAFT"), className: BTN_SECONDARY },
+        { label: "Save draft", onClick: () => save("DRAFT"), className: BTN_SECONDARY, disabled: busy },
         {
           label: needsApproval ? "Submit for approval" : "Post entry",
           onClick: () => save("POST"),
           className: BTN_PRIMARY,
-          disabled: !balanced,
+          disabled: !balanced || busy,
         },
       ]}
     >

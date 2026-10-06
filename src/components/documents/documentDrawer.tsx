@@ -42,9 +42,9 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
   const m = (v: number) => fmtMoney(v, cur);
   const fxTotal = payments.reduce((t, p) => t + p.fx_gain_loss, 0);
 
-  const approve = () => {
+  const approve = async () => {
     if (!doc) return;
-    const res = isInvoice ? actions.approveInvoice(doc.id) : actions.approveBill(doc.id);
+    const res = await (isInvoice ? actions.approveInvoice(doc.id) : actions.approveBill(doc.id));
     if (res.ok) toast.success(res.message ?? "Approved");
     else toast.error(res.error);
   };

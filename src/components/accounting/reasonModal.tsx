@@ -17,7 +17,7 @@ interface ReasonModalProps {
   withDate?: boolean;
   defaultDate?: string;
   placeholder?: string;
-  onConfirm: (reason: string, date: string) => Result<unknown>;
+  onConfirm: (reason: string, date: string) => Result<unknown> | Promise<Result<unknown>>;
 }
 
 /** Asks for a reason (kept on the audit trail) and optionally a date before a corrective action. */
@@ -36,6 +36,7 @@ const ReasonModal = ({
   const [reason, setReason] = useState("");
   const [date, setDate] = useState(defaultDate ?? todayIso());
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -45,14 +46,19 @@ const ReasonModal = ({
     }
   }, [open, defaultDate]);
 
-  const submit = () => {
-    const res = onConfirm(reason, date);
-    if (!res.ok) {
-      setError(res.error);
-      return;
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const res = await onConfirm(reason, date);
+      if (!res.ok) {
+        setError(res.error);
+        return;
+      }
+      toast.success(res.message ?? "Done");
+      onClose();
+    } finally {
+      setBusy(false);
     }
-    toast.success(res.message ?? "Done");
-    onClose();
   };
 
   return (
@@ -64,7 +70,7 @@ const ReasonModal = ({
       size="lg"
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: confirmLabel, onClick: submit, className: danger ? BTN_DANGER : BTN_PRIMARY },
+        { label: confirmLabel, onClick: submit, className: danger ? BTN_DANGER : BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />

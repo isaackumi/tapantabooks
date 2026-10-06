@@ -17,6 +17,8 @@ import { lineTotals } from "@/lib/ledger";
 import type { JournalEntry } from "@/models/accounting";
 import { fmtAccounting, fmtCurrency, fmtDate, fmtDateTime, fmtMoney } from "@/utils/format";
 import { CustomFieldDetails, EditCustomFieldsModal } from "@/components/customFields";
+import { AppConstants } from "@/core/appConstants";
+import { usePending } from "@/services/usePending";
 import { todayIso } from "@/utils/dates";
 
 interface JournalViewerValue {
@@ -67,6 +69,8 @@ export const JournalViewerProvider = ({ children }: { children: React.ReactNode 
   }, []);
   const value = useMemo(() => ({ openJournal, newJournal }), [openJournal, newJournal]);
 
+  const { pending, track, anyPending } = usePending();
+
   const run = (res: { ok: boolean; message?: string; error?: string }) => {
     if (res.ok) toast.success(res.message ?? "Done");
     else toast.error(res.error ?? "Something went wrong");
@@ -98,8 +102,8 @@ export const JournalViewerProvider = ({ children }: { children: React.ReactNode 
           >
             Edit
           </Button>
-          <Button icon={FiSend} onClick={() => run(actions.submitJournal(journal.id))}>
-            Post
+          <Button icon={FiSend} disabled={anyPending} onClick={() => track("submit", async () => run(await actions.submitJournal(journal.id)))}>
+            {pending("submit") ? "Posting…" : "Post"}
           </Button>
         </>
       )}
@@ -110,11 +114,11 @@ export const JournalViewerProvider = ({ children }: { children: React.ReactNode 
           </Button>
           <Button
             icon={FiCheck}
-            disabled={ownEntry}
-            title={ownEntry ? "You prepared this entry. Switch user to approve it." : undefined}
-            onClick={() => run(actions.approveJournal(journal.id))}
+            disabled={ownEntry || anyPending}
+            title={ownEntry ? "You prepared this entry, so another user has to approve it." : undefined}
+            onClick={() => track("approve", async () => run(await actions.approveJournal(journal.id)))}
           >
-            Approve &amp; post
+            {pending("approve") ? "Posting…" : "Approve & post"}
           </Button>
         </>
       )}
@@ -151,7 +155,9 @@ export const JournalViewerProvider = ({ children }: { children: React.ReactNode 
               <Callout tone="warning" title="Awaiting approval">
                 Prepared by {journal.created_by}.{" "}
                 {ownEntry
-                  ? "You prepared this entry, so a different person has to approve it. Use the profile menu to switch user."
+                  ? AppConstants.useMockApi && state.users.length > 1
+                    ? "You prepared this entry, so a different person has to approve it. Use the profile menu to switch user."
+                    : `You prepared this entry, so another user with approval rights has to approve it. Entries below ${fmtCurrency(state.org.approval_threshold)} post without approval; the threshold is in Settings.`
                   : "Review the lines, then approve to post it to the ledger or send it back with a reason."}
               </Callout>
             )}
@@ -306,8 +312,8 @@ export const JournalViewerProvider = ({ children }: { children: React.ReactNode 
             withDate
             defaultDate={todayIso()}
             placeholder="e.g. Posted to the wrong expense account"
-            onConfirm={(reason, date) => {
-              const res = actions.reverseJournal(journal.id, date, reason);
+            onConfirm={async (reason, date) => {
+              const res = await actions.reverseJournal(journal.id, date, reason);
               if (res.ok) setOpenId(res.data.id);
               return res;
             }}
@@ -332,8 +338,8 @@ export const JournalViewerProvider = ({ children }: { children: React.ReactNode 
               {
                 label: "Delete draft",
                 className: BTN_DANGER,
-                onClick: () => {
-                  if (run(actions.deleteDraftJournal(journal.id))) {
+                onClick: async () => {
+                  if (run(await actions.deleteDraftJournal(journal.id))) {
                     setDeleteOpen(false);
                     setOpenId(null);
                   }

@@ -16,6 +16,7 @@ import {
 } from "@/models/accounting";
 import { CUSTOM_FIELD_TYPE_LABEL, customFieldUsage, fieldsFor, formatCustomValue } from "@/lib/customFields";
 import { classNames } from "@/utils/format";
+import { usePending } from "@/services/usePending";
 
 const ENTITY_HINT: Record<CustomFieldEntity, string> = {
   Customer: "Shown on the customer form, the customer list and statements.",
@@ -75,6 +76,7 @@ const CustomFieldModal = ({
   const { state, actions } = useLedger();
   const [form, setForm] = useState<FormState>(blank(entity));
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const used = field ? customFieldUsage(state, field) : 0;
 
   useEffect(() => {
@@ -127,7 +129,7 @@ const CustomFieldModal = ({
   const [sample, setSample] = useState("");
   useEffect(() => setSample(form.default_value), [form.default_value, form.type]);
 
-  const submit = () => {
+  const submit = async () => {
     const payload = {
       label: form.label,
       type: form.type,
@@ -138,12 +140,17 @@ const CustomFieldModal = ({
       required: form.required,
       show_in_list: form.show_in_list,
     };
-    const res = field
-      ? actions.updateCustomField(field.id, payload)
-      : actions.addCustomField({ ...payload, entity: form.entity, key: form.key });
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Saved");
-    onClose();
+    setBusy(true);
+    try {
+      const res = await (field
+        ? actions.updateCustomField(field.id, payload)
+        : actions.addCustomField({ ...payload, entity: form.entity, key: form.key }));
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Saved");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -155,7 +162,7 @@ const CustomFieldModal = ({
       description="Capture information the standard model does not hold. Custom fields never change how an entry posts."
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: field ? "Save field" : "Add field", onClick: submit, className: BTN_PRIMARY },
+        { label: field ? "Save field" : "Add field", onClick: submit, className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />
@@ -322,6 +329,7 @@ export const CustomFieldsSettings = () => {
     [state],
   );
   const mappedKeys = new Set(state.fieldMappings.map((m) => m.target_field));
+  const { pending, track } = usePending();
 
   const run = (res: { ok: boolean; message?: string; error?: string }) =>
     res.ok ? res.message && toast.success(res.message) : toast.error(res.error ?? "Something went wrong");
@@ -407,16 +415,16 @@ export const CustomFieldsSettings = () => {
                       <td className="px-4 py-3">
                         <div className="flex gap-0.5">
                           <button
-                            disabled={i === 0}
-                            onClick={() => run(actions.moveCustomField(f.id, -1))}
+                            disabled={i === 0 || pending("move")}
+                            onClick={() => track("move", async () => run(await actions.moveCustomField(f.id, -1)))}
                             className="rounded p-1 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 disabled:opacity-30 dark:hover:bg-neutral-700"
                             aria-label={`Move ${f.label} up`}
                           >
                             <FiArrowUp className="h-4 w-4" />
                           </button>
                           <button
-                            disabled={i === fields.length - 1}
-                            onClick={() => run(actions.moveCustomField(f.id, 1))}
+                            disabled={i === fields.length - 1 || pending("move")}
+                            onClick={() => track("move", async () => run(await actions.moveCustomField(f.id, 1)))}
                             className="rounded p-1 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 disabled:opacity-30 dark:hover:bg-neutral-700"
                             aria-label={`Move ${f.label} down`}
                           >
@@ -472,8 +480,9 @@ export const CustomFieldsSettings = () => {
                             <FiEdit2 className="h-4 w-4" />
                           </button>
                           <button
-                            onClick={() => run(actions.updateCustomField(f.id, { is_active: !f.is_active }))}
-                            className="whitespace-nowrap rounded px-2 py-1 text-xs font-medium text-brand-700 hover:bg-brand-50 dark:text-brand-300 dark:hover:bg-brand-900/20"
+                            disabled={pending(f.id)}
+                            onClick={() => track(f.id, async () => run(await actions.updateCustomField(f.id, { is_active: !f.is_active })))}
+                            className="whitespace-nowrap rounded px-2 py-1 text-xs font-medium text-brand-700 hover:bg-brand-50 disabled:opacity-40 dark:text-brand-300 dark:hover:bg-brand-900/20"
                           >
                             {f.is_active ? "Deactivate" : "Activate"}
                           </button>
@@ -515,8 +524,8 @@ export const CustomFieldsSettings = () => {
           {
             label: "Delete field",
             className: BTN_DANGER,
-            onClick: () => {
-              if (deleting) run(actions.deleteCustomField(deleting.id));
+            onClick: async () => {
+              if (deleting) run(await actions.deleteCustomField(deleting.id));
               setDeleting(null);
             },
           },

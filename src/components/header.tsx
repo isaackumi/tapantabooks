@@ -6,7 +6,10 @@ import { HiMiniBars4, HiMagnifyingGlass } from "react-icons/hi2";
 import { FiCheck, FiRefreshCw } from "react-icons/fi";
 import { Menu, MenuButton, MenuItem, MenuItems, Transition } from "@headlessui/react";
 import { useGlobalState } from "@/utils/globalStateContext";
-import { ALL_USERS, periodForDate, useCurrentUser, useLedger } from "@/store/ledgerStore";
+import { periodForDate, useCurrentUser, useLedger } from "@/store/ledgerStore";
+import { AppConstants } from "@/core/appConstants";
+import { redirectToLogin } from "@/core/session";
+import { FiLogOut } from "react-icons/fi";
 import { todayIso } from "@/utils/dates";
 import { DarkModeToggle, EntitySwitcher, FullScreenToggle, SidebarModeToggle } from "./headerControls";
 import { TourButton } from "@/tour/tourCenter";
@@ -112,16 +115,19 @@ const Header = ({ setSidebarOpen }: { setSidebarOpen: (open: boolean) => void })
                   <p className="text-sm font-medium text-neutral-800 dark:text-neutral-200">{user.name}</p>
                   <p className="text-xs text-neutral-700 dark:text-neutral-300">{user.email}</p>
                 </div>
-                <p className="px-5 pt-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
-                  Switch user (demo maker-checker)
-                </p>
-                {ALL_USERS.map((u) => (
+                {AppConstants.useMockApi && state.users.length > 1 && (
+                  <p className="px-5 pt-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
+                    Switch user (demo maker-checker)
+                  </p>
+                )}
+                {AppConstants.useMockApi && state.users.length > 1 && state.users.map((u) => (
                   <MenuItem key={u.id}>
                     {({ focus }) => (
                       <button
-                        onClick={() => {
-                          actions.switchUser(u.id);
-                          toast.success(`Now acting as ${u.name}`);
+                        onClick={async () => {
+                          const res = await actions.switchUser(u.id);
+                          if (res.ok) toast.success(`Now acting as ${u.name}`);
+                          else toast.error(res.error);
                         }}
                         className={`${focus ? "bg-neutral-50 dark:bg-neutral-700" : ""} flex w-full items-center gap-3 px-5 py-2 text-left`}
                       >
@@ -136,16 +142,29 @@ const Header = ({ setSidebarOpen }: { setSidebarOpen: (open: boolean) => void })
                   </MenuItem>
                 ))}
                 <div className="my-2 border-t border-neutral-100 dark:border-neutral-700" />
+                {AppConstants.useMockApi && (
+                  <MenuItem>
+                    {({ focus }) => (
+                      <button
+                        onClick={async () => {
+                          const res = await actions.resetDemo();
+                          if (res.ok) toast.success("Demo data reset");
+                          else toast.error(res.error);
+                        }}
+                        className={`${focus ? "bg-neutral-50 dark:bg-neutral-700" : ""} flex w-full items-center gap-2 px-5 py-2 text-sm text-neutral-900 dark:text-white`}
+                      >
+                        <FiRefreshCw className="h-4 w-4" /> Reset demo data
+                      </button>
+                    )}
+                  </MenuItem>
+                )}
                 <MenuItem>
                   {({ focus }) => (
                     <button
-                      onClick={() => {
-                        actions.resetDemo();
-                        toast.success("Demo data reset");
-                      }}
+                      onClick={redirectToLogin}
                       className={`${focus ? "bg-neutral-50 dark:bg-neutral-700" : ""} flex w-full items-center gap-2 px-5 py-2 text-sm text-neutral-900 dark:text-white`}
                     >
-                      <FiRefreshCw className="h-4 w-4" /> Reset demo data
+                      <FiLogOut className="h-4 w-4" /> Sign out
                     </button>
                   )}
                 </MenuItem>

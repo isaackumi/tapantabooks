@@ -77,8 +77,8 @@ export default function RulesPage() {
               <div className="mb-5 rounded-xl border border-neutral-200 p-4 dark:border-neutral-700">
                 <Toggle
                   checked={rule.is_active}
-                  onChange={() => {
-                    const res = actions.toggleRule(rule.id);
+                  onChange={async () => {
+                    const res = await actions.toggleRule(rule.id);
                     if (res.ok) toast.success(res.message ?? "Updated");
                   }}
                   label="Rule active"

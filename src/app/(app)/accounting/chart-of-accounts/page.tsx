@@ -33,6 +33,7 @@ const NewAccountModal = ({ open, onClose }: { open: boolean; onClose: () => void
   const [form, setForm] = useState({ code: "", name: "", parent_id: "", subtype: "", description: "", is_bank: false });
   const [custom, setCustom] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const parent = groups.find((g) => g.id === form.parent_id);
 
   useEffect(() => {
@@ -52,11 +53,16 @@ const NewAccountModal = ({ open, onClose }: { open: boolean; onClose: () => void
     return String(next);
   };
 
-  const submit = () => {
-    const res = actions.createAccount({ ...form, subtype: form.subtype || SUBTYPES[parent?.type ?? "ASSET"][0], custom_fields: custom });
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Account added");
-    onClose();
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const res = await actions.createAccount({ ...form, subtype: form.subtype || SUBTYPES[parent?.type ?? "ASSET"][0], custom_fields: custom });
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Account added");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -68,7 +74,7 @@ const NewAccountModal = ({ open, onClose }: { open: boolean; onClose: () => void
       description="Accounts post under a group. The group decides the account type and where it appears in reports."
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: "Add account", onClick: submit, className: BTN_PRIMARY },
+        { label: "Add account", onClick: submit, className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />
@@ -155,6 +161,7 @@ const EditAccountModal = ({ account, onClose }: { account: Account | null; onClo
   const [description, setDescription] = useState("");
   const [custom, setCustom] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (account) {
@@ -165,12 +172,17 @@ const EditAccountModal = ({ account, onClose }: { account: Account | null; onClo
     }
   }, [account]);
 
-  const submit = () => {
+  const submit = async () => {
     if (!account) return;
-    const res = actions.updateAccount(account.id, { name, description, custom_fields: custom });
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Saved");
-    onClose();
+    setBusy(true);
+    try {
+      const res = await actions.updateAccount(account.id, { name, description, custom_fields: custom });
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Saved");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -182,7 +194,7 @@ const EditAccountModal = ({ account, onClose }: { account: Account | null; onClo
       description="The code and type are fixed once an account exists, so history keeps its meaning."
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: "Save", onClick: submit, className: BTN_PRIMARY },
+        { label: "Save", onClick: submit, className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />
@@ -227,12 +239,12 @@ export default function ChartOfAccountsPage() {
     ACCOUNT_TYPE_ORDER.map((t) => [t, state.accounts.filter((a) => a.type === t && !a.is_group).length]),
   );
 
-  const toggleActive = (a: Account) => {
+  const toggleActive = async (a: Account) => {
     if (a.is_active && Math.abs(balances.get(a.id) ?? 0) > 0.005) {
       toast.error(`${a.name} has a balance. Move it to another account before deactivating.`);
       return;
     }
-    const res = actions.updateAccount(a.id, { is_active: !a.is_active });
+    const res = await actions.updateAccount(a.id, { is_active: !a.is_active });
     if (res.ok) toast.success(a.is_active ? `${a.name} deactivated` : `${a.name} reactivated`);
     else toast.error(res.error);
   };

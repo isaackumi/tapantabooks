@@ -191,6 +191,7 @@ const ImportWizard = ({ open, onClose, onDone }: { open: boolean; onClose: () =>
   const [table, setTable] = useState<string[][]>([]);
   const [mapping, setMapping] = useState<Record<string, number>>({});
   const [post, setPost] = useState(true);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -246,27 +247,33 @@ const ImportWizard = ({ open, onClose, onDone }: { open: boolean; onClose: () =>
   const financial = entity === "Invoices" || entity === "Bills" || entity === "Sales";
   const postable = records.filter((r) => r.status !== "ERROR");
 
-  const finish = () => {
-    const res = actions.createImport({ source_id: sourceId, entity, file_name: fileName, records, post });
-    if (!res.ok) {
-      toast.error(res.error);
-      return;
+  const finish = async () => {
+    setBusy(true);
+    try {
+      const res = await actions.createImport({ source_id: sourceId, entity, file_name: fileName, records, post });
+      if (!res.ok) {
+        toast.error(res.error);
+        return;
+      }
+      if (post && (entity === "Customers" || entity === "Suppliers")) {
+        const kind = entity === "Customers" ? "customer" : "supplier";
+        for (let i = 0; i < dataRows.length; i++) {
+          const r = dataRows[i];
+          if (records[i].status === "ERROR") continue;
+          await actions.saveParty(kind, {
+            name: r[mapping.name]?.trim() ?? "",
+            email: mapping.email >= 0 ? r[mapping.email]?.trim() : "",
+            phone: mapping.phone >= 0 ? r[mapping.phone]?.trim() : "",
+            external_reference: records[i].external_reference,
+          });
+        }
+      }
+      toast.success(res.message ?? "Imported", { duration: 5000 });
+      onDone(res.data.id);
+      onClose();
+    } finally {
+      setBusy(false);
     }
-    if (post && (entity === "Customers" || entity === "Suppliers")) {
-      const kind = entity === "Customers" ? "customer" : "supplier";
-      dataRows.forEach((r, i) => {
-        if (records[i].status === "ERROR") return;
-        actions.saveParty(kind, {
-          name: r[mapping.name]?.trim() ?? "",
-          email: mapping.email >= 0 ? r[mapping.email]?.trim() : "",
-          phone: mapping.phone >= 0 ? r[mapping.phone]?.trim() : "",
-          external_reference: records[i].external_reference,
-        });
-      });
-    }
-    toast.success(res.message ?? "Imported", { duration: 5000 });
-    onDone(res.data.id);
-    onClose();
   };
 
   const canNext =
@@ -285,7 +292,7 @@ const ImportWizard = ({ open, onClose, onDone }: { open: boolean; onClose: () =>
           label: post ? `Post ${postable.length} row${postable.length === 1 ? "" : "s"}` : "Save for review",
           onClick: finish,
           className: BTN_PRIMARY,
-          disabled: post && postable.length === 0,
+          disabled: (post && postable.length === 0) || busy,
         },
   ];
 

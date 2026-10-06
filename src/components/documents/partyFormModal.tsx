@@ -34,6 +34,7 @@ const PartyFormModal = ({ kind, open, onClose, party }: PartyFormModalProps) => 
   const [form, setForm] = useState(empty);
   const [custom, setCustom] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const entity = kind === "customer" ? "Customer" : "Supplier";
   const currencies = state.currencies.filter((c) => c.is_active || c.code === party?.currency);
   const hasDocs = !!party && (kind === "customer" ? state.invoices.some((d) => d.customer_id === party.id) : state.bills.some((d) => d.supplier_id === party.id));
@@ -63,26 +64,31 @@ const PartyFormModal = ({ kind, open, onClose, party }: PartyFormModalProps) => 
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm((f) => ({ ...f, [k]: e.target.value }));
 
-  const submit = () => {
-    const res = actions.saveParty(
-      kind,
-      {
-        name: form.name,
-        email: form.email,
-        phone: form.phone,
-        city: form.city,
-        tin: form.tin || undefined,
-        payment_terms_days: Number(form.payment_terms_days) || 0,
-        credit_limit: Number(form.credit_limit) || 0,
-        currency: form.currency,
-        status: form.active ? "ACTIVE" : "INACTIVE",
-        custom_fields: custom,
-      },
-      party?.id,
-    );
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Saved");
-    onClose();
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const res = await actions.saveParty(
+        kind,
+        {
+          name: form.name,
+          email: form.email,
+          phone: form.phone,
+          city: form.city,
+          tin: form.tin || undefined,
+          payment_terms_days: Number(form.payment_terms_days) || 0,
+          credit_limit: Number(form.credit_limit) || 0,
+          currency: form.currency,
+          status: form.active ? "ACTIVE" : "INACTIVE",
+          custom_fields: custom,
+        },
+        party?.id,
+      );
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Saved");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -93,7 +99,7 @@ const PartyFormModal = ({ kind, open, onClose, party }: PartyFormModalProps) => 
       title={party ? `Edit ${party.name}` : `New ${kind}`}
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: party ? "Save changes" : `Add ${kind}`, onClick: submit, className: BTN_PRIMARY },
+        { label: party ? "Save changes" : `Add ${kind}`, onClick: submit, className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />

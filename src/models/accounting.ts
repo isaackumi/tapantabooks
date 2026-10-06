@@ -410,7 +410,12 @@ export interface OrgSettings {
   name: string;
   legal_name: string;
   tin: string;
+  /** ISO 3166-1 alpha-2, e.g. GH. */
+  country: string;
+  /** ISO 4217. Chosen at setup (default GHS); can only change while no journal has been posted. */
   base_currency: string;
+  /** False until the owner completes POST /organisation/setup after sign-up. */
+  setup_completed: boolean;
   fiscal_year_start: string;
   address: string;
   email: string;
@@ -425,6 +430,22 @@ export interface OrgSettings {
   fx_unrealised_account_id: string;
   /** Warn when a rate typed on a document differs from the latest reference rate by more than this. */
   fx_rate_tolerance_pct: number;
+}
+
+/** Body of POST /organisation/setup, sent once by the owner after sign-up. */
+export interface OrganisationSetupInput {
+  name: string;
+  legal_name: string;
+  tin?: string;
+  /** ISO 3166-1 alpha-2. */
+  country: string;
+  /** ISO 4217. */
+  base_currency: string;
+  /** MM-01: the first day of the month the financial year starts. */
+  fiscal_year_start: string;
+  address?: string;
+  email?: string;
+  phone?: string;
 }
 
 export interface CurrentUser {

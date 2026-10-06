@@ -10,11 +10,20 @@ import StatCard from "@/components/statCard";
 import StatusBadge from "@/components/statusBadge";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
-import { revaluationPreview, useLedger } from "@/store/ledgerStore";
+import { useLedger } from "@/store/ledgerStore";
+import { useApiQuery } from "@/services/useApiQuery";
 import { revaluationJournalLines } from "@/lib/fx";
 import type { FxRevaluationLine } from "@/models/accounting";
 import { addDays, todayIso } from "@/utils/dates";
-import { classNames, fmtAccounting, fmtCurrency, fmtDate, fmtDateTime, fmtMoney, fmtRate } from "@/utils/format";
+import { CURRENCY_SYMBOL, classNames, fmtAccounting, fmtCurrency, fmtDate, fmtDateTime, fmtMoney, fmtRate } from "@/utils/format";
+
+interface RevaluationPreview {
+  rates: Record<string, number>;
+  lines: FxRevaluationLine[];
+  missing: string[];
+}
+
+const EMPTY_PREVIEW: RevaluationPreview = { rates: {}, lines: [], missing: [] };
 
 const KIND_LABEL: Record<FxRevaluationLine["kind"], string> = {
   RECEIVABLE: "Customer invoices (Accounts Receivable)",
@@ -40,9 +49,9 @@ const LinesTable = ({ lines }: { lines: FxRevaluationLine[] }) => (
         <tr>
           <th className="px-6 py-2 font-normal">Item</th>
           <th className="px-4 py-2 text-right font-normal">Open amount</th>
-          <th className="px-4 py-2 text-right font-normal">Booked in GH₵</th>
+          <th className="px-4 py-2 text-right font-normal">Booked in {CURRENCY_SYMBOL}</th>
           <th className="px-4 py-2 text-right font-normal">Closing rate</th>
-          <th className="px-4 py-2 text-right font-normal">Revalued GH₵</th>
+          <th className="px-4 py-2 text-right font-normal">Revalued {CURRENCY_SYMBOL}</th>
           <th className="px-6 py-2 text-right font-normal">Gain / (loss)</th>
         </tr>
       </thead>
@@ -94,7 +103,9 @@ export default function RevaluationPage() {
 
   const period = state.periods.find((p) => p.id === periodId);
   const asAt = period?.end_date ?? today;
-  const preview = useMemo(() => revaluationPreview(state, asAt), [state, asAt]);
+  const preview =
+    useApiQuery<RevaluationPreview>("/revaluations/preview", { as_at: asAt }, [state.journals, state.exchangeRates]).data ??
+    EMPTY_PREVIEW;
   const done = state.fxRevaluations.find((r) => r.period_id === periodId);
   const changed = preview.lines.filter((l) => l.difference !== 0);
   const net = Math.round(preview.lines.reduce((t, l) => t + l.difference, 0) * 100) / 100;
@@ -109,8 +120,8 @@ export default function RevaluationPage() {
 
   const exposure = (kind: FxRevaluationLine["kind"]) => preview.lines.filter((l) => l.kind === kind).reduce((t, l) => t + l.carrying_base, 0);
 
-  const post = () => {
-    const res = actions.runRevaluation(periodId);
+  const post = async () => {
+    const res = await actions.runRevaluation(periodId);
     setConfirmOpen(false);
     if (res.ok) toast.success(res.message ?? "Posted", { duration: 6000 });
     else toast.error(res.error);
@@ -137,7 +148,7 @@ export default function RevaluationPage() {
           value={`${shown >= 0 ? "+" : "−"}${fmtCurrency(Math.abs(shown))}`}
           tone={shown >= 0 ? "success" : "danger"}
           sub={done ? `Posted ${fmtDate(done.as_at)}` : "If posted now"}
-          info="Gain if the cedi value of what you are owed and hold rose more than the cedi value of what you owe."
+          info={`Gain if the ${state.org.base_currency} value of what you are owed and hold rose more than the ${state.org.base_currency} value of what you owe.`}
         />
       </div>
 
@@ -169,7 +180,7 @@ export default function RevaluationPage() {
             </ul>
           </Panel>
 
-          <Panel tour="reval-rates" title="Closing rates" subtitle={`GH₵ per unit on ${fmtDate(asAt)}`}>
+          <Panel tour="reval-rates" title="Closing rates" subtitle={`${CURRENCY_SYMBOL} per unit on ${fmtDate(asAt)}`}>
             <dl className="space-y-2 text-sm">
               {Object.entries(done ? done.rates : preview.rates)
                 .filter(([c]) => preview.lines.some((l) => l.currency === c) || preview.missing.includes(c))

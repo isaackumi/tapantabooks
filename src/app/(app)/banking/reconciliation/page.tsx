@@ -13,6 +13,7 @@ import { useLedger } from "@/store/ledgerStore";
 import { affectsLedger, balancesByAccount } from "@/lib/ledger";
 import type { BankStatementLine, JournalEntry } from "@/models/accounting";
 import { useQueryParam } from "@/utils/useQueryParam";
+import { usePending } from "@/services/usePending";
 import { fmtCurrency, fmtDate, fmtDateTime, round2 } from "@/utils/format";
 import { daysBetween } from "@/utils/dates";
 
@@ -72,18 +73,21 @@ export default function ReconciliationPage() {
   const progress = lines.length ? Math.round((matchedCount / lines.length) * 100) : 100;
   const journalById = new Map(state.journals.map((j) => [j.id, j]));
 
+  const { pending, track, anyPending } = usePending();
   const run = (res: { ok: boolean; message?: string; error?: string }) => {
     if (res.ok) toast.success(res.message ?? "Done");
     else toast.error(res.error ?? "Failed");
     return res.ok;
   };
 
-  const acceptAllSuggestions = () => {
-    const suggested = lines.filter((l) => l.status === "SUGGESTED" && l.suggested_journal_id);
-    let done = 0;
-    for (const l of suggested) if (actions.matchStatementLine(l.id, l.suggested_journal_id!).ok) done++;
-    toast.success(`${done} suggested matches accepted`);
-  };
+  const acceptAllSuggestions = () =>
+    track("all", async () => {
+      const suggested = lines.filter((l) => l.status === "SUGGESTED" && l.suggested_journal_id);
+      let done = 0;
+      for (const l of suggested) if ((await actions.matchStatementLine(l.id, l.suggested_journal_id!)).ok) done++;
+      toast.success(`${done} suggested matches accepted`);
+    });
+  const lineBusy = (id: string) => pending(id) || pending("all");
 
   return (
     <div>
@@ -102,11 +106,11 @@ export default function ReconciliationPage() {
             <Button
               icon={FiCheckCircle}
               data-tour="rec-complete"
-              disabled={review.length > 0 || lines.length === 0}
+              disabled={review.length > 0 || lines.length === 0 || anyPending}
               title={review.length ? "Match every line first" : undefined}
-              onClick={() => run(actions.completeReconciliation(bank.id))}
+              onClick={() => track("complete", async () => run(await actions.completeReconciliation(bank.id)))}
             >
-              Complete reconciliation
+              {pending("complete") ? "Completing…" : "Complete reconciliation"}
             </Button>
           </>
         }
@@ -209,8 +213,8 @@ export default function ReconciliationPage() {
             onChange={setTab}
             actions={
               lines.some((l) => l.status === "SUGGESTED") && (
-                <Button variant="secondary" icon={FiZap} onClick={acceptAllSuggestions}>
-                  Accept all suggestions
+                <Button variant="secondary" icon={FiZap} disabled={anyPending} onClick={acceptAllSuggestions}>
+                  {pending("all") ? "Accepting…" : "Accept all suggestions"}
                 </Button>
               )
             }
@@ -267,13 +271,24 @@ export default function ReconciliationPage() {
                       <td className="px-4 py-3">
                         <div className="flex justify-end gap-1.5">
                           {l.status === "MATCHED" ? (
-                            <Button size="sm" variant="ghost" icon={FiX} onClick={() => run(actions.unmatchStatementLine(l.id))}>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              icon={FiX}
+                              disabled={lineBusy(l.id)}
+                              onClick={() => track(l.id, async () => run(await actions.unmatchStatementLine(l.id)))}
+                            >
                               Unmatch
                             </Button>
                           ) : (
                             <>
                               {suggestion && (
-                                <Button size="sm" icon={FiCheck} onClick={() => run(actions.matchStatementLine(l.id, suggestion.id))}>
+                                <Button
+                                  size="sm"
+                                  icon={FiCheck}
+                                  disabled={lineBusy(l.id)}
+                                  onClick={() => track(l.id, async () => run(await actions.matchStatementLine(l.id, suggestion.id)))}
+                                >
                                   Accept
                                 </Button>
                               )}
@@ -300,8 +315,8 @@ export default function ReconciliationPage() {
         line={matching}
         candidates={rec.ledgerOnly}
         onClose={() => setMatching(null)}
-        onMatch={(journalId) => {
-          if (matching && run(actions.matchStatementLine(matching.id, journalId))) setMatching(null);
+        onMatch={async (journalId) => {
+          if (matching && run(await actions.matchStatementLine(matching.id, journalId))) setMatching(null);
         }}
       />
       <CreateEntryModal line={creating} onClose={() => setCreating(null)} />
@@ -371,6 +386,7 @@ const CreateEntryModal = ({ line, onClose }: { line: BankStatementLine | null; o
   const [accountId, setAccountId] = useState("");
   const [memo, setMemo] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!line) return;
@@ -382,12 +398,17 @@ const CreateEntryModal = ({ line, onClose }: { line: BankStatementLine | null; o
     );
   }, [line]);
 
-  const submit = () => {
+  const submit = async () => {
     if (!line) return;
-    const res = actions.createEntryFromStatementLine(line.id, accountId, memo);
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Posted");
-    onClose();
+    setBusy(true);
+    try {
+      const res = await actions.createEntryFromStatementLine(line.id, accountId, memo);
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Posted");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -399,7 +420,7 @@ const CreateEntryModal = ({ line, onClose }: { line: BankStatementLine | null; o
       description={line ? `${fmtCurrency(line.amount)} on ${fmtDate(line.date)}. The bank side is filled in for you.` : ""}
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: "Post & match", onClick: submit, className: BTN_PRIMARY },
+        { label: "Post & match", onClick: submit, className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />

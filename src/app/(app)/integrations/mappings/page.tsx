@@ -45,6 +45,7 @@ const MappingModal = ({ open, mapping, onClose }: { open: boolean; mapping: Fiel
   const { state, actions } = useLedger();
   const [form, setForm] = useState<Omit<FieldMapping, "id">>({ source_id: "ds_store", entity: "", source_field: "", target_field: "", transform: "—", required: false });
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const source = state.dataSources.find((s) => s.id === form.source_id);
   const targets = [...TARGETS, ...state.customFields.filter((f) => f.is_active).map((f) => `custom.${f.key}`)];
 
@@ -58,11 +59,16 @@ const MappingModal = ({ open, mapping, onClose }: { open: boolean; mapping: Fiel
     );
   }, [open, mapping, state.dataSources]);
 
-  const submit = () => {
-    const res = actions.saveMapping({ ...form, transform: form.transform.trim() || "—" }, mapping?.id);
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Saved");
-    onClose();
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const res = await actions.saveMapping({ ...form, transform: form.transform.trim() || "—" }, mapping?.id);
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Saved");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -74,7 +80,7 @@ const MappingModal = ({ open, mapping, onClose }: { open: boolean; mapping: Fiel
       description="Tells the integration layer which source field fills which Trovesuite field, and how to transform it."
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: "Save mapping", onClick: submit, className: BTN_PRIMARY },
+        { label: "Save mapping", onClick: submit, className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />
@@ -217,8 +223,8 @@ export default function MappingsPage() {
                               <FiEdit2 className="h-4 w-4" />
                             </button>
                             <button
-                              onClick={() => {
-                                const res = actions.removeMapping(m.id);
+                              onClick={async () => {
+                                const res = await actions.removeMapping(m.id);
                                 if (res.ok) toast.success(res.message ?? "Removed");
                                 else toast.error(res.error);
                               }}

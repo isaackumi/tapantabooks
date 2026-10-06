@@ -1,5 +1,4 @@
-export const CURRENCY_SYMBOL = "GH₵";
-export const BASE_CURRENCY = "GHS";
+export const DEFAULT_BASE_CURRENCY = "GHS";
 
 export const CURRENCY_SYMBOLS: Record<string, string> = {
   GHS: "GH₵",
@@ -8,9 +7,19 @@ export const CURRENCY_SYMBOLS: Record<string, string> = {
   GBP: "£",
   NGN: "₦",
   XOF: "CFA",
+  KES: "KSh",
   CNY: "CN¥",
   ZAR: "R",
   AED: "AED",
+};
+
+/** The organisation's base currency. Live bindings: read at call time, never cache at module load. */
+export let BASE_CURRENCY = DEFAULT_BASE_CURRENCY;
+export let CURRENCY_SYMBOL = CURRENCY_SYMBOLS[DEFAULT_BASE_CURRENCY];
+
+export const setBaseCurrency = (code: string, symbol?: string) => {
+  BASE_CURRENCY = code;
+  CURRENCY_SYMBOL = symbol || CURRENCY_SYMBOLS[code] || code;
 };
 
 const numberFormatter = new Intl.NumberFormat("en-GH", {
@@ -56,9 +65,9 @@ export const fmtAccounting = (value: number) => {
 export const fmtCompact = (value: number) => {
   const abs = Math.abs(value);
   const sign = value < 0 ? "-" : "";
-  if (abs >= 1_000_000) return `${sign}₵${(abs / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `${sign}₵${(abs / 1_000).toFixed(1)}K`;
-  return `${sign}₵${abs.toFixed(0)}`;
+  if (abs >= 1_000_000) return `${sign}${CURRENCY_SYMBOL}${(abs / 1_000_000).toFixed(1)}M`;
+  if (abs >= 1_000) return `${sign}${CURRENCY_SYMBOL}${(abs / 1_000).toFixed(1)}K`;
+  return `${sign}${CURRENCY_SYMBOL}${abs.toFixed(0)}`;
 };
 
 export const fmtDate = (iso: string | null | undefined) => {

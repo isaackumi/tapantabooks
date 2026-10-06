@@ -15,6 +15,7 @@ import { useLedger } from "@/store/ledgerStore";
 import type { ImportBatch } from "@/models/accounting";
 import { matchesSearch, useGlobalState } from "@/utils/globalStateContext";
 import { useQueryParam } from "@/utils/useQueryParam";
+import { usePending } from "@/services/usePending";
 import { fmtCurrency, fmtDateTime } from "@/utils/format";
 
 type Row = ImportBatch & { source: string; valid: number; warnings: number; errors: number; posted: number };
@@ -45,6 +46,7 @@ export default function ImportsPage() {
   const viewing = rows.find((r) => r.id === viewId);
   const ready = viewing ? viewing.records.filter((r) => r.status !== "ERROR" && !r.posted).length : 0;
 
+  const { pending, track, anyPending } = usePending();
   const run = (res: { ok: boolean; message?: string; error?: string }) => {
     if (res.ok) toast.success(res.message ?? "Done");
     else toast.error(res.error ?? "Failed");
@@ -156,8 +158,8 @@ export default function ImportsPage() {
                 </Button>
               )}
               {ready > 0 && (
-                <Button icon={FiCheck} onClick={() => run(actions.postImportBatch(viewing.id))}>
-                  Post {ready} ready row{ready === 1 ? "" : "s"}
+                <Button icon={FiCheck} disabled={anyPending} onClick={() => track("post", async () => run(await actions.postImportBatch(viewing.id)))}>
+                  {pending("post") ? "Posting…" : `Post ${ready} ready row${ready === 1 ? "" : "s"}`}
                 </Button>
               )}
             </div>
@@ -221,7 +223,13 @@ export default function ImportsPage() {
                       </td>
                       <td className="px-3 py-2 text-right">
                         {r.status === "ERROR" && viewing.status !== "FAILED" && (
-                          <Button size="sm" variant="secondary" icon={FiRefreshCw} onClick={() => run(actions.reprocessRecord(viewing.id, r.row))}>
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            icon={FiRefreshCw}
+                            disabled={pending(`row-${r.row}`) || pending("post")}
+                            onClick={() => track(`row-${r.row}`, async () => run(await actions.reprocessRecord(viewing.id, r.row)))}
+                          >
                             Mark fixed
                           </Button>
                         )}

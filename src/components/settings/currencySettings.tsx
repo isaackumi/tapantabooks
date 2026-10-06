@@ -20,21 +20,27 @@ const AddCurrencyModal = ({ open, onClose }: { open: boolean; onClose: () => voi
   const { actions } = useLedger();
   const [form, setForm] = useState({ code: "", name: "", symbol: "", rate: "" });
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (open) {
       setForm({ code: "", name: "", symbol: "", rate: "" });
       setError(null);
     }
   }, [open]);
-  const submit = () => {
-    const res = actions.addCurrency(form);
-    if (!res.ok) return setError(res.error);
-    if (Number(form.rate) > 0) {
-      const r = actions.addExchangeRate({ currency: res.data.code, date: todayIso(), rate: Number(form.rate) });
-      if (!r.ok) return setError(r.error);
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const res = await actions.addCurrency(form);
+      if (!res.ok) return setError(res.error);
+      if (Number(form.rate) > 0) {
+        const r = await actions.addExchangeRate({ currency: res.data.code, date: todayIso(), rate: Number(form.rate) });
+        if (!r.ok) return setError(r.error);
+      }
+      toast.success(res.message ?? "Added");
+      onClose();
+    } finally {
+      setBusy(false);
     }
-    toast.success(res.message ?? "Added");
-    onClose();
   };
   return (
     <Modal
@@ -44,7 +50,7 @@ const AddCurrencyModal = ({ open, onClose }: { open: boolean; onClose: () => voi
       description="Once added, the currency can be used on customers, suppliers, invoices, bills and bank accounts."
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: "Add currency", onClick: submit, className: BTN_PRIMARY },
+        { label: "Add currency", onClick: submit, className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />
@@ -96,8 +102,8 @@ const RateHistory = ({ code }: { code: string }) => {
     setError(null);
   }, [code, latest]);
 
-  const record = () => {
-    const res = actions.addExchangeRate({ currency: code, date: form.date, rate: Number(form.rate) });
+  const record = async () => {
+    const res = await actions.addExchangeRate({ currency: code, date: form.date, rate: Number(form.rate) });
     if (!res.ok) return setError(res.error);
     setError(null);
     toast.success(res.message ?? "Recorded");
@@ -188,8 +194,8 @@ const RateHistory = ({ code }: { code: string }) => {
                   <td className="px-4 py-2 text-right">
                     {r.source === "MANUAL" && (
                       <button
-                        onClick={() => {
-                          const res = actions.deleteExchangeRate(r.id);
+                        onClick={async () => {
+                          const res = await actions.deleteExchangeRate(r.id);
                           if (res.ok) toast.success(res.message ?? "Deleted");
                           else toast.error(res.error);
                         }}
@@ -222,8 +228,8 @@ const FxPostingPanel = () => {
   useEffect(() => setForm(pick(state.org)), [state.org]);
   const dirty = JSON.stringify(form) !== JSON.stringify(pick(state.org));
   const plAccounts = state.accounts.filter((a) => a.is_active && !a.is_group && (a.type === "EXPENSE" || a.type === "REVENUE"));
-  const save = () => {
-    const res = actions.updateOrg(form);
+  const save = async () => {
+    const res = await actions.updateOrg(form);
     if (!res.ok) return setError(res.error);
     setError(null);
     toast.success("Exchange settings saved");
@@ -326,8 +332,8 @@ export const CurrencySettings = () => {
             </div>
             <Button
               icon={FiDownloadCloud}
-              onClick={() => {
-                const res = actions.fetchReferenceRates();
+              onClick={async () => {
+                const res = await actions.fetchReferenceRates();
                 if (res.ok) toast.success(res.message ?? "Fetched");
                 else toast.error(res.error);
               }}
@@ -432,8 +438,8 @@ export const CurrencySettings = () => {
                     </td>
                     <td className="px-6 py-3 text-right">
                       <button
-                        onClick={() => {
-                          const res = actions.toggleCurrency(c.code);
+                        onClick={async () => {
+                          const res = await actions.toggleCurrency(c.code);
                           if (res.ok) toast.success(res.message ?? "Updated");
                           else toast.error(res.error);
                         }}

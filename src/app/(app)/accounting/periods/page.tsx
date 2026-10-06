@@ -28,6 +28,7 @@ const VERB: Record<PeriodStatus, { label: string; description: string }> = {
 export default function PeriodsPage() {
   const { state, actions } = useLedger();
   const [pending, setPending] = useState<{ period: FiscalPeriod; to: PeriodStatus } | null>(null);
+  const [busy, setBusy] = useState(false);
   const today = todayIso();
 
   const stats = state.periods.map((p) => {
@@ -41,13 +42,18 @@ export default function PeriodsPage() {
     };
   });
 
-  const confirm = () => {
+  const confirm = async () => {
     if (!pending) return;
-    const res = actions.setPeriodStatus(pending.period.id, pending.to);
-    if (res.ok) {
-      toast.success(res.message ?? "Updated");
-      setPending(null);
-    } else toast.error(res.error);
+    setBusy(true);
+    try {
+      const res = await actions.setPeriodStatus(pending.period.id, pending.to);
+      if (res.ok) {
+        toast.success(res.message ?? "Updated");
+        setPending(null);
+      } else toast.error(res.error);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const count = (s: PeriodStatus) => state.periods.filter((p) => p.status === s).length;
@@ -68,8 +74,8 @@ export default function PeriodsPage() {
       <div className="mb-6 rounded-xl border border-neutral-200 bg-white p-5 dark:border-neutral-700 dark:bg-neutral-800" data-tour="period-locks">
         <Toggle
           checked={state.org.block_posting_to_locked_periods}
-          onChange={(v) => {
-            const res = actions.updateOrg({ block_posting_to_locked_periods: v });
+          onChange={async (v) => {
+            const res = await actions.updateOrg({ block_posting_to_locked_periods: v });
             if (res.ok) toast.success(v ? "Locked and closed periods now reject postings" : "Period locks are now advisory");
           }}
           label="Enforce period locks"
@@ -187,6 +193,7 @@ export default function PeriodsPage() {
             label: pending ? VERB[pending.to].label : "",
             onClick: confirm,
             className: pending?.to === "OPEN" ? BTN_DANGER : BTN_PRIMARY,
+            disabled: busy,
           },
         ]}
       />

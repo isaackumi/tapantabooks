@@ -68,6 +68,7 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
   const [currency, setCurrency] = useState(BASE_CURRENCY);
   const [custom, setCustom] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const fx = useFxRate(currency, issueDate, open);
   const entity = isInvoice ? "Invoice" : "Bill";
   const currencies = state.currencies.filter((c) => c.is_active);
@@ -111,7 +112,7 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
   const update = (k: number, patch: Partial<LineState>) =>
     setLines((ls) => ls.map((l) => (l.key === k ? { ...l, ...patch } : l)));
 
-  const save = (approve: boolean) => {
+  const save = async (approve: boolean) => {
     const input = {
       party_id: partyId,
       issue_date: issueDate,
@@ -130,11 +131,16 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
         account_id: l.account_id,
       })),
     };
-    const res = isInvoice ? actions.createInvoice(input, approve) : actions.createBill(input, approve);
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Saved");
-    onSaved?.(res.data.id);
-    onClose();
+    setBusy(true);
+    try {
+      const res = await (isInvoice ? actions.createInvoice(input, approve) : actions.createBill(input, approve));
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Saved");
+      onSaved?.(res.data.id);
+      onClose();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -150,8 +156,8 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
       }
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: "Save draft", onClick: () => save(false), className: BTN_SECONDARY },
-        { label: "Approve & post", onClick: () => save(true), className: BTN_PRIMARY },
+        { label: "Save draft", onClick: () => save(false), className: BTN_SECONDARY, disabled: busy },
+        { label: "Approve & post", onClick: () => save(true), className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />

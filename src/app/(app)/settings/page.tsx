@@ -7,12 +7,14 @@ import { Button, Field, FormError, PageHeader, Panel, Toggle, inputClass } from 
 import { Tabs } from "@/components/tabs";
 import StatusBadge from "@/components/statusBadge";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
-import { ALL_USERS, useCurrentUser, useLedger } from "@/store/ledgerStore";
+import { useCurrentUser, useLedger } from "@/store/ledgerStore";
 import type { Dimension, OrgSettings } from "@/models/accounting";
 import { useQueryParam } from "@/utils/useQueryParam";
 import { CurrencySettings } from "@/components/settings/currencySettings";
 import { CustomFieldsSettings } from "@/components/settings/customFieldsSettings";
-import { classNames, fmtCurrency } from "@/utils/format";
+import { classNames, currencySymbol, fmtCurrency } from "@/utils/format";
+import { AppConstants } from "@/core/appConstants";
+import { BASE_CURRENCY_OPTIONS, COUNTRY_OPTIONS } from "@/data/locales";
 
 const DIMENSION_KINDS: { id: Dimension["kind"]; label: string; hint: string }[] = [
   { id: "LEGAL_ENTITY", label: "Legal entities", hint: "Separate companies that keep their own books." },
@@ -48,12 +50,19 @@ const OrganisationTab = () => {
 
   const set = <K extends keyof OrgSettings>(k: K, v: OrgSettings[K]) => setForm((f) => ({ ...f, [k]: v }));
   const dirty = JSON.stringify(form) !== JSON.stringify(state.org);
+  const hasPostings = state.journals.some((j) => j.status === "POSTED" || j.status === "REVERSED");
+  const [saving, setSaving] = useState(false);
 
-  const save = () => {
-    const res = actions.updateOrg(form);
-    if (!res.ok) return setError(res.error);
-    setError(null);
-    toast.success(res.message ?? "Saved");
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await actions.updateOrg(form);
+      if (!res.ok) return setError(res.error);
+      setError(null);
+      toast.success(res.message ?? "Saved");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -70,8 +79,38 @@ const OrganisationTab = () => {
           <Field label="TIN">
             <input value={form.tin} onChange={(e) => set("tin", e.target.value)} className={`${inputClass} font-mono`} />
           </Field>
-          <Field label="Base currency" hint="Fixed once transactions exist. Foreign currencies are under the Currencies tab.">
-            <input value={form.base_currency} disabled className={`${inputClass} opacity-70`} />
+          <Field
+            label="Base currency"
+            hint={
+              hasPostings
+                ? "Fixed now that entries have been posted. Foreign currencies are under the Currencies tab."
+                : "Every ledger amount and report is kept in this currency. It locks once the first entry is posted."
+            }
+          >
+            <select
+              value={form.base_currency}
+              disabled={hasPostings}
+              onChange={(e) => set("base_currency", e.target.value)}
+              className={classNames(inputClass, hasPostings && "opacity-70")}
+            >
+              {BASE_CURRENCY_OPTIONS.some((c) => c.code === form.base_currency) ? null : (
+                <option value={form.base_currency}>{form.base_currency}</option>
+              )}
+              {BASE_CURRENCY_OPTIONS.map((c) => (
+                <option key={c.code} value={c.code}>
+                  {c.code} · {c.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Country">
+            <select value={form.country} onChange={(e) => set("country", e.target.value)} className={inputClass}>
+              {COUNTRY_OPTIONS.map((c) => (
+                <option key={c.code} value={c.code}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
           </Field>
           <Field label="Email">
             <input type="email" value={form.email} onChange={(e) => set("email", e.target.value)} className={inputClass} />
@@ -97,7 +136,7 @@ const OrganisationTab = () => {
             description="The preparer cannot approve their own entry."
           />
           <div className={classNames("pl-14", !form.require_approval_for_manual_journals && "opacity-50")}>
-            <Field label="Approval threshold (GH₵)" hint={`Manual journals at or above ${fmtCurrency(form.approval_threshold)} need a second person.`}>
+            <Field label={`Approval threshold (${currencySymbol(state.org.base_currency)})`} hint={`Manual journals at or above ${fmtCurrency(form.approval_threshold)} need a second person.`}>
               <input
                 type="number"
                 min={0}
@@ -136,8 +175,8 @@ const OrganisationTab = () => {
         <Button variant="secondary" disabled={!dirty} onClick={() => setForm(state.org)}>
           Discard
         </Button>
-        <Button disabled={!dirty} onClick={save}>
-          Save changes
+        <Button disabled={!dirty || saving} onClick={save}>
+          {saving ? "Saving…" : "Save changes"}
         </Button>
       </div>
     </div>
@@ -156,9 +195,9 @@ const DimensionModal = ({ kind, onClose }: { kind: Dimension["kind"] | null; onC
   }, [kind]);
   const label = DIMENSION_KINDS.find((k) => k.id === kind)?.label.replace(/s$/, "").replace(/ie$/, "y") ?? "";
 
-  const submit = () => {
+  const submit = async () => {
     if (!kind) return;
-    const res = actions.saveDimension({ kind, ...form });
+    const res = await actions.saveDimension({ kind, ...form });
     if (!res.ok) return setError(res.error);
     toast.success(res.message ?? "Added");
     onClose();
@@ -226,8 +265,8 @@ const DimensionsTab = () => {
                       </td>
                       <td className="px-6 py-2.5 text-right">
                         <button
-                          onClick={() => {
-                            const res = actions.toggleDimension(d.id);
+                          onClick={async () => {
+                            const res = await actions.toggleDimension(d.id);
                             if (res.ok) toast.success(res.message ?? "Updated");
                             else toast.error(res.error);
                           }}
@@ -250,14 +289,23 @@ const DimensionsTab = () => {
 };
 
 const UsersTab = () => {
-  const { actions } = useLedger();
+  const { state, actions } = useLedger();
   const current = useCurrentUser();
+  const canSwitch = AppConstants.useMockApi;
   return (
     <div className="space-y-6">
-      <Panel title="Team" subtitle="Users come from Trovesuite platform accounts. Switch user here to try maker-checker approval." bodyClassName="px-0 pb-2">
+      <Panel
+        title="Team"
+        subtitle={
+          canSwitch
+            ? "Users come from Trovesuite platform accounts. Switch user here to try maker-checker approval."
+            : "Users come from Trovesuite platform accounts. Invite people and assign roles in Trovesuite Core."
+        }
+        bodyClassName="px-0 pb-2"
+      >
         <table className="min-w-full text-sm">
           <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
-            {ALL_USERS.map((u) => (
+            {state.users.map((u) => (
               <tr key={u.id}>
                 <td className="px-6 py-3">
                   <div className="flex items-center gap-3">
@@ -277,11 +325,12 @@ const UsersTab = () => {
                 <td className="px-6 py-3 text-right">
                   {u.id === current.id ? (
                     <span className="text-xs font-medium text-green-700 dark:text-green-400">Signed in</span>
-                  ) : (
+                  ) : !canSwitch ? null : (
                     <button
-                      onClick={() => {
-                        actions.switchUser(u.id);
-                        toast.success(`Now acting as ${u.name}`);
+                      onClick={async () => {
+                        const res = await actions.switchUser(u.id);
+                        if (res.ok) toast.success(`Now acting as ${u.name}`);
+                        else toast.error(res.error);
                       }}
                       className="text-sm text-brand-700 hover:underline dark:text-brand-300"
                     >
@@ -339,7 +388,7 @@ export default function SettingsPage() {
           { id: "CURRENCIES", label: "Currencies", count: state.currencies.filter((c) => c.is_active).length },
           { id: "FIELDS", label: "Custom fields", count: state.customFields.filter((f) => f.is_active).length },
           { id: "DIMENSIONS", label: "Dimensions", count: state.dimensions.length },
-          { id: "USERS", label: "Users & roles", count: ALL_USERS.length },
+          { id: "USERS", label: "Users & roles", count: state.users.length },
         ]}
         value={tab}
         onChange={setTab}

@@ -22,6 +22,7 @@ const TransferModal = ({ open, onClose }: { open: boolean; onClose: () => void }
   const { state, actions } = useLedger();
   const [form, setForm] = useState({ from: "ba_gcb", to: "ba_eco", amount: "", date: todayIso(), memo: "" });
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const balances = bankLedgerBalances(state);
   const from = state.bankAccounts.find((b) => b.id === form.from);
   const to = state.bankAccounts.find((b) => b.id === form.to);
@@ -42,11 +43,16 @@ const TransferModal = ({ open, onClose }: { open: boolean; onClose: () => void }
     }
   }, [open]);
 
-  const submit = () => {
-    const res = actions.transferFunds({ ...form, amount: Number(form.amount), rate: fx.rateValue });
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Transfer posted");
-    onClose();
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const res = await actions.transferFunds({ ...form, amount: Number(form.amount), rate: fx.rateValue });
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Transfer posted");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -58,7 +64,7 @@ const TransferModal = ({ open, onClose }: { open: boolean; onClose: () => void }
       description="Moves money between your own bank, MoMo and cash accounts. Transfers do not count as income or expense."
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: "Post transfer", onClick: submit, className: BTN_PRIMARY },
+        { label: "Post transfer", onClick: submit, className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />

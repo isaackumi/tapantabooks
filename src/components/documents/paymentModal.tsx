@@ -45,6 +45,7 @@ const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) =>
   const [bankId, setBankId] = useState("ba_gcb");
   const [reference, setReference] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const row = openDocs.find((r) => r.doc.id === docId);
   const currency = row?.currency ?? BASE_CURRENCY;
@@ -80,19 +81,24 @@ const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) =>
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, documentId]);
 
-  const submit = () => {
-    const res = actions.recordPayment(kind, {
-      document_id: docId,
-      date,
-      amount: Number(amount),
-      exchange_rate: fx.rateValue,
-      method,
-      bank_account_id: bankId,
-      reference: reference || undefined,
-    });
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Recorded");
-    onClose();
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const res = await actions.recordPayment(kind, {
+        document_id: docId,
+        date,
+        amount: Number(amount),
+        exchange_rate: fx.rateValue,
+        method,
+        bank_account_id: bankId,
+        reference: reference || undefined,
+      });
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Recorded");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -108,7 +114,7 @@ const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) =>
       }
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: isReceipt ? "Record receipt" : "Record payment", onClick: submit, className: BTN_PRIMARY },
+        { label: isReceipt ? "Record receipt" : "Record payment", onClick: submit, className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />

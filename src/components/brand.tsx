@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-const Mark = ({ className = "h-9 w-9" }: { className?: string }) => (
+export const Mark = ({ className = "h-9 w-9" }: { className?: string }) => (
   <span
     className={`${className} inline-flex shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-brand-600 to-brand-800 text-white shadow-sm`}
   >

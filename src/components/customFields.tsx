@@ -159,17 +159,23 @@ export const EditCustomFieldsModal = ({
   const { actions } = useLedger();
   const [draft, setDraft] = useState<Values>({});
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (open) {
       setDraft(values ?? {});
       setError(null);
     }
   }, [open, values]);
-  const save = () => {
-    const res = actions.setCustomFieldValues(entity, recordId, draft);
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Saved");
-    onClose();
+  const save = async () => {
+    setBusy(true);
+    try {
+      const res = await actions.setCustomFieldValues(entity, recordId, draft);
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Saved");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <Modal
@@ -180,7 +186,7 @@ export const EditCustomFieldsModal = ({
       description="These fields are for reporting and traceability. Changing them does not alter any ledger entry."
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: "Save details", onClick: save, className: BTN_PRIMARY },
+        { label: "Save details", onClick: save, className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />

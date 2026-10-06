@@ -81,6 +81,7 @@ const ConnectModal = ({ source, onClose }: { source: DataSource | null; onClose:
   const [schedule, setSchedule] = useState("Hourly");
   const [connection, setConnection] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!source) return;
@@ -90,12 +91,17 @@ const ConnectModal = ({ source, onClose }: { source: DataSource | null; onClose:
     setError(null);
   }, [source]);
 
-  const submit = () => {
+  const submit = async () => {
     if (!source) return;
-    const res = actions.connectSource(source.id, { entities, schedule, connection });
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Connected");
-    onClose();
+    setBusy(true);
+    try {
+      const res = await actions.connectSource(source.id, { entities, schedule, connection });
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Connected");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -107,7 +113,7 @@ const ConnectModal = ({ source, onClose }: { source: DataSource | null; onClose:
       description="Records arrive as source events, are mapped to Trovesuite fields, then posted through accounting rules. Nothing posts without passing validation."
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: "Connect", onClick: submit, className: BTN_PRIMARY },
+        { label: "Connect", onClick: submit, className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />
@@ -182,8 +188,8 @@ export default function SourcesPage() {
     [state.importBatches, viewing],
   );
 
-  const sync = (s: DataSource) => {
-    const res = actions.syncSource(s.id);
+  const sync = async (s: DataSource) => {
+    const res = await actions.syncSource(s.id);
     if (res.ok) toast.success(res.message ?? "Synced");
     else toast.error(res.error);
   };
@@ -420,9 +426,9 @@ export default function SourcesPage() {
           {
             label: "Disconnect",
             className: BTN_DANGER,
-            onClick: () => {
+            onClick: async () => {
               if (!disconnecting) return;
-              const res = actions.disconnectSource(disconnecting.id);
+              const res = await actions.disconnectSource(disconnecting.id);
               if (res.ok) toast.success(res.message ?? "Disconnected");
               setDisconnecting(null);
             },
