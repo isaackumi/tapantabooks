@@ -1,0 +1,1418 @@
+# Accounting processing rules
+
+This document specifies the business rules that tvs-accounting-bk must enforce so that the accounting frontend works against the real API without changes. It covers every write operation the frontend calls: the validation it must perform (with the exact user-facing error messages), the rows it creates or changes, the journals it posts, the audit events it records and what it returns. It also defines how the read-only reports are calculated. It is written for the backend engineers implementing the .NET API.
+
+**Source of truth.** The in-browser mock backend in `src/mock/api/engine.ts` is the reference implementation of these rules; when this document and the engine disagree, the engine wins and this document should be corrected. The HTTP layer that maps endpoints to engine actions is `src/mock/api/routes.ts` (with request handling in `src/mock/api/worker.ts` and `src/mock/api/http.ts`). The endpoint list (methods, paths, query parameters, body types, permissions) is [API_ENDPOINTS.md](./API_ENDPOINTS.md), generated from `src/services/catalogue.ts`. Entity shapes are described in [DATA_MODEL.md](./DATA_MODEL.md). Headers, envelope and pagination are in [API_CONVENTIONS.md](./API_CONVENTIONS.md); sign-up, login and the setup journey are in [AUTH_AND_ONBOARDING.md](./AUTH_AND_ONBOARDING.md).
+
+---
+
+## Contents
+
+1. Conventions used in this doc
+2. Numbering
+3. Fiscal periods and posting dates
+4. Journals
+5. Chart of accounts
+6. Customers and suppliers
+7. Sales invoices and purchase bills
+8. Receipts and supplier payments
+9. Multi-currency and exchange rates
+10. FX revaluation
+11. Banking
+12. Tax
+13. Custom fields
+14. Integrations
+15. Organisation setup, settings, dimensions and users
+16. Audit trail
+17. Reports
+18. Open questions for backend
+19. Mock simplifications the API must not copy
+
+---
+
+## 1. Conventions used in this doc
+
+### 1.1 Transport
+
+- All paths are relative to `/api/v1`. Resource ids go in the query string (`?journal_id=…`), never in the path. Wire format is snake_case JSON.
+- Every response uses the standard Trovesuite envelope (`success`, `status_code`, `detail`, `error`, `data`, `field_errors`, `pagination`). See `docs/API_RESPONSE_FORMAT.md` in the tvs-accounting-bk repository for the envelope, `docs/AUDIT_FIELDS.md` there for the six audit fields, and `docs/RBAC_ROLES.md` there for how the permission ids in the catalogue (`permission-accounting-{resource}-{verb}`) are seeded and enforced.
+- Every `/list` endpoint accepts `page` (1-based, default 1), `size` (default 20, maximum 500), `sort_by`, `sort_order` (`asc` or `desc`) and `search`, and returns `data.items[]` plus `pagination`. Module filters are equality matches on a field; `from_date` and `to_date` are inclusive bounds on the list's date field. The frontend reads whole collections by paging with `size=500` until `has_next` is false.
+
+### 1.2 Request pipeline and error mapping
+
+The mock applies these checks in this order before running any business rule. The real API should produce the same status codes and `error` codes.
+
+| Check | Status | `error` | `detail` |
+|---|---|---|---|
+| Missing or undecodable bearer token | 401 | `UNAUTHORIZED` | `Unauthorized access` |
+| Token expired | 401 | `TOKEN_EXPIRED` | `Token expired` |
+| Missing `app-id`, `org-id`, `bus-id` or `loc-id` header | 400 | `MISSING_HEADER` | `Missing required header: {header}.` with `field_errors: { "{header}": "{header} is required." }` |
+| `app-id` is not the accounting app id | 403 | `INVALID_APP_ID` | `Invalid app-id for this API.` |
+| Tenant from the token's `tenant_id` has no books | 403 | `TENANT_NOT_FOUND` | `TENANT_NOT_FOUND` |
+| Token `user_id` is not a user of the tenant | 403 | `USER_NOT_IN_TENANT` | `Unauthorized access` |
+| Organisation not set up and route not in the allowed list (section 15.1) | 409 | `ORGANISATION_NOT_SET_UP` | `Finish setting up the organisation before using the books.` |
+| No such route | 404 | `NOT_FOUND` | `No route for {METHOD} {path}.` |
+| Body is not valid JSON | 400 | `VALIDATION_FAILED` | `The request body is not valid JSON.` |
+| Required query parameter missing | 400 | `VALIDATION_FAILED` | `Query parameter '{name}' is required.` with `field_errors: { "{name}": "{name} is required." }` |
+| Record looked up by the route and not found | 404 | `NOT_FOUND` | `{Label} not found.` |
+| Business rule failed | 400 | `VALIDATION_FAILED` | the rule's message, verbatim |
+| Unexpected exception | 500 | `INTERNAL_ERROR` | `Something went wrong on the server.` |
+
+Notes:
+
+- Business-rule failures return HTTP 400 with the engine's message in `detail` and `field_errors: null`. The frontend shows `detail` to the user, so the messages in this document are user-facing copy and should be returned verbatim. The backend may additionally fill `field_errors`, but `detail` must still carry the message.
+- Only some routes look the record up themselves and return 404 (the `/get` endpoints, `PUT /dimensions/update`, `PUT /currencies/update`, `PUT /accounting-rules/update`, `GET /reports/general-ledger`, `GET /users/me`). Every other write endpoint passes the id to the engine, which reports a missing record as a 400 business-rule failure (for example `Account not found.`, or `Only drafts can be edited.` for a journal id that does not exist). This is recorded as an open question; the recommended behaviour is 404 for any unknown id.
+- Validation is first-failure: the engine checks rules in the order listed in each section and returns the first message that applies. Tests written against the mock depend on that order.
+- Each write operation is atomic. The mock works on a copy of the state and only keeps it if every step succeeds, so a failure part-way through (for example a period check after an exchange rate was resolved) leaves nothing behind.
+
+### 1.3 Success responses
+
+- Creates that the routes mark as such return HTTP 201: `POST /accounts/add`, `/journals/add`, `/customers/add`, `/suppliers/add`, `/invoices/add`, `/bills/add`, `/receipts/add`, `/supplier-payments/add`, `/bank-accounts/transfer`, `/reconciliation/create-entry`, `/revaluations/run`, `/currencies/add`, `/exchange-rates/add`, `/custom-fields/add`, `/field-mappings/add`, `/imports/add`, `/dimensions/add`. Everything else returns 200 (including `POST /organisation/setup` and `POST /exchange-rates/fetch-reference`, which also create rows).
+- On success the engine returns a short message that the mock puts in `detail` (for example `JE-2026-0042 posted`). The frontend shows it as a toast, so the real API should return the same messages. They are listed per operation as "Detail". Where no message is given, `detail` is the default `Success`.
+
+### 1.4 Notation
+
+- `{name}` in a quoted message is a placeholder. Money placeholders are formatted as `{symbol} {amount}` with thousands separators and two decimals, for example `GH₵ 1,234.50` or `US$ 980.00`; negatives are `-GH₵ 12.00`. The base-currency symbol comes from the base currency's `symbol` in the currency table; other currencies use their usual symbol (`US$`, `€`, `£`, `₦`, `CFA`, `CN¥`, `R`, `AED`) or the ISO code. Rates are formatted with four decimals. Dates in messages are raw `YYYY-MM-DD`.
+- "Today" means the current date of the organisation. The mock pins it to `2026-10-05` so that the demo data stays stable; the API must use the real date (see open questions on time zone).
+- "The actor" is the user identified by the JWT `user_id`. The actor is stamped into `created_by_id` / `updated_by_id`, into `posted_by`, `approved_by`, `locked_by`, and into the audit event.
+- "Base" means the organisation's base currency (`OrgSettings.base_currency`, default `GHS`). "FC" means the foreign (document or bank) currency amount.
+- `round2` means rounding to two decimals. The mock uses `Math.round(x * 100) / 100` on floating-point numbers; the API must use decimals (see section 19).
+- "Ledger-affecting" journals are those with status `POSTED` or `REVERSED`. A reversed journal stays in the ledger and is cancelled by its own reversal entry, which is itself `POSTED`.
+
+### 1.5 Standard accounts (account roles)
+
+The engine refers to some accounts by role. In the seed they are the following; ids are `acc_{code}`. A new tenant receives the same chart (section 15.1).
+
+| Role used in this doc | Code | Name | Flags |
+|---|---|---|---|
+| Cash | 1010 | Cash on Hand | `is_bank` |
+| Bank (operating) | 1020 | GCB Bank – Operating | `is_bank` |
+| Bank (payroll) | 1030 | Ecobank – Payroll | `is_bank` |
+| Mobile money | 1040 | MTN MoMo Merchant Wallet | `is_bank` |
+| Foreign bank (USD) | 1050 | Ecobank – USD Domiciliary | `is_bank` |
+| AR control | 1100 | Accounts Receivable | `is_control`, subtype `RECEIVABLE` |
+| VAT input | 1400 | VAT Input Recoverable | subtype `TAX_RECOVERABLE` |
+| AP control | 2010 | Accounts Payable | `is_control`, subtype `PAYABLE` |
+| VAT output | 2100 | VAT & Levies Payable | subtype `TAX_PAYABLE` |
+| WHT payable | 2120 | Withholding Tax Payable | subtype `TAX_PAYABLE` |
+| Retained earnings | 3100 | Retained Earnings | subtype `RETAINED_EARNINGS` |
+| Sales revenue | 4010 | Sales Revenue | |
+| Transport | 6040 | Transport & Logistics | used by import posting only |
+| FX realised | 6130 | Exchange Gains & Losses – Realised | `OrgSettings.fx_realised_account_id` |
+| FX unrealised | 6140 | Exchange Gains & Losses – Unrealised | `OrgSettings.fx_unrealised_account_id` |
+
+The engine hard-codes the AR control, AP control, VAT input and VAT output accounts (and cash, sales and transport for imports). Only the two FX accounts are configurable in `OrgSettings`. How the API identifies the others is an open question.
+
+"Bank GL" means the general-ledger account linked to a bank account (`BankAccount.gl_account_id`).
+
+---
+
+## 2. Numbering
+
+Human-readable numbers are generated by the server at creation time.
+
+| Record | Field | Prefix | Example |
+|---|---|---|---|
+| Journal entry (all sources) | `number` | `OrgSettings.journal_prefix` (set to `JE-{year}-` at setup) | `JE-2026-0001` |
+| Sales invoice | `number` | `OrgSettings.invoice_prefix` (`INV-{year}-`) | `INV-2026-0001` |
+| Purchase bill | `number` | `OrgSettings.bill_prefix` (`BILL-{year}-`) | `BILL-2026-0001` |
+| Customer receipt | `number` | `RCT-2026-` (hard-coded) | `RCT-2026-0001` |
+| Supplier payment | `number` | `PAY-2026-` (hard-coded) | `PAY-2026-0001` |
+| Customer | `code` | `C-` | `C-0001` |
+| Supplier | `code` | `S-` | `S-0001` |
+| Import batch | `number` | `IMP-` | `IMP-0001` |
+
+Rules:
+
+- The next number is the highest numeric suffix among existing records of that type whose number starts with the current prefix, plus one, left-padded with zeros to at least four digits. Past 9999 the number simply grows (`JE-2026-10000`).
+- Sequences are per organisation (per tenant and `org-id`). Records with a different prefix are ignored, so changing a prefix in settings starts that prefix at `0001`.
+- Journal numbers come from one sequence shared by every source: manual journals (including drafts), invoice and bill postings, receipts, payments, transfers, statement entries, revaluations, reversals and import postings.
+- Drafts consume a number when they are created (journals and documents alike). Because the next number is derived from the current maximum, deleting the highest-numbered draft journal lets its number be issued again. The API must decide whether gaps and reuse are acceptable (open question); a database sequence will produce gaps but never reuse.
+- Account codes and dimension codes are entered by the user and are not generated.
+- The receipt and payment prefixes ignore organisation settings and contain the year 2026. This is a defect in the mock; see open questions.
+
+---
+
+## 3. Fiscal periods and posting dates
+
+### 3.1 The posting-date check
+
+Every operation that posts a journal runs the same check on the posting date. In order:
+
+1. `Choose a date.` when the date is empty.
+2. `No fiscal period covers {date}. Add the period in Fiscal periods first.` when no period's `start_date`–`end_date` range (inclusive) contains the date.
+3. `{period name} is {locked|closed}. Reopen it in Fiscal periods before posting to it.` when the period's status is not `OPEN` **and** `OrgSettings.block_posting_to_locked_periods` is true. When the setting is false, both `LOCKED` and `CLOSED` periods accept postings (see open questions).
+4. `Entries cannot be posted with a future date.` when the date is after today.
+
+Which date is checked:
+
+| Operation | Date checked |
+|---|---|
+| Create journal with `intent: POST`, submit, approve | journal `date` |
+| Reverse journal | reversal `date` |
+| Create invoice or bill with `approve: true`, approve invoice or bill | `issue_date` |
+| Void an approved invoice or bill | today (the reversal is dated today) |
+| Receipt or supplier payment | payment `date` |
+| Bank transfer | transfer `date` |
+| Create entry from statement line | statement line `date` |
+| FX revaluation | the period's `end_date`, then the next day (both must pass) |
+| Post an import batch (financial entities) | today |
+
+Saving a draft journal or draft document does not check the period.
+
+### 3.2 `PUT /fiscal-periods/update-status`
+
+Query `period_id`; body `{ status: "OPEN" | "LOCKED" | "CLOSED" }`.
+
+Validation, in order:
+
+- `Period not found.` when the id is unknown.
+- Moving to `OPEN`: `Reopen {later period name} first. Periods close in order.` when any period that starts later is `CLOSED`.
+- Moving to `CLOSED`:
+  - `Close {earlier period name} first. Periods close in order.` when any period that starts earlier is not `CLOSED` (a `LOCKED` earlier period also blocks).
+  - `{journal number} is still a draft in this period.` or `{journal number} is still awaiting approval in this period.` when any journal dated inside the period is `DRAFT` or `PENDING_APPROVAL`.
+- Moving to `LOCKED`: no checks.
+
+The mock does not validate that `status` is one of the three values, and it accepts a transition to the current status (it re-records the audit event). The API should reject both.
+
+Side effects:
+
+- `status` is set. For `LOCKED` and `CLOSED`, `locked_by` is the actor's name and `locked_at` is now; for `OPEN` both are cleared.
+- Audit `PERIOD.REOPENED`, `PERIOD.LOCKED` or `PERIOD.CLOSED` (entity type `Fiscal period`), summary `{name}: {from} → {to}.` with a `status` change.
+
+Response: the `FiscalPeriod`. Detail: `{name} is now {open|locked|closed}`.
+
+### 3.3 Period generation
+
+There is no endpoint to add periods. Periods are generated when the organisation is set up (section 15.2): twelve monthly `OPEN` periods for the financial year that contains today, starting in the month given by `fiscal_year_start`. Period ids in the mock are `per_{YYYY}_{MM}` and names are `{Month} {YYYY}`. How the next financial year's periods are created, and whether a year-end close exists, are open questions.
+
+---
+
+## 4. Journals
+
+### 4.1 Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> DRAFT: add with intent DRAFT
+    [*] --> POSTED: add with intent POST, below threshold or approval off
+    [*] --> PENDING_APPROVAL: add with intent POST, at or above threshold
+    DRAFT --> POSTED: submit, below threshold or approval off
+    DRAFT --> PENDING_APPROVAL: submit, at or above threshold
+    DRAFT --> [*]: delete
+    PENDING_APPROVAL --> POSTED: approve, approver is not the preparer
+    PENDING_APPROVAL --> DRAFT: reject with a reason
+    POSTED --> REVERSED: reverse, void of the source document, or revaluation auto-reversal
+```
+
+- Only `POSTED` and `REVERSED` journals affect balances and reports.
+- Only drafts can be edited or deleted. Posted entries are corrected by reversal.
+- A reversal is a new `POSTED` journal with debits and credits swapped. It cannot itself be reversed.
+- Journals created by the system (document postings, payments, transfers, statement entries, revaluations, reversals, imports) are created directly as `POSTED` and never go through approval.
+
+### 4.2 Approval rule
+
+A manual journal needs approval when **all** of these hold:
+
+- it is being posted (`intent: POST` on create, or `POST /journals/submit`);
+- `OrgSettings.require_approval_for_manual_journals` is true;
+- the total of the debit column (rounded to two decimals) is greater than or equal to `OrgSettings.approval_threshold` (base currency). The comparison is inclusive even though the message says "above".
+
+Segregation of duties: the approver must not be the user who created the journal (`created_by_id`). The submitter is not checked separately, and the mock does not stop the preparer from rejecting their own entry (open question).
+
+### 4.3 Line validation
+
+When a manual journal is posted (on create with `intent: POST`, and on submit), its lines are validated as follows. "Used" lines are those with an `account_id`, a debit or a credit; completely blank lines are ignored. `{n}` is the 1-based position among used lines.
+
+1. `A journal needs at least two lines.` when fewer than two lines are used.
+2. For each used line, in order:
+   - `Line {n}: choose an account.` when the account does not exist.
+   - `Line {n}: {account name} is a group account and cannot be posted to.` when `is_group`.
+   - `Line {n}: {account name} is inactive.` when not `is_active`.
+   - `Line {n}: {account name} is a control account. Use an invoice, bill or payment so the sub-ledger stays in step.` when `is_control`. Manual journals (`source.type = MANUAL`) may never touch control accounts. Drafts with any other source type would be allowed to, but only manual drafts exist today.
+   - `Line {n}: amounts cannot be negative.` when the debit or credit is below zero.
+   - `Line {n}: enter a debit or a credit, not both.`
+   - `Line {n}: enter an amount.` when both are zero.
+   - `Line {n}: {account name} is held in {currency}. Enter the {currency} amount as well.` when the account is the GL account of a bank account whose currency is not the base currency, unless the line has `currency` equal to that bank currency and `amount_fc` greater than zero.
+3. `Debits ({total debit}) and credits ({total credit}) differ by {difference}.` when the rounded totals differ by 0.005 or more (or the debit total is zero).
+
+System-generated journals skip this validation in the mock (they are balanced by construction). The API should still assert that every journal it writes is balanced and posts only to existing, non-group accounts.
+
+### 4.4 `POST /journals/add`
+
+Body: `JournalDraftInput` plus `intent`. `intent` equal to `"POST"` posts; any other value (or none) saves a draft.
+
+Validation, in order:
+
+- `Add a memo describing the entry.` when `memo` is blank.
+- `Choose a date.` when `date` is empty.
+- Custom field rules for entity `Journal` (section 13.4).
+- When posting: the posting-date check on `date` (section 3.1), then line validation (section 4.3).
+
+Drafts are not line-validated: a draft may be unbalanced or use control accounts. It is validated when submitted.
+
+Side effects:
+
+- A journal is created with: a new `number`; `status` `DRAFT`, `POSTED` or `PENDING_APPROVAL` (section 4.2); `source: { type: "MANUAL", reference }`; `reference` trimmed; `memo` trimmed; `branch_id`; `custom_fields` normalised (section 13.4); `posted_at` and `posted_by` set only when `POSTED`; `approved_by`, `reversal_of_id` and `reversed_by_id` null; audit fields stamped with the actor.
+- Lines whose debit and credit are both zero are dropped. Each kept line gets a new id, `debit` and `credit` rounded to two decimals, the journal's `branch_id`, its `cost_centre_id` (or null), a trimmed `description`, and `currency` / `amount_fc` only when `currency` was supplied.
+- Audit `JOURNAL.DRAFTED`, `JOURNAL.POSTED` or `JOURNAL.SUBMITTED` (entity type `Journal`), summary = memo.
+
+Response: 201 with the `JournalEntry`. Detail:
+
+- `{number} saved as draft`
+- `{number} posted`
+- `{number} is {total}, above the {threshold} threshold. Sent for approval.`
+
+### 4.5 `PUT /journals/update`
+
+Query `journal_id`; body `JournalDraftInput`.
+
+Validation:
+
+- `Only drafts can be edited.` when the journal does not exist or is not `DRAFT`.
+- Custom field rules for `Journal`.
+
+The mock does not re-check that `memo` and `date` are present on update; the API should apply the same two checks as on create.
+
+Side effects: `date`, `memo` (trimmed), `reference` (trimmed, or removed when blank; unlike create there is no fallback), `branch_id` and `custom_fields` (merged, section 13.4) are replaced. All lines are replaced with new ids; on update the mock keeps zero-amount lines and does not trim descriptions (the API may drop zero lines as create does). The number does not change. No audit event is recorded (open question).
+
+Response: the `JournalEntry`. Detail: `{number} updated`.
+
+### 4.6 `POST /journals/submit`
+
+Query `journal_id`. Posts a draft, or sends it for approval.
+
+Validation, in order:
+
+- `Only drafts can be posted.` when the journal does not exist or is not `DRAFT`.
+- Posting-date check on the journal's `date`.
+- Line validation (control accounts are rejected for manual journals).
+
+Side effects: status becomes `PENDING_APPROVAL` when the approval rule applies, otherwise `POSTED` with `posted_at` = now and `posted_by` = actor. Audit `JOURNAL.SUBMITTED` or `JOURNAL.POSTED`, summary = memo.
+
+Response: the `JournalEntry`. Detail: `{number} sent for approval` or `{number} posted`.
+
+### 4.7 `POST /journals/approve`
+
+Query `journal_id`.
+
+Validation, in order:
+
+- `This entry is not awaiting approval.` when the journal does not exist or is not `PENDING_APPROVAL`.
+- `You prepared this entry, so someone else has to approve it (maker-checker).` when the actor is the journal's `created_by_id`.
+- Posting-date check on the journal's `date` (the period may have been locked since submission).
+
+Lines are not re-validated at approval in the mock (an account could have been deactivated in the meantime); the API should re-run line validation.
+
+Side effects: status `POSTED`; `posted_at` = now; `posted_by` and `approved_by` = actor. Audit `JOURNAL.APPROVED`, summary `Approved and posted: {memo}`, change `status` `PENDING_APPROVAL` → `POSTED`.
+
+Response: the `JournalEntry`. Detail: `{number} approved and posted`.
+
+### 4.8 `POST /journals/reject`
+
+Query `journal_id`; body `{ reason }`.
+
+Validation, in order:
+
+- `This entry is not awaiting approval.`
+- `Say why the entry is being sent back.` when `reason` is blank.
+
+Side effects: status back to `DRAFT`. The reason is not stored on the journal; it only appears in the audit summary. Audit `JOURNAL.REJECTED`, summary `Sent back to draft: {reason}`, change `status` `PENDING_APPROVAL` → `DRAFT`.
+
+Response: the `JournalEntry`. Detail: `{number} returned to the preparer`.
+
+### 4.9 `DELETE /journals/delete`
+
+Query `journal_id`.
+
+Validation: `Only drafts can be deleted. Posted entries are reversed.` when the journal does not exist or is not `DRAFT`.
+
+Side effects: the journal and its lines are deleted. Audit `JOURNAL.DELETED`, summary `Deleted draft: {memo}`.
+
+Response: `data: null`. Detail: `Draft {number} deleted`.
+
+### 4.10 `POST /journals/reverse`
+
+Query `journal_id`; body `{ date, reason }`.
+
+Validation, in order:
+
+- `Only posted entries can be reversed.` when the journal does not exist or is not `POSTED`.
+- `This entry is itself a reversal.` when `reversal_of_id` is set.
+- `This entry belongs to a document. Void the invoice, bill or payment instead.` when `source.document_id` is set (invoice, bill, receipt and payment journals).
+- `Give a reason for the reversal. It is kept on the audit trail.` when `reason` is blank.
+- `The reversal date cannot be before the original entry.` when `date` is earlier than the journal's date (an empty date also fails here).
+- Posting-date check on `date`.
+
+Side effects (shared with voids and revaluations, called "reverse into" below):
+
+- A new journal is created with `status: POSTED`, `date` = the reversal date, `memo` = `Reversal of {original number} – {reason}`, the original `reference`, `branch_id` and a copy of the original `source`. Each original line is copied with `debit` and `credit` swapped, keeping `description`, `cost_centre_id`, `currency` and `amount_fc`. `posted_at` = now, `posted_by` = actor, `reversal_of_id` = original id.
+- The original journal's status becomes `REVERSED`, `reversed_by_id` = the new journal's id, and its update stamp is refreshed.
+- Audit `JOURNAL.REVERSED` on the original journal, summary `Reversed by {reversal number}: {reason}`, change `status` `POSTED` → `REVERSED`.
+
+Response: 200 with the **reversal** `JournalEntry`. Detail: `{original number} reversed by {reversal number}`.
+
+---
+
+## 5. Chart of accounts
+
+### 5.1 Structure
+
+- Accounts form a tree through `parent_id`. Group accounts (`is_group: true`, subtype `GROUP`) cannot be posted to; their balances are the sum of their descendants.
+- The standard chart has six top-level groups: `1000` Assets, `2000` Liabilities, `3000` Equity, `4000` Revenue, `5000` Cost of Sales (type `EXPENSE`), `6000` Operating Expenses (type `EXPENSE`). Posting accounts sit directly under them.
+- Account types: `ASSET` and `EXPENSE` are debit-normal; `LIABILITY`, `EQUITY` and `REVENUE` are credit-normal.
+- `subtype` is free text, but reports depend on these values: `FIXED_ASSET` (balance sheet and cash flow investing), `LONG_TERM` (long-term liabilities and cash flow financing), `COST_OF_SALES` (income statement), `LOAN_BOOK` (cash flow labels). Other subtypes in the standard chart: `CASH`, `RECEIVABLE`, `INVENTORY`, `PREPAYMENT`, `TAX_RECOVERABLE`, `PAYABLE`, `TAX_PAYABLE`, `PAYROLL`, `ACCRUAL`, `CAPITAL`, `RETAINED_EARNINGS`, `OPERATING_REVENUE`, `OTHER_INCOME`, `OPERATING_EXPENSE`.
+- `is_control` marks the AR and AP control accounts. They can only be posted to by invoices, bills, receipts, payments, revaluations and imports. The API cannot create control accounts.
+- `is_bank` marks cash and bank GL accounts. The cash flow report treats every `is_bank` account as cash.
+
+### 5.2 `POST /accounts/add`
+
+Body: `{ code, name, parent_id, subtype, description?, is_bank?, custom_fields? }`.
+
+Validation, in order:
+
+- Custom field rules for `Account`.
+- `Account code must be four digits.` when the trimmed code is not exactly four digits.
+- `Code {code} is already used.`
+- `Give the account a name.`
+- `Choose the group this account belongs to.` when `parent_id` is not an existing group account.
+
+Side effects: a posting account is created with `type` inherited from the parent, `is_group: false`, `is_active: true`, `is_control: false`, `is_bank` from the body, trimmed name and description, normalised custom fields. The mock uses `acc_{code}` as the id. Audit `ACCOUNT.CREATED`, label `{code} {name}`, summary `Added {name} under {parent name}.`
+
+Response: 201 with the `Account`. Detail: `{code} {name} added`.
+
+Not validated by the mock: `subtype`, name uniqueness, whether the parent is active.
+
+### 5.3 `PUT /accounts/update`
+
+Query `account_id`; body `{ name?, description?, is_active?, custom_fields? }`.
+
+Validation, in order:
+
+- `Account not found.`
+- `Name cannot be empty.` when `name` is supplied and blank.
+- Custom field rules for `Account` (when `custom_fields` is supplied).
+
+Side effects: name (trimmed), description (trimmed, removed when blank), `is_active` and custom fields (merged) are updated. Code, type, parent and flags cannot change. Audit `ACCOUNT.UPDATED` is always recorded, with `changes` for `name` and `is_active` only.
+
+Response: the `Account`. Detail: `Account updated`.
+
+The mock lets any account be deactivated, including accounts with a balance, control accounts, bank GL accounts and the accounts referenced by `OrgSettings` (open question).
+
+---
+
+## 6. Customers and suppliers
+
+Customers and suppliers share one shape (`Party`) and one set of rules. `{kind}` below is `customer` or `supplier`.
+
+### 6.1 `POST /customers/add`, `POST /suppliers/add`
+
+Body: `Partial<Party>` with `name` required.
+
+Validation, in order:
+
+- `Name is required.`
+- `Enter a valid email address.` when `email` is given and does not match `something@something.tld`.
+- `A {kind} called {name} already exists.` when another party of the same kind has the same name, case-insensitive.
+- `Payment terms cannot be negative.`
+- `{currency} is not an active currency.` when `currency` is not the base currency and is not an active currency.
+- Custom field rules for `Customer` or `Supplier`.
+- `Credit limit cannot be negative.`
+
+Side effects: a party is created with `code` from the `C-` or `S-` sequence; trimmed `email`, `phone` and `city` (empty string when absent); `tin` (omitted when blank); `payment_terms_days` (default 30); `credit_limit` (default 0); `status: ACTIVE`; `external_reference` (null when blank); `source: MANUAL`; `currency` (default base); normalised custom fields. `status` and `source` in the body are ignored on create. Audit `CUSTOMER.CREATED` or `SUPPLIER.CREATED`, summary `Added {kind} {name}.`
+
+Response: 201 with the party. Detail: `{name} added`.
+
+### 6.2 `PUT /customers/update`, `PUT /suppliers/update`
+
+Query `customer_id` or `supplier_id`; body `Partial<Party>`. The same validation runs, plus `{kind} not found.` (lower-case kind) when the id is unknown. The mock requires `name` in the body; omitting it causes a server error.
+
+Side effects: the body is merged onto the record, the name is trimmed and custom fields are merged. The mock merges every supplied property (including `code`, `status`, `source` and audit fields); the API must restrict updates to editable fields (open question on which). Changing `status` to `INACTIVE` is how a party is deactivated. Changing a party's currency does not affect existing documents. Audit `CUSTOMER.UPDATED` or `SUPPLIER.UPDATED`, summary `Updated {name}.`
+
+Response: the party. Detail: `{name} updated`.
+
+Notes:
+
+- `credit_limit` is stored but never enforced.
+- An inactive customer cannot receive new invoices (section 7.2). The mock does not block bills for inactive suppliers (open question).
+
+---
+
+## 7. Sales invoices and purchase bills
+
+Invoices and bills ("documents") follow the same rules with the sides of the journal swapped.
+
+### 7.1 Lifecycle and display status
+
+```mermaid
+stateDiagram-v2
+    [*] --> DRAFT: add with approve false
+    [*] --> APPROVED: add with approve true, journal posted
+    DRAFT --> APPROVED: approve, journal posted
+    DRAFT --> VOID: void, no journal to reverse
+    APPROVED --> VOID: void, only when nothing has been paid, journal reversed today
+```
+
+`state` is the stored lifecycle (`DRAFT`, `APPROVED`, `VOID`). The status shown in lists is derived, never stored. Given the document total in document currency and today:
+
+1. `VOID` when `state` is `VOID`.
+2. `DRAFT` when `state` is `DRAFT`.
+3. `PAID` when `amount_paid` ≥ total − 0.005.
+4. `OVERDUE` when `due_date` < today.
+5. `PARTIALLY_PAID` when `amount_paid` > 0.
+6. `OPEN` otherwise.
+
+`OVERDUE` takes precedence over `PARTIALLY_PAID`. The frontend computes this itself (`src/lib/documents.ts`, `src/store/selectors.ts`); the API does not need to return it.
+
+Outstanding amounts used by lists, ageing and the dashboard (also derived):
+
+- `total_base` = round2(total × `exchange_rate`).
+- `outstanding` (base) = `total_base` − `amount_paid_base` for `APPROVED` documents, otherwise 0.
+- `outstanding_fc` (document currency) = total − `amount_paid` for `APPROVED` documents, otherwise 0.
+
+### 7.2 Validation (`POST /invoices/add`, `POST /bills/add`)
+
+Body: `DocumentInput` plus `approve` (true or the string `"true"` approves; anything else saves a draft). `party_id` is the customer for invoices and the supplier for bills.
+
+Validation, in order:
+
+- `Choose a customer.` / `Choose a supplier.` when `party_id` is empty.
+- `Choose an issue date.`
+- `Choose a due date.`
+- Currency check (section 9.2) on `currency` and `exchange_rate`.
+- `The due date cannot be before the issue date.`
+- `Add at least one line.`
+- For each line `{n}` (1-based):
+  - `Line {n}: add a description.`
+  - `Line {n}: quantity must be greater than zero.`
+  - `Line {n}: unit price must be greater than zero.`
+  - `Line {n}: choose an account.`
+  - `Line {n}: choose a tax code.`
+- Custom field rules for `Invoice` or `Bill`.
+- Invoices only: `{customer name} is inactive.` when the customer's status is not `ACTIVE`.
+- Bills only:
+  - `Enter the supplier's invoice number.` when `supplier_reference` is blank.
+  - `{supplier name} invoice {supplier_reference} is already {bill number}.` when a non-void bill from the same supplier has the same reference (case-insensitive, trimmed).
+- When approving: the posting-date check on `issue_date`.
+
+The mock does not check that `party_id` exists (an unknown id causes a server error), nor that line accounts and tax codes exist, are active, are postable, are not control accounts, or suit the document type. The API should validate all of these (open question on the exact messages).
+
+### 7.3 Totals and tax
+
+For each line, `line amount` = round2(`quantity` × `unit_price`).
+
+- `subtotal` = round2(sum of line amounts).
+- Tax is computed per tax code, only for codes with `kind: OUTPUT_INPUT` and `rate` > 0: tax for a code = round2(sum over its lines of line amount × `rate`). `rate` is a fraction (0.2 means 20%).
+- `tax` = round2(sum of the per-code tax amounts).
+- `total` = round2(`subtotal` + `tax`).
+
+Codes with `kind: WITHHOLDING` or `EXEMPT`, and zero-rated codes, add no tax. All amounts here are in the document currency. Totals are not stored on the document; they are recomputed from the lines wherever needed.
+
+### 7.4 Journal produced on approval
+
+When a document is approved (at creation or later), one `POSTED` journal is written:
+
+- `date` = `issue_date`; `branch_id` = the document's branch.
+- `memo` = `Sales invoice {number} – {customer name}` or `Supplier bill {number} – {supplier name}`.
+- `source` = `{ type: "SALES" | "PURCHASES", reference: {document number}, document_id: {document id} }`; `reference` = the document number.
+- The document's `journal_id` is set to it.
+
+Amounts are converted with the document's `exchange_rate` (1 for base-currency documents): base amount = round2(document-currency amount × rate).
+
+Sales invoice:
+
+| Line | Account | Debit | Credit | Description | `currency` / `amount_fc` |
+|---|---|---|---|---|---|
+| 1 | AR control | round2(total × rate) | | customer name | document currency / total (foreign documents only; null otherwise) |
+| one per distinct line account | the line's revenue account | | round2(sum of that account's line amounts × rate) | | |
+| one per taxed tax code | the code's `output_account_id`, or VAT output when null | | round2(code's tax × rate) | tax code `code` | |
+
+Purchase bill:
+
+| Line | Account | Debit | Credit | Description | `currency` / `amount_fc` |
+|---|---|---|---|---|---|
+| one per distinct line account | the line's expense or asset account | round2(sum of that account's line amounts × rate) | | | |
+| one per taxed tax code | the code's `input_account_id`, or VAT input when null | round2(code's tax × rate) | | tax code `code` | |
+| last | AP control | | round2(total × rate) | supplier name | document currency / total (foreign documents only) |
+
+Rounding: the party line always equals round2(total × rate). Any difference between it and the sum of the other lines is added to the largest non-party line, so the journal balances exactly.
+
+Note that a tax code with no input account (for example `VFRS-3`, flat-rate VAT) still posts its tax on bills to the VAT input account through the fallback (open question).
+
+### 7.5 Create (`POST /invoices/add`, `POST /bills/add`)
+
+Side effects:
+
+- A document is created with a new `number`; the party id (`customer_id` or `supplier_id`); dates; `state` `APPROVED` or `DRAFT`; lines with new ids; `currency`; `exchange_rate` (forced to 1 for base-currency documents, otherwise as given); `amount_paid: 0`; `amount_paid_base: 0`; `journal_id` (set when approved, otherwise null); `branch_id`; `notes`; `source: { type: "MANUAL" }`; normalised custom fields. Bills also store the trimmed `supplier_reference`.
+- When approved, the journal in section 7.4 is posted.
+- Audit `INVOICE.APPROVED` / `INVOICE.DRAFTED` (entity type `Invoice`), summary `{number} for {customer name} · {total}`; or `BILL.APPROVED` / `BILL.DRAFTED` (entity type `Bill`), summary `{number} from {supplier name} · {total}`. The total is in document currency.
+
+Response: 201 with the `SalesInvoice` or `PurchaseBill`. Detail: `{number} approved and posted` or `{number} saved as draft`.
+
+There are no endpoints to edit or delete draft documents (open question).
+
+### 7.6 Approve (`POST /invoices/approve`, `POST /bills/approve`)
+
+Query `invoice_id` or `bill_id`.
+
+Validation, in order:
+
+- `Only draft invoices can be approved.` / `Only draft bills can be approved.` when the document does not exist or is not `DRAFT`.
+- Currency check on the stored `currency` and `exchange_rate` (the currency may have been switched off since).
+- Bills only: custom field rules for `Bill` on the stored values (for example a required purchase order number). Invoices are not re-checked (open question).
+- Posting-date check on `issue_date`.
+
+The stored draft `exchange_rate` is used; the rate is not refreshed at approval. The customer's or supplier's status is not re-checked.
+
+Side effects: the journal in section 7.4 is posted; `state` becomes `APPROVED`; `journal_id` is set. Audit `INVOICE.APPROVED` / `BILL.APPROVED`, summary `Approved and posted as {journal number}.`
+
+Response: the document. Detail: `{number} approved · {journal number} posted`.
+
+### 7.7 Void (`POST /invoices/void`, `POST /bills/void`)
+
+Query `invoice_id` or `bill_id`; body `{ reason }`.
+
+Validation, in order:
+
+- `Document not found.`
+- `Already void.`
+- `Payments have been recorded against it. Reverse those first.` when `amount_paid` > 0.
+- `Give a reason for voiding.`
+- When the document has a `POSTED` journal: the posting-date check on today.
+
+Side effects:
+
+- If the document's journal is `POSTED`, it is reversed into a new journal dated today with memo `Reversal of {journal number} – void {document number}: {reason}` (section 4.10 describes the reversal mechanics). Drafts have no journal, so nothing is posted.
+- `state` becomes `VOID`.
+- Audit `INVOICE.VOIDED` / `BILL.VOIDED`, summary `Voided: {reason}`, change `state` `APPROVED` → `VOID` (the mock records `APPROVED` as the old value even for drafts).
+
+Response: `data: null`. Detail: `{number} voided`.
+
+There is no endpoint to reverse a payment, so a document with any payment can never be voided (open question).
+
+---
+
+## 8. Receipts and supplier payments
+
+`POST /receipts/add` records money received against one sales invoice; `POST /supplier-payments/add` records money paid against one purchase bill. Both take `PaymentInput` and share these rules. Each payment settles exactly one document.
+
+### 8.1 Validation
+
+In order:
+
+- `Choose the document being paid.` when `document_id` is not an invoice (for receipts) or a bill (for payments).
+- `Only approved documents can be paid.`
+- `Enter an amount greater than zero.` (the amount is rounded to two decimals first).
+- `Amount is more than the {outstanding} outstanding.` when the amount exceeds the outstanding document-currency balance (total − `amount_paid`) by more than 0.005. Overpayments are not allowed.
+- `Payment date cannot be before the document date.` when `date` is before `issue_date` (an empty date also fails here).
+- `Choose the bank or cash account.` when `bank_account_id` is unknown.
+- `{bank name} holds {bank currency}. Use it only for {bank currency} documents.` when the bank account is in a foreign currency different from the document's currency. A base-currency bank account can settle a document in any currency.
+- `Enter the {currency} rate on the payment date.` when the document is in a foreign currency and the rate (rounded to four decimals) is not greater than zero. For base-currency documents the rate is forced to 1.
+- Posting-date check on `date`.
+
+`method` is not validated by the mock; it must be one of `BANK_TRANSFER`, `MOBILE_MONEY`, `CASH`, `CHEQUE`.
+
+### 8.2 Amounts and realised FX
+
+Let `amount` be the payment in document currency, `doc rate` the document's `exchange_rate` and `pay rate` the payment rate.
+
+- **Carrying value released** (base): if the payment clears the document (`amount` ≥ outstanding − 0.005), carrying = round2(total × doc rate) − `amount_paid_base`, so the last payment absorbs any rounding left over. Otherwise carrying = round2(`amount` × doc rate).
+- **Bank value** (base): `bank base` = round2(`amount` × pay rate).
+- **Realised gain (+) or loss (−)** (base): receipts `bank base − carrying`; payments `carrying − bank base`.
+
+For base-currency documents both rates are 1, so there is never an FX difference.
+
+Example: a USD 1,000 invoice approved at 12.0000 carries AR of GH₵ 12,000.00. A receipt of USD 400 at 12.5000 releases carrying of GH₵ 4,800.00, puts GH₵ 5,000.00 in the bank and records a realised gain of GH₵ 200.00. A later receipt of the remaining USD 600 at 12.2000 releases GH₵ 7,200.00 (12,000 − 4,800), banks GH₵ 7,320.00 and records a gain of GH₵ 120.00.
+
+### 8.3 Journal produced
+
+One `POSTED` journal:
+
+- `date` = payment date; `branch_id` = the document's branch; `reference` = the payment `reference`, or the payment number when blank.
+- `memo` = `Receipt {number} from {customer name} for {invoice number}` or `Payment {number} to {supplier name} for {bill number}`.
+- `source` = `{ type: "SALES" | "PURCHASES", reference: {payment number}, document_id: {invoice or bill id} }`.
+
+Receipt:
+
+| Account | Debit | Credit | Description | `currency` / `amount_fc` |
+|---|---|---|---|---|
+| Bank GL | bank base | | | bank currency / `amount` (foreign bank only) |
+| AR control | | carrying | customer name | document currency / `amount` (foreign document only) |
+| FX realised (only when non-zero) | loss | gain | `Realised exchange loss` / `Realised exchange gain` | |
+
+Supplier payment:
+
+| Account | Debit | Credit | Description | `currency` / `amount_fc` |
+|---|---|---|---|---|
+| AP control | carrying | | supplier name | document currency / `amount` (foreign document only) |
+| Bank GL | | bank base | | bank currency / `amount` (foreign bank only) |
+| FX realised (only when non-zero) | loss | gain | `Realised exchange loss` / `Realised exchange gain` | |
+
+### 8.4 Side effects and response
+
+- A `Payment` row is created: new `number`; `party_id` (the document's customer or supplier); `document_id`; `date`; `amount` (document currency); `currency` (the document's); `exchange_rate` (pay rate); `base_amount` (bank base); `fx_gain_loss`; `method`; `bank_account_id`; `reference` (trimmed, omitted when blank); `journal_id`.
+- The document's `amount_paid` increases by `amount` and `amount_paid_base` increases by the carrying value released (both rounded to two decimals).
+- Audit `RECEIPT.RECORDED` (entity type `Receipt`) or `PAYMENT.RECORDED` (entity type `Supplier payment`), label = payment number, summary `{amount} from|to {party name} against {document number}.` followed by ` Realised exchange gain|loss {amount}.` when there is one.
+
+Response: 201 with the `Payment`. Detail: `{number} recorded · {amount}` plus the same FX note.
+
+`amount_paid` (document currency) drives the display status and the overpayment check; `amount_paid_base` (base, at the document rate) drives every base-currency outstanding figure. They must both be maintained.
+
+Payment journals carry `source.document_id`, so they cannot be reversed through `POST /journals/reverse`, and there is no payment void endpoint (open question).
+
+---
+
+## 9. Multi-currency and exchange rates
+
+### 9.1 Conventions
+
+- The base currency is `OrgSettings.base_currency` (ISO 4217, default `GHS`). Every journal debit and credit is in base currency.
+- An exchange rate is **base currency per one unit of the foreign currency** (for example 1 USD = 12.86 GHS is stored as `12.86`). Converting: base = round2(FC × rate).
+- Rates are stored with four decimals (manual rates and payment rates are rounded to four decimals; the mock does not round document and transfer rates, see section 19).
+- The rate "on" a date is the latest rate for that currency dated on or before the date; ties on the same date are broken by the latest `created_at`, whatever the source.
+- Documents fix their rate at creation (`exchange_rate`). Later rate changes never alter posted documents.
+- Foreign amounts are carried on journal lines in `currency` and `amount_fc` (same side as the debit or credit) for foreign AR/AP lines and foreign bank lines.
+- **Rate tolerance**: when a user types a document or payment rate that differs from the reference rate on that date by more than `OrgSettings.fx_rate_tolerance_pct` percent (|typed − reference| ÷ reference × 100), the frontend shows a warning. This is a client-side warning only; the mock does not reject such rates (open question whether the API should).
+
+### 9.2 Currency check on documents
+
+Used by document create and approve. For any currency other than the base:
+
+- `{currency} is not set up. Add it in Settings → Currencies.`
+- `{currency} is switched off. Turn it on in Settings → Currencies.`
+- `Enter the {currency} exchange rate.` when the rate is not greater than zero.
+
+### 9.3 `POST /currencies/add`
+
+Body `{ code, name, symbol }`.
+
+Validation: `Use the three-letter ISO code, e.g. USD.` (after trimming and upper-casing); `{code} is already set up.`; `Name is required.`
+
+Side effects: the currency is created active, with `symbol` defaulting to the code. Audit `CURRENCY.ADDED` (entity type `Currency`, entity id = code), summary `Added {name} ({code}). Record a rate before using it.`
+
+Response: 201 with the `Currency`. Detail: `{code} added`.
+
+### 9.4 `PUT /currencies/update`
+
+Query `currency_code`; body `{ is_active }`. The route returns 404 `Currency not found.` for an unknown code, and returns the currency unchanged (no audit) when `is_active` is absent or already has that value. Otherwise:
+
+- `The base currency is always on.`
+- `{bank name} holds {code}. A currency with a bank account cannot be switched off.` when deactivating a currency used by a bank account.
+
+Side effects: `is_active` is toggled. Audit `CURRENCY.ACTIVATED` or `CURRENCY.DEACTIVATED`. Deactivating does not affect open documents; their balances are still revalued.
+
+Response: the `Currency`. Detail: `{code} switched on` / `{code} switched off`.
+
+### 9.5 `POST /exchange-rates/add`
+
+Body `{ currency, date, rate }`.
+
+Validation, in order:
+
+- `Choose a foreign currency.` when the currency does not exist or is the base currency. (An inactive currency is accepted.)
+- `Enter a rate greater than zero.` (after rounding to four decimals).
+- `Choose the date the rate applies from.`
+- `Rates cannot be recorded for future dates.`
+
+Side effects: a rate is created with `source: MANUAL`. Several rates may exist for the same currency and date; the newest wins. Audit `FX_RATE.RECORDED`, label `{currency} {date}`, summary `1 {currency} = {rate} from {date}` with the percentage move against the previous rate, and a `rate` change when a previous rate exists.
+
+Response: 201 with the `ExchangeRate`. Detail: `{currency} rate recorded`.
+
+### 9.6 `DELETE /exchange-rates/delete`
+
+Query `exchange_rate_id`.
+
+Validation: `Rate not found.`; `Reference rates from Bank of Ghana cannot be deleted. Record a manual rate instead.` when `source` is not `MANUAL`.
+
+Any manual rate may be deleted; documents keep the rate they were created with, so deletion does not affect them. Audit `FX_RATE.DELETED`.
+
+Response: `data: null`. Detail: `Rate deleted`.
+
+### 9.7 `POST /exchange-rates/fetch-reference`
+
+Downloads today's Bank of Ghana reference rates. For each active, non-base currency that has no `BANK_OF_GHANA` rate dated today and has at least one earlier rate, a rate dated today with `source: BANK_OF_GHANA` is created, stamped with the integrations service actor (`svc_integrations`, "Trovesuite Integrations"). The mock simulates the value by drifting the last rate; the API must call the real reference-rate source.
+
+When nothing is added the response is `data: 0`, detail `Rates are already up to date for today`, and no audit is recorded. Otherwise audit `FX_RATE.FETCHED` (entity id null, label `Bank of Ghana`), and the response is the number of currencies added with detail `Bank of Ghana rates fetched for {codes}`.
+
+---
+
+## 10. FX revaluation
+
+Month-end revaluation restates open foreign-currency balances at the month-end rate. The adjustment is posted on the last day of the month and automatically reversed on the first day of the next month, so documents and bank balances are always carried at their historical rate between revaluations.
+
+### 10.1 `GET /revaluations/preview`
+
+Query `as_at` (required). Returns `{ rates, lines, missing }`:
+
+- `rates`: for every non-base currency (active or not) that has a rate on or before `as_at`, the rate on `as_at`.
+- `missing`: currencies with exposure but no rate. Exposure is any `APPROVED` foreign invoice or bill issued on or before `as_at` (even if fully paid) and any foreign bank account (even with a zero balance).
+- `lines`: one `FxRevaluationLine` per open balance, computed below. Lines whose currency has no rate are omitted.
+
+Receivables and payables (one line per document): for each `APPROVED` foreign invoice (kind `RECEIVABLE`) or bill (kind `PAYABLE`) issued on or before `as_at`:
+
+- payments considered are those against the document dated on or before `as_at`;
+- `amount_fc` = round2(total − sum of those payments' `amount`); documents with `amount_fc` ≤ 0.005 are skipped;
+- `carrying_base` = round2(round2(total × doc rate) − sum of the carrying released by those payments), where carrying released by a payment = `base_amount − fx_gain_loss` for receipts and `base_amount + fx_gain_loss` for supplier payments;
+- `rate` = the currency's rate on `as_at`; `revalued_base` = round2(`amount_fc` × rate);
+- `difference` = `revalued_base − carrying_base` for receivables and `carrying_base − revalued_base` for payables (positive is a gain);
+- `account_id` = AR control or AP control; `label` = `{document number} · {party name}`.
+
+Foreign bank accounts (kind `BANK`, one line per account): from ledger-affecting journals dated on or before `as_at`, the bank GL's base balance (debits − credits) is `carrying_base` and its FC balance (sum of `amount_fc`, positive on debit lines and negative on credit lines) is `amount_fc`. Accounts where both are zero are skipped. `revalued_base` = round2(`amount_fc` × rate) and `difference` = `revalued_base − carrying_base`. `account_id` = the bank GL; `label` = the bank account name.
+
+### 10.2 `POST /revaluations/run`
+
+Query `period_id`. Revalues as at the period's `end_date`.
+
+Validation, in order:
+
+- `Choose a month end.` when the period does not exist.
+- `{period name} has not ended yet. Revalue after the month closes.` when `end_date` is today or later.
+- `{period name} has already been revalued.` (one revaluation per period).
+- Posting-date check on `end_date`, then on the following day.
+- `No {currencies} rate on or before {as_at}. Record one in Settings → Currencies.` when the preview reports missing rates.
+- `Nothing to revalue: no open foreign balances moved.` when every line's difference is zero.
+
+Revaluation journal (`POSTED`, `date` = `end_date`, `memo` = `Foreign currency revaluation – {period name}`, `reference` and `source.reference` = `FX-REVAL-{YYYY-MM}`, `source.type` = `FX_REVALUATION`, `branch_id` null):
+
+- One line per account (AR control, AP control, each foreign bank GL) with the sum of that account's differences: a positive sum is a debit, a negative sum is a credit, described `Revaluation – {currencies}`. A gain is a debit on every side because receivables and bank balances grow while payables shrink.
+- One balancing line on the FX unrealised account for the net of all differences: a net gain is a credit (`Unrealised exchange gain`), a net loss a debit (`Unrealised exchange loss`).
+- Lines carry no `currency` / `amount_fc`, so foreign-currency balances are not changed, only their base value.
+
+Day-one reversal: the revaluation journal is immediately reversed into a journal dated the day after `end_date` with reason `automatic reversal of month-end revaluation` (memo `Reversal of {number} – automatic reversal of month-end revaluation`). The revaluation journal becomes `REVERSED`.
+
+An `FxRevaluation` record is created with `period_id`, `as_at`, the `rates` used, all preview `lines` (including zero differences), `net_difference` = round2(sum of differences), `journal_id` and `reversal_journal_id`.
+
+Audit `FX.REVALUED` (entity type `Journal`, entity id = revaluation journal), summary `Revalued {n} open foreign balance(s) at {as_at}: net unrealised gain|loss {amount}. Reversed on {next day} by {reversal number}.`
+
+Response: 201 with the `FxRevaluation`. Detail: `{period name} revalued · {journal number} posted, reversed on {next day}`.
+
+---
+
+## 11. Banking
+
+### 11.1 Bank accounts
+
+Bank accounts (`GET /bank-accounts/list`) link a bank or cash account to a GL account and a currency. There are no endpoints to create or edit them; they come from provisioning. `statement_balance` and `statement_date` describe the latest bank statement and are in the bank account's currency. A foreign bank account's ledger balance is shown in its own currency (the FC balance of its GL account); base-currency accounts show the base balance.
+
+### 11.2 `POST /bank-accounts/transfer`
+
+Body `{ from, to, amount, date, memo, rate? }`. `amount` is in the currency of the account the money leaves (`from`); `rate` converts the foreign side.
+
+Validation, in order:
+
+- `Choose two different accounts.`
+- `Choose both accounts.` when either bank account is unknown.
+- `Enter an amount greater than zero.` (after rounding to two decimals).
+- `Transfers between two different foreign currencies are not supported.`
+- `Enter the {currency} rate for this transfer.` when either side is foreign and `rate` is not greater than zero. A transfer between two accounts in the same foreign currency also needs a rate.
+- Posting-date check on `date`.
+
+Amounts: when one side is foreign (`fc` is that currency), base = round2(`amount` × rate) if the source is foreign, otherwise `amount`; FC amount = `amount` if the source is foreign, otherwise round2(`amount` ÷ rate). Base-only transfers use the amount as is.
+
+Journal (`POSTED`, `date`, `branch_id` null, `source: { type: "BANKING", reference: "TRF-{YYYYMMDD}" }`, memo = the given memo or `Transfer from {from name} to {to name}` with ` ({fc amount} @ {rate})` when foreign):
+
+| Account | Debit | Credit | `currency` / `amount_fc` |
+|---|---|---|---|
+| Destination bank GL | base | | bank currency / FC amount (foreign account only) |
+| Source bank GL | | base | bank currency / FC amount (foreign account only) |
+
+No realised FX is computed on transfers (open question). Audit `BANK.TRANSFER` (entity type `Journal`, entity id = the journal), summary `{amount} from {from name} to {to name}.`
+
+Response: 201 with the `JournalEntry`. Detail: `Transfer posted as {journal number}`.
+
+### 11.3 Statement lines
+
+`BankStatementLine.amount` is positive for money in and negative for money out. Status is `UNMATCHED`, `SUGGESTED` (a bank-feed suggestion with `suggested_journal_id`) or `MATCHED` (`matched_journal_id`). There is no endpoint to import statement lines or create suggestions; they come from the bank feed. Matching compares the statement amount with the journal's base-currency movement on the bank GL; for foreign bank accounts this mixes currencies (open question).
+
+### 11.4 `POST /reconciliation/match`
+
+Body `{ statement_line_id, journal_id }` (both required; missing values return 400 with `field_errors`).
+
+Validation, in order:
+
+- `Statement line not found.`
+- `Ledger entry not found.`
+- `Amounts differ: statement {line amount}, ledger {net}.` where net = round2(sum of debit − credit on the line's bank GL in that journal), when the two differ by more than 0.005.
+- `{journal number} is already matched to another statement line.`
+
+The mock does not check the journal's status or whether the line is already matched (a match simply replaces the previous one).
+
+Side effects: `status: MATCHED`, `matched_journal_id` set, `suggested_journal_id` cleared. Audit `RECON.MATCHED` (entity type `Statement line`), label = line description, summary `Matched to {journal number}.`
+
+Response: the `BankStatementLine`. Detail: `Matched to {journal number}`.
+
+### 11.5 `POST /reconciliation/unmatch`
+
+Query `statement_line_id`.
+
+Validation: `Line is not matched.` when the line does not exist or is not `MATCHED`.
+
+Side effects: `status: UNMATCHED`, `matched_journal_id` cleared. No audit is recorded (open question).
+
+Response: the `BankStatementLine`. Detail: `Match removed`.
+
+### 11.6 `POST /reconciliation/create-entry`
+
+Body `{ statement_line_id, account_id, memo }`. Posts a journal for a bank-only item (charges, interest) and matches it.
+
+Validation, in order:
+
+- `Statement line not found.`
+- `Choose an account to post the other side to.` when the account is unknown or a group.
+- `Use a receipt or payment for customer and supplier money.` when the account is a control account.
+- Posting-date check on the line's `date`.
+
+The mock does not check that the account is active or that the line is not already matched, and it adds no `amount_fc` for foreign bank accounts. The API should check all three.
+
+Journal (`POSTED`, `date` = line date, `memo` = the given memo or the line description, `branch_id` null, `source: { type: "BANKING", reference: {first 24 characters of the description} }`), with amount = |line amount|:
+
+| Line amount | Debit | Credit |
+|---|---|---|
+| Positive (money in) | Bank GL | chosen account |
+| Negative (money out) | chosen account | Bank GL |
+
+The statement line becomes `MATCHED` to the new journal. Audit `RECON.ENTRY_CREATED` (entity type `Journal`), summary `Created from statement line "{description}" and matched.`
+
+Response: 201 with the new `JournalEntry`. Detail: `{journal number} posted and matched`.
+
+### 11.7 `POST /reconciliation/complete`
+
+Query `bank_account_id`.
+
+Validation: `Bank account not found.`; `{n} statement line(s) are not matched yet.` when any of the account's statement lines is not `MATCHED` (`SUGGESTED` counts as not matched).
+
+Side effects: `last_reconciled_at` = now. The mock does not compare the statement balance with the ledger balance (open question). Audit `RECON.COMPLETED` (entity type `Bank account`), summary `Reconciled to statement dated {statement_date}.`
+
+Response: the `BankAccount`. Detail: `{bank name} reconciled`.
+
+---
+
+## 12. Tax
+
+Tax codes are read-only (`GET /tax-codes/list`); there are no endpoints to create or edit them. The standard codes, all in Ghana, are:
+
+| Code | Name | `rate` | `kind` | Output account | Input account | Active |
+|---|---|---|---|---|---|---|
+| `GH-STD` | Standard rated | 0.20 | `OUTPUT_INPUT` | VAT output (2100) | VAT input (1400) | yes |
+| `VFRS-3` | VAT flat rate (retail) | 0.03 | `OUTPUT_INPUT` | VAT output (2100) | none | no |
+| `ZERO` | Zero rated | 0 | `OUTPUT_INPUT` | VAT output (2100) | VAT input (1400) | yes |
+| `EXEMPT` | Exempt | 0 | `EXEMPT` | none | none | yes |
+| `WHT-SVC` | Withholding tax – services | 0.075 | `WITHHOLDING` | WHT payable (2120) | none | yes |
+
+`GH-STD` is a single combined rate: VAT 15% + NHIL 2.5% + GETFund levy 2.5%, all charged on the same base. There is no separate COVID-19 levy code.
+
+Rules:
+
+- Document tax is computed as in section 7.3 and posted per code to the code's output account (invoices) or input account (bills), falling back to VAT output or VAT input when the code has none.
+- `WITHHOLDING` codes compute no tax on documents and nothing posts to the WHT payable account from documents or payments. How withholding should be applied is an open question.
+- `is_active` on tax codes is not checked when documents are validated (open question).
+- The Tax page computes the monthly VAT summary on the client from posted journals: output = sum of credits on the VAT output account, input = sum of debits on the VAT input account, withholding = sum of credits on the WHT payable account, net = output − input; the return is due on the 15th of the next month and is treated as filed when a ledger-affecting journal has `source.reference` `GRA-VAT-{MM}`. There is no tax report endpoint.
+
+---
+
+## 13. Custom fields
+
+Custom fields let an organisation add its own fields to six entities. Values are stored in the entity's `custom_fields` map (key → string).
+
+### 13.1 Definitions
+
+- Entities: `Customer`, `Supplier`, `Invoice`, `Bill`, `Journal`, `Account`.
+- Types: `TEXT`, `LONG_TEXT`, `NUMBER`, `DATE`, `SELECT`, `BOOLEAN`.
+- Scopes: `FINANCIAL` (business data, for example a sales region or a PO number) and `SOURCE_REFERENCE` (identifiers in an external system, for example a QuickBooks id). The engine treats both scopes the same way; the scope only affects how the field is grouped and labelled in the UI and audit summaries.
+- `key` is lower_snake_case, unique per entity, and never changes. `entity` never changes either. `position` orders fields within an entity (lowest first). `show_in_list` adds a column to list pages. Inactive fields are hidden and not validated, but their stored values are kept.
+
+### 13.2 `POST /custom-fields/add`
+
+Body `{ entity, key, label, type, scope, options?, required, description?, default_value?, show_in_list }`.
+
+Validation, in order:
+
+- `Key must be lower_snake_case and start with a letter.` (pattern `^[a-z][a-z0-9_]*$` after trimming).
+- `Label is required.`
+- `{entity} already has a field called {key}.`
+- Option rules:
+  - `SELECT`: `A dropdown needs at least two options.` (after trimming and dropping blanks); `Dropdown options must be unique.`; `The default must be one of the options.`
+  - `BOOLEAN`: `The default for a yes/no field is yes or no.` when `default_value` is not `true` or `false`.
+  - `NUMBER`: `The default must be a number.`
+
+`entity`, `type` and `scope` are not validated against their enums by the mock; the API should.
+
+Side effects: the field is created active, with `position` = (highest position for that entity, or 0) + 1, trimmed label, description and default (blank becomes absent). The mock stores `options` as sent (untrimmed). Audit `CUSTOM_FIELD.CREATED`, label `{entity}.{key}`, summary `Added {label} to {entity} (financial|source reference).`
+
+Response: 201 with the `CustomField`. Detail: `{label} added to {entity}`.
+
+### 13.3 `PUT /custom-fields/update`, `DELETE /custom-fields/delete`, `POST /custom-fields/move`
+
+`PUT /custom-fields/update` (query `custom_field_id`; body: any of `label`, `description`, `type`, `scope`, `options`, `required`, `default_value`, `show_in_list`, `is_active`). Validation, in order:
+
+- `Field not found.`
+- `Label is required.` when `label` is supplied and blank.
+- `{n} record(s) already hold a {label}. Its type cannot change; add a new field instead.` when changing the type of a field that any record holds a value for.
+- Option rules (section 13.2) on the merged definition.
+- `"{option}" is still used on some records. Change those first or keep the option.` when a `SELECT` option that a record uses is removed.
+
+Side effects: the patch is applied, label, description and default are trimmed, and `options` is cleared when the type is not `SELECT`. Deactivation is `is_active: false`. Audit `CUSTOM_FIELD.UPDATED` only when something changed, with one change per modified property. Response: the `CustomField`; detail `{label} saved`. The mock applies the whole body, so `key`, `entity`, `id` or `position` in the body would be overwritten; the API must ignore them.
+
+`DELETE /custom-fields/delete` (query `custom_field_id`). Validation:
+
+- `Field not found.`
+- `{n} record(s) hold a {label}. Deactivate it instead so the history is kept.` when any record holds a value. The field is not deactivated automatically.
+- `{label} is the target of a field mapping ({source field}). Remove the mapping first.` when a field mapping targets `custom.{key}` (the check ignores the entity).
+
+Side effects: the definition is deleted. Audit `CUSTOM_FIELD.DELETED`, summary `Deleted unused field {label}.` Response: `data: null`; detail `{label} deleted`.
+
+`POST /custom-fields/move` (query `custom_field_id`; body `{ direction }`, negative means up, anything else down). Validation: `Field not found.` The field swaps places with its neighbour within the entity and all of that entity's positions are renumbered 1…n. Moving past either end is a no-op. No audit. Response: the `CustomField`; no detail message.
+
+### 13.4 Values
+
+Value validation (`validateCustomValues`) runs for the active fields of the entity, in `position` order, against the submitted map (blank values count as missing):
+
+| Type | Rule | Message |
+|---|---|---|
+| any except `BOOLEAN` | required and blank | `{label} is required.` |
+| `NUMBER` | must parse as a finite number | `{label} must be a number.` |
+| `DATE` | must be `YYYY-MM-DD` and a real date | `{label} must be a date.` |
+| `SELECT` | must equal one of the options | `{label} must be one of: {options joined by ", "}.` |
+| `BOOLEAN` | must be `true` or `false` | `{label} must be yes or no.` |
+| `TEXT`, `LONG_TEXT` | none | |
+
+Normalisation: values are trimmed; blank values remove the key; keys not in the submitted map are kept from the previous values (so a partial map merges); values for inactive or unknown keys are kept. Values are always strings on the wire (`"42.5"`, `"2026-10-05"`, `"true"`).
+
+Important detail: validation only sees the submitted map, not the merged result. A record update that omits a required field's key fails with `{label} is required.` even if the record already has a value (this applies to account, party and journal updates). Default values (`default_value`) are applied by the frontend when it opens a form, not by the engine. Unknown keys are not rejected. All three behaviours are open questions.
+
+### 13.5 `PUT /custom-fields/values`
+
+Query `entity` and `record_id`; body `{ values }`. Sets custom values on one record without touching anything else. Allowed on posted journals and approved or void documents, because custom values never affect the ledger.
+
+Validation: `{entity} not found.` when the record does not exist (an invalid `entity` causes a server error in the mock); value validation for the entity.
+
+Side effects: values are normalised and merged. When nothing changed the response is the record with detail `Nothing changed` and no audit. Otherwise the record's update stamp is refreshed and audit `CUSTOM_FIELDS.UPDATED` is recorded with `entity_type` = the entity name (`Customer`, `Invoice`, …), label = the record's number, name or code, and one change per modified key (labelled with the field label).
+
+Response: the updated record. Detail: `Details saved`.
+
+---
+
+## 14. Integrations
+
+### 14.1 Data sources
+
+`DataSource` rows describe connectors (Trovesuite apps, other accounting systems, files, bank feeds, APIs). There are no endpoints to create or delete them; they come from provisioning.
+
+`POST /data-sources/connect` (query `data_source_id`; body `{ entities, schedule, connection }`):
+
+- `Source not found.`
+- `Pick at least one kind of record to bring in.` when `entities` is empty.
+- `{connection key} is required.` for the first connection value that is blank.
+
+Side effects: `status: CONNECTED`, `status_message` cleared, `error_count: 0`, `entities` and `schedule` replaced, `connection` replaced with values masked as `••••••••` for any key whose name contains `token`, `secret`, `key` or `password` (case-insensitive), `last_run_at` = now, `last_run_status: SUCCESS`. Audit `SOURCE.CONNECTED` when the previous status was `NOT_CONNECTED`, otherwise `SOURCE.RECONNECTED`, with a `status` change. Response: the `DataSource`; detail `{name} connected`. The API must store secrets in a secret store and never return them.
+
+`POST /data-sources/disconnect` (query `data_source_id`): `Source not found.` Sets `status: NOT_CONNECTED` and clears `connection`; history, mappings and batches are kept. Audit `SOURCE.DISCONNECTED`, summary `{name} disconnected. History is kept.` Response: the `DataSource`; detail `{name} disconnected`.
+
+`POST /data-sources/sync` (query `data_source_id`):
+
+- `Source not found.`
+- `{name} is not connected yet.` when `NOT_CONNECTED`.
+- The source's `status_message`, or `{name} cannot sync until the connection is fixed.`, when `ERROR`.
+
+Side effects: `last_run_at` = now, `last_run_status` = `PARTIAL` when the source is in `WARNING`, otherwise `SUCCESS`, `records_synced` increased by the number of records synced. The mock invents the count. Audit `SYNC.COMPLETED`, summary `Manual sync: {n} records` plus `, {error_count} still held for review` when there are held errors. Response: the record count; detail `{name}: {n} records synced`.
+
+### 14.2 Field mappings
+
+A mapping maps a `source_field` from a data source's `entity` to a Trovesuite `target_field`, with an optional `transform` description. Target fields use dotted names, for example `journal.date`, `amounts.total`, `customer.external_reference`, `dimension.branch`, `line.tax_code`, `custom.{key}` for custom fields.
+
+`POST /field-mappings/add` and `PUT /field-mappings/update` (query `field_mapping_id`) take `Omit<FieldMapping, "id">`:
+
+- `Both the source field and the Trovesuite field are required.`
+- `{target field} is already mapped from {existing source field}.` when another mapping for the same `source_id` and `entity` has the same `target_field`.
+- Update only: `Mapping not found.`
+
+Create audits `MAPPING.CREATED` (label `{source field} → {target field}`). Update applies the body and records no audit. Detail `Mapping added` / `Mapping updated`; response the `FieldMapping` (201 on create). `source_id` is not checked to exist.
+
+`DELETE /field-mappings/delete` (query `field_mapping_id`): `Mapping not found.`; `Required mappings cannot be removed. Change the source field instead.` when `required`. Deletes without audit. Response `data: null`; detail `Mapping removed`.
+
+### 14.3 Accounting rules
+
+An accounting rule describes how an external event (for example `store.sale.completed`) becomes a journal: a list of debit and credit lines, each with an account and an amount basis (`TOTAL`, `SUBTOTAL`, `TAX`, `COST`, `PRINCIPAL`, `INTEREST`, `FEES`). `sample` holds example amounts for previewing the rule.
+
+`PUT /accounting-rules/update` (query `rule_id`; body `{ is_active }`): 404 `Rule not found.` for an unknown id; when `is_active` is absent or unchanged the rule is returned as is. Otherwise `is_active` is toggled and audit `RULE.ACTIVATED` or `RULE.DEACTIVATED` is recorded, summary `Activated|Deactivated posting rule for {event}.` Detail `{name} activated|deactivated`.
+
+The mock does not execute rules; `postings_count` is static. Applying rules to incoming events is backend work that the frontend does not yet drive (open question).
+
+### 14.4 Import batches
+
+An import batch holds rows brought in from a file or a source. The frontend parses and validates rows, then sends them with their status.
+
+Row statuses: `VALID` (ready to post), `WARNING` (postable, with a message) and `ERROR` (held). Batch statuses: `NEEDS_REVIEW` (saved, not posted), `POSTED` (all rows posted), `PARTIALLY_POSTED` (posted, with error rows held), `FAILED` (the source could not deliver the batch; only set by sources, never by the engine).
+
+`POST /imports/add` (body `ImportInput`):
+
+- `The file has no rows to import.`
+
+Side effects: a batch is created with a new `IMP-` number, `status: NEEDS_REVIEW`, every row's `posted: false`. Audit `IMPORT.UPLOADED`, summary `{entity}: {n} rows from {file name or "source"}.` When `post` is true, the batch is posted immediately (below); if posting fails, the whole request fails and no batch is created. Response: 201 with the `ImportBatch`; detail `{number} saved for review`, or the posting message.
+
+`POST /imports/post` (query `import_batch_id`):
+
+- `Batch not found.`
+- `Batch is already posted.` when `status` is `POSTED`.
+
+Posting rules (shared with `post: true` on add):
+
+- Postable rows are rows not in `ERROR` and not yet posted. `There are no valid rows left to post. Fix or reprocess the failed rows first.` when there are none.
+- total = round2(sum of |row amount|) over postable rows.
+- For the financial entities `Sales`, `Invoices` and `Bills` with total > 0, one balanced journal is posted, dated today (posting-date check on today), memo `Imported {entity in lower case} – {batch number}` plus ` ({file name})` when there is one, `source: { type: "IMPORT", reference: {batch number} }`, `branch_id` null. The mock assumes every amount includes standard-rate tax at 20%: net = round2(total ÷ 1.2), tax = total − net.
+
+| Entity | Debit | Credit |
+|---|---|---|
+| `Sales` | Cash: total | Sales revenue: net (`{n} imported rows`); VAT output: tax |
+| `Invoices` | AR control: total | Sales revenue: net; VAT output: tax |
+| `Bills` | Transport: net (`{n} imported bills`); VAT input: tax | AP control: total |
+
+- The batch's `journal_id` is set to that journal (a second posting overwrites it).
+- Other entities (`Customers`, `Opening balances`, `Bank statement lines`, …) post no journal and create no records in the mock; their rows are only marked posted.
+- Every postable row becomes `posted: true`. The batch becomes `PARTIALLY_POSTED` when any row is `ERROR`, otherwise `POSTED`.
+- Audit `IMPORT.POSTED`, summary `Posted {n} row(s)` plus `; {m} held with errors`.
+
+Response: the `ImportBatch`. Detail `{number}: {n} row(s) posted` plus `, {m} held for correction`.
+
+The import posting in the mock is a placeholder: it ignores field mappings, tax codes, parties and the individual rows, and it posts to AR or AP without creating invoices or bills, which puts the control accounts out of step with the sub-ledger. The real API must turn each row into proper records using the source's field mappings and accounting rules (open question).
+
+`POST /imports/reprocess` (query `import_batch_id` and `row`):
+
+- `Record not found.` when the batch or row does not exist.
+- `Only failed rows need reprocessing.` when the row is not `ERROR`.
+
+Side effects: the row becomes `VALID` with message `Corrected and revalidated by {actor name}.`; a `FAILED` batch becomes `NEEDS_REVIEW` (and a `POSTED` batch would become `PARTIALLY_POSTED`). The mock does not actually re-validate the row. Audit `IMPORT.ROW_REPROCESSED`, label `{batch number} row {row}`. Response: the `ImportRecord`; detail `Row {row} is ready to post`.
+
+---
+
+## 15. Organisation setup, settings, dimensions and users
+
+### 15.1 Tenant provisioning
+
+When a tenant signs up through Trovesuite Core, the accounting books are provisioned with:
+
+- the standard chart of accounts and tax codes (sections 5.1 and 12);
+- the standard currency list with only the base currency (`GHS`) active, and no exchange rates;
+- the standard base-currency bank accounts with `statement_balance` 0, `statement_date` today and `last_reconciled_at` null (foreign bank accounts are not provisioned);
+- the standard data sources, all `NOT_CONNECTED`, and the standard accounting rules with `postings_count` 0;
+- twelve `OPEN` monthly periods for the current calendar year;
+- no parties, documents, journals, payments, statement lines, import batches, revaluations, custom fields, field mappings, dimensions or audit events;
+- organisation settings with the trading and legal name from sign-up, the owner's email, empty TIN, address and phone, the default policies (approval threshold 50,000, approval required, posting to locked periods blocked, FX accounts 6130 and 6140, rate tolerance 2%) and `setup_completed: false`;
+- one user, the owner.
+
+Until setup is completed, every route returns 409 `ORGANISATION_NOT_SET_UP` except `GET /organisation/get`, `POST /organisation/setup`, `GET /users/me`, `GET /currencies/list` and `GET /navigation`.
+
+### 15.2 `POST /organisation/setup`
+
+Body `OrganisationSetupInput`: `{ name, legal_name, tin?, country, base_currency, fiscal_year_start, address?, email?, phone? }`.
+
+Validation, in order:
+
+- `This organisation is already set up. Change its details in Settings.` when `setup_completed` is true.
+- `Trading name is required.`
+- `Legal name is required.`
+- `Choose the country the business is registered in.` when `country` is not two upper-case letters (ISO 3166-1 alpha-2).
+- `The financial year must start on the first day of a month.` when `fiscal_year_start` is not `MM-01`.
+- `Choose the base currency (three-letter ISO code, e.g. GHS).` when `base_currency` is not three upper-case letters.
+
+Side effects:
+
+- The base currency is adopted: it is added (name = code, usual symbol) if missing and activated. If it differs from the previous base, the previous base is deactivated, and bank accounts, customers and suppliers in the previous base, plus draft invoices and bills in the previous base (with `exchange_rate` reset to 1), are moved to the new base.
+- Settings are updated with the trimmed inputs, `country`, `base_currency`, `fiscal_year_start`, prefixes `INV-{year}-`, `BILL-{year}-` and `JE-{year}-` for the current year, and `setup_completed: true`.
+- All periods are replaced with twelve `OPEN` monthly periods for the financial year that contains today, starting in the `fiscal_year_start` month.
+- Audit `ORGANISATION.SET_UP` (entity type `Organisation`, entity id null), summary `Set up {name} with {base currency} as the base currency.`
+
+Response: 200 with `OrgSettings`. Detail: `{name} is ready`.
+
+### 15.3 `PUT /organisation/update`
+
+Body `Partial<OrgSettings>`. `setup_completed` in the body is ignored.
+
+Validation, in order:
+
+- `Trading name is required.` when `name` is supplied and blank.
+- When `base_currency` changes: `The base currency cannot change once entries have been posted.` when any journal is `POSTED` or `REVERSED`; otherwise the base-currency adoption in section 15.2 runs (with its validation message).
+- `Approval threshold cannot be negative.`
+- `Choose an active, postable account for exchange differences.` when `fx_realised_account_id` or `fx_unrealised_account_id` is supplied and is not an existing, active, non-group, non-control account.
+- `Rate tolerance cannot be negative.`
+
+Side effects: the patch is merged into the settings. When no supplied value differs from the current one, the response detail is `Nothing changed` and no audit is recorded. Otherwise audit `SETTINGS.UPDATED` (entity type `Organisation`, entity id null, label `Settings`), summary `Updated {changed fields}.` with one change per field.
+
+Response: `OrgSettings`. Detail: `Settings saved`.
+
+Not validated by the mock: prefixes (an empty prefix is accepted), `fiscal_year_start` (changing it does not regenerate periods), `country`, email format.
+
+### 15.4 Dimensions
+
+Dimensions are the analysis codes used on journals: `LEGAL_ENTITY`, `BRANCH`, `DEPARTMENT`, `COST_CENTRE`, `PROJECT`. Journals carry a `branch_id` (copied to each line) and each line may carry a `cost_centre_id`. The mock does not check that these ids exist, are active or have the right kind (open question).
+
+`POST /dimensions/add` (body `{ kind, code, name, description? }`):
+
+- `Code and name are required.`
+- `Code {code} is already used.` when a dimension of the same kind has the same code (case-insensitive).
+
+Side effects: the dimension is created active with the code upper-cased. Audit `DIMENSION.CREATED`, label `{code} {name}`. Response: 201 with the `Dimension`; detail `{name} added`. `kind` is not validated by the mock.
+
+`PUT /dimensions/update` (query `dimension_id`; body `{ is_active }`): 404 `Dimension not found.`; returns the dimension unchanged when `is_active` is absent or equal. Otherwise toggles `is_active` without an audit event. Detail `{name} activated|deactivated`.
+
+### 15.5 Users
+
+- `GET /users/list` lists the tenant's users who can act in Accounting (from `cp_users`), with `id`, `name`, `email` and `role`.
+- `GET /users/me` returns the calling user (404 `User not found.` when the token's user is not a tenant user).
+
+---
+
+## 16. Audit trail
+
+Every audit event records `occurred_at` (now), the actor (`actor_id`, `actor_name`; `actor_type` is always `USER` in the mock), `action`, `entity_type`, `entity_id`, `entity_label`, `summary` and optional `changes` (`field`, `from`, `to`, all strings or null). Events are written in the same transaction as the change.
+
+| Action | Entity type | Entity id | Emitted when |
+|---|---|---|---|
+| `ACCOUNT.CREATED` | `Account` | account | Account added |
+| `ACCOUNT.UPDATED` | `Account` | account | Account updated (always, even with no changes) |
+| `JOURNAL.DRAFTED` | `Journal` | journal | Manual journal saved as draft |
+| `JOURNAL.POSTED` | `Journal` | journal | Manual journal posted on create or submit |
+| `JOURNAL.SUBMITTED` | `Journal` | journal | Manual journal sent for approval on create or submit |
+| `JOURNAL.APPROVED` | `Journal` | journal | Pending journal approved and posted |
+| `JOURNAL.REJECTED` | `Journal` | journal | Pending journal sent back to draft |
+| `JOURNAL.DELETED` | `Journal` | journal | Draft deleted |
+| `JOURNAL.REVERSED` | `Journal` | original journal | Journal reversed through `POST /journals/reverse` |
+| `PERIOD.REOPENED` | `Fiscal period` | period | Period set to `OPEN` |
+| `PERIOD.LOCKED` | `Fiscal period` | period | Period set to `LOCKED` |
+| `PERIOD.CLOSED` | `Fiscal period` | period | Period set to `CLOSED` |
+| `CUSTOMER.CREATED` | `Customer` | customer | Customer added |
+| `CUSTOMER.UPDATED` | `Customer` | customer | Customer updated |
+| `SUPPLIER.CREATED` | `Supplier` | supplier | Supplier added |
+| `SUPPLIER.UPDATED` | `Supplier` | supplier | Supplier updated |
+| `INVOICE.DRAFTED` | `Invoice` | invoice | Invoice saved as draft |
+| `INVOICE.APPROVED` | `Invoice` | invoice | Invoice approved (on create or later) |
+| `INVOICE.VOIDED` | `Invoice` | invoice | Invoice voided |
+| `BILL.DRAFTED` | `Bill` | bill | Bill saved as draft |
+| `BILL.APPROVED` | `Bill` | bill | Bill approved (on create or later) |
+| `BILL.VOIDED` | `Bill` | bill | Bill voided |
+| `RECEIPT.RECORDED` | `Receipt` | payment | Customer receipt recorded |
+| `PAYMENT.RECORDED` | `Supplier payment` | payment | Supplier payment recorded |
+| `BANK.TRANSFER` | `Journal` | transfer journal | Bank transfer posted |
+| `RECON.MATCHED` | `Statement line` | statement line | Statement line matched |
+| `RECON.ENTRY_CREATED` | `Journal` | new journal | Journal created from a statement line |
+| `RECON.COMPLETED` | `Bank account` | bank account | Reconciliation completed |
+| `SYNC.COMPLETED` | `Data source` | data source | Manual sync run |
+| `SOURCE.CONNECTED` | `Data source` | data source | Source connected for the first time |
+| `SOURCE.RECONNECTED` | `Data source` | data source | Source connected again |
+| `SOURCE.DISCONNECTED` | `Data source` | data source | Source disconnected |
+| `MAPPING.CREATED` | `Field mapping` | mapping | Field mapping added |
+| `CUSTOM_FIELD.CREATED` | `Custom field` | field | Custom field defined |
+| `CUSTOM_FIELD.UPDATED` | `Custom field` | field | Custom field definition changed |
+| `CUSTOM_FIELD.DELETED` | `Custom field` | field | Unused custom field deleted |
+| `CUSTOM_FIELDS.UPDATED` | the record's entity (`Customer`, `Supplier`, `Invoice`, `Bill`, `Journal`, `Account`) | record | Custom values changed on one record |
+| `CURRENCY.ADDED` | `Currency` | currency code | Currency added |
+| `CURRENCY.ACTIVATED` | `Currency` | currency code | Currency switched on |
+| `CURRENCY.DEACTIVATED` | `Currency` | currency code | Currency switched off |
+| `FX_RATE.RECORDED` | `Exchange rate` | rate | Manual rate recorded |
+| `FX_RATE.DELETED` | `Exchange rate` | rate | Manual rate deleted |
+| `FX_RATE.FETCHED` | `Exchange rate` | null | Reference rates fetched (only when at least one was added) |
+| `FX.REVALUED` | `Journal` | revaluation journal | Month-end revaluation posted |
+| `RULE.ACTIVATED` | `Accounting rule` | rule | Rule switched on |
+| `RULE.DEACTIVATED` | `Accounting rule` | rule | Rule switched off |
+| `IMPORT.UPLOADED` | `Import batch` | batch | Batch created |
+| `IMPORT.POSTED` | `Import batch` | batch | Batch rows posted |
+| `IMPORT.ROW_REPROCESSED` | `Import batch` | batch | Failed row marked valid |
+| `ORGANISATION.SET_UP` | `Organisation` | null | Organisation set up |
+| `SETTINGS.UPDATED` | `Organisation` | null | Settings changed |
+| `DIMENSION.CREATED` | `Dimension` | dimension | Dimension added |
+
+The seed data also contains `SYNC.PARTIAL` and `SYNC.FAILED` events (entity type `Data source`, actor type `INTEGRATION`), which the API should emit from scheduled syncs.
+
+Writes that record **no** audit event in the mock: draft journal edit, statement line unmatch, field mapping update and delete, custom field move, dimension activate or deactivate, and the no-op paths ("Nothing changed", unchanged toggles). Journals posted as a side effect (invoice and bill approvals, payments, void reversals, revaluation reversals) are covered by the parent action's event only; no separate `JOURNAL.*` event is written for them.
+
+`GET /audit-logs/list` supports `search` (summary, entity label, actor name, action), filters `entity_type`, `actor_id`, `actor_type`, and `from_date` / `to_date` on the date part of `occurred_at`; default sort is `occurred_at` descending. The mock applies the date filter after paginating, which is a bug the API must not copy.
+
+---
+
+## 17. Reports
+
+All reports use ledger-affecting journals only (`POSTED` and `REVERSED`) and base-currency amounts. Dates are inclusive. Report payloads are snake_case. When a date parameter is omitted, `as_at` and `to_date` default to today and `from_date` defaults to 1 January of the `to_date` year (calendar year, not `fiscal_year_start`; open question).
+
+Shared definitions:
+
+- **Movement** of an account over a range: sum of debits and sum of credits on its lines.
+- **Signed balance**: debit − credit for debit-normal accounts (`ASSET`, `EXPENSE`) and credit − debit for credit-normal accounts (`LIABILITY`, `EQUITY`, `REVENUE`), rounded to two decimals. Positive means a normal balance.
+- **Group balances**: every posting account's signed balance is added to each of its ancestors.
+
+### 17.1 Trial balance (`GET /reports/trial-balance?as_at=`)
+
+For every non-group account with movement up to and including `as_at` (from the beginning of the books): net = round2(debits − credits). Accounts with net 0 are omitted. A positive net goes in the `debit` column, a negative net (as a positive number) in the `credit` column. Rows are sorted by account code.
+
+Response: `{ rows: [{ account, debit, credit }], totals: { debit, credit, difference } }`, where `difference` = debit total − credit total (zero for balanced books). Income and expense accounts accumulate across years because there is no year-end close.
+
+### 17.2 General ledger (`GET /reports/general-ledger?account_id=&from_date=&to_date=`)
+
+`account_id` is required (404 `Account not found.` when unknown).
+
+- Journals touching the account are ordered by date, then journal number.
+- `opening` = sum of the signed movement (in the account's normal direction) of every line on the account dated before `from_date`.
+- Each line dated within the range becomes a row with a running `balance` that starts at `opening`.
+- `totals` = debit and credit totals of the rows, with their difference.
+- `closing` = the last row's balance, or `opening` when there are no rows.
+
+Response: `{ opening, rows: [{ journal, line, balance }], totals: { debit, credit, difference }, closing }`. Each row contains the full journal and the line.
+
+### 17.3 Income statement (`GET /reports/income-statement?from_date=&to_date=`)
+
+Using signed balances over the range:
+
+- `revenue`: `REVENUE` accounts.
+- `cost_of_sales`: `EXPENSE` accounts with subtype `COST_OF_SALES`.
+- `operating`: all other `EXPENSE` accounts (this includes the FX gain and loss accounts, so a net gain appears as a negative expense).
+- `total_revenue`, `total_cost_of_sales`, `total_operating`: sums of the sections.
+- `gross_profit` = `total_revenue` − `total_cost_of_sales`.
+- `net_income` = `gross_profit` − `total_operating`.
+
+Each section is a list of `{ account, amount }` for non-group accounts with a non-zero amount.
+
+### 17.4 Balance sheet (`GET /reports/balance-sheet?as_at=`)
+
+Using signed balances from the beginning of the books to `as_at`:
+
+- `current_assets`: `ASSET` accounts except subtype `FIXED_ASSET`.
+- `fixed_assets`: `ASSET` accounts with subtype `FIXED_ASSET` (accumulated depreciation appears as a negative amount).
+- `current_liabilities`: `LIABILITY` accounts except subtype `LONG_TERM`.
+- `long_term_liabilities`: `LIABILITY` accounts with subtype `LONG_TERM`.
+- `equity`: `EQUITY` accounts.
+- `current_earnings` = net income from 1 January of the `as_at` year to `as_at`, plus net income for all earlier dates (prior years' profit that has not been closed into retained earnings).
+- `total_assets` = current + fixed; `total_liabilities` = current + long-term; `total_equity` = equity + `current_earnings`.
+- `difference` = `total_assets` − `total_liabilities` − `total_equity` (zero for balanced books).
+
+### 17.5 Cash flow (`GET /reports/cash-flow?from_date=&to_date=`)
+
+The engine uses the **direct method**, classifying each cash movement by its counter-account:
+
+- Cash accounts are all accounts with `is_bank: true`.
+- For each journal in the range with lines on cash accounts, net cash = round2(sum of debit − credit on those lines). Journals with net cash 0 (transfers between cash accounts) are skipped.
+- Journals with `source.type` `IMPORT` whose memo contains "opening balance" (case-insensitive) are migrated opening balances: their net cash is added to `opening` instead of a section.
+- Otherwise the journal is classified by its largest non-cash line (by debit + credit): `FIXED_ASSET` subtype → investing; `EQUITY` type or `LONG_TERM` subtype → financing; anything else (or no counter line) → operating.
+- The line label depends on `source.type`: `SALES` → `Receipts from customers`; `PURCHASES` → `Payments to suppliers`; `STORE_MANAGEMENT` → `Store sales collected`; `LOANS` → `Loans disbursed to clients` when the counter-account has subtype `LOAN_BOOK` and is debited in the journal, otherwise `Loan repayments received`; `HR` → `Salaries and statutory deductions`; anything else → the counter-account's name, or `Other`.
+- Amounts with the same label in the same section are summed; each section is sorted by absolute amount, largest first.
+- `opening` = migrated opening balances in the range + the sum of the cash accounts' balances at the day before `from_date`.
+- `net_change` = `total_operating` + `total_investing` + `total_financing`; `closing` = `opening` + `net_change`.
+
+Response: `{ operating: [{ label, amount }], investing, financing, total_operating, total_investing, total_financing, opening, net_change, closing }`.
+
+Revaluations of foreign bank accounts touch cash accounts and therefore appear as operating movements labelled with the unrealised FX account's name; the next-day reversal cancels them when both fall in the range.
+
+### 17.6 AR and AP ageing (`GET /reports/ar-ageing?as_at=`, `GET /reports/ap-ageing?as_at=`)
+
+- Rows are all invoices (AR) or bills (AP) with a base-currency `outstanding` greater than zero, computed as in section 7.1 from the **current** `amount_paid_base`.
+- Each document goes into a bucket by days overdue = (`as_at` − `due_date`) in days: ≤ 0 `Current`; 1–30 `1–30 days`; 31–60 `31–60 days`; 61–90 `61–90 days`; over 90 `90+ days`.
+- Amounts are grouped by party and summed per bucket; rows are sorted by total, largest first.
+
+Response: `{ buckets: ["Current", "1–30 days", "31–60 days", "61–90 days", "90+ days"], rows: [{ party_id, party_name, buckets: { "{bucket}": amount }, total }], totals: { "{bucket}": amount, total } }`. The bucket keys are these exact labels (with an en dash).
+
+`as_at` semantics: in the mock, `as_at` only moves the ageing reference date. Documents issued after `as_at` and payments dated after `as_at` are not excluded, so this is not a true historical ageing (open question).
+
+### 17.7 Dashboard statistics (`GET /dashboard/statistics?as_at=`)
+
+| Field | Definition |
+|---|---|
+| `as_at` | the date used (default today) |
+| `revenue_mtd` | income statement `total_revenue` from the first day of the `as_at` month to `as_at` |
+| `expenses_mtd` | `total_cost_of_sales` + `total_operating` for the same range |
+| `net_income_mtd` | `net_income` for the same range |
+| `net_income_ytd` | `net_income` from 1 January of the `as_at` year to `as_at` |
+| `cash_balance` | sum of every bank account's GL balance in base currency, over all dates |
+| `receivables` | sum of base `outstanding` over all invoices |
+| `overdue_receivables` | the same, for invoices whose display status is `OVERDUE` |
+| `payables` | sum of base `outstanding` over all bills |
+| `overdue_payables` | the same, for bills whose display status is `OVERDUE` |
+| `journals_pending_approval` | number of journals in `PENDING_APPROVAL` |
+| `unmatched_statement_lines` | number of statement lines not `MATCHED` (includes `SUGGESTED`) |
+
+Only the income-statement figures respect `as_at`; cash, receivables, payables and the overdue figures use all data and today's date (open question).
+
+---
+
+## 18. Open questions for backend
+
+These are behaviours that are ambiguous, missing or probably wrong in the mock. Each needs a decision before or during implementation.
+
+**HTTP and identifiers**
+
+1. Unknown ids on write endpoints return 400 with the engine message in the mock (for example `Only drafts can be edited.` for a missing journal). Should the API return 404 for every unknown id?
+2. The UI hard-codes some seeded ids (`acc_1100`-style account ids, `ba_gcb`, `ba_eco`, `ba_cash`, `ba_momo`, `tax_std`). Will the API keep these ids stable for the standard chart, or will the frontend stop relying on them?
+3. How does the API identify the AR control, AP control, VAT input, VAT output (and import cash, sales and expense) accounts? Options: new `OrgSettings` fields, or lookup by subtype plus `is_control`.
+4. What do `bus-id` (legal entity) and `loc-id` (branch) scope? The mock ignores both and keys books by `tenant_id` only.
+
+**Numbering and periods**
+
+5. Receipt and supplier payment prefixes are hard-coded as `RCT-2026-` and `PAY-2026-`. Should they move to `OrgSettings`, and how do all prefixes roll over to a new year?
+6. Are numbering gaps acceptable (database sequences), and must deleted draft numbers never be reused?
+7. With `block_posting_to_locked_periods` false, postings are allowed into `CLOSED` periods as well as `LOCKED` ones. Should `CLOSED` always block?
+8. Moving a period to `LOCKED` has no ordering checks (for example a `CLOSED` period can be moved to `LOCKED` while later periods are closed). Is that intended?
+9. How are the next financial year's periods created, and is there a year-end close into retained earnings? Reports currently use the calendar year rather than `fiscal_year_start`.
+10. Which time zone defines "today" for future-date checks, period checks and overdue status?
+
+**Journals**
+
+11. Maker-checker compares the approver with the creator only. Should the submitter also be excluded, and should a preparer be allowed to reject their own entry?
+12. The rejection reason lives only in the audit summary. Should it be stored on the journal for the preparer to see?
+13. Draft journal edits are not audited. Should they be?
+
+**Documents and payments**
+
+14. There are no endpoints to edit or delete draft invoices and bills. Are they needed?
+15. Payments cannot be reversed or voided, and a document with payments cannot be voided. A payment void endpoint is needed; what are its rules (reversal date, FX treatment)?
+16. Bills do not check the supplier's status; invoice approval does not re-check the customer's status or the custom fields (bill approval does). Should both sides behave the same?
+17. Document lines are not checked for account and tax-code existence, activity, postability, control accounts or document type. What messages should these checks use?
+18. Withholding tax codes are never applied. How should WHT be calculated and posted (on the bill, on payment, against WHT payable)?
+19. A tax code without an input account (`VFRS-3`) still posts input tax on bills to VAT input through the fallback. Should flat-rate tax on purchases be expensed instead?
+20. `credit_limit` is stored but never enforced, and its currency is not defined (party currency or base).
+21. Overpayments are rejected. Are customer advances or unapplied credits needed?
+22. Should a rate outside `fx_rate_tolerance_pct` be rejected by the API, or stay a client warning?
+23. What rounding mode should be used (half away from zero versus banker's rounding)? The mock's floating-point rounding can differ by 0.01 on edge cases.
+
+**Banking and FX**
+
+24. Transfers involving a foreign bank account post no realised FX, so the base value of the foreign account drifts until the next revaluation. Should transfers out of a foreign account release carrying value and post realised FX like payments?
+25. Statement amounts are compared with base-currency ledger movements, which is wrong for foreign bank accounts. Should matching use `amount_fc` for foreign accounts?
+26. There is no endpoint to import statement lines or generate match suggestions. Which source creates them?
+27. `POST /reconciliation/complete` does not compare the statement balance with the ledger balance. Should it?
+28. `POST /reconciliation/create-entry` does not check that the line is unmatched, and `POST /reconciliation/match` does not check the journal's status. Both should probably be enforced.
+29. Revaluation exposure includes fully paid documents and zero-balance bank accounts, which can block a run with a spurious missing-rate error. There is also no way to undo a revaluation. Is either needed?
+
+**Custom fields, integrations, settings**
+
+30. Custom value validation sees only the submitted map, so partial updates that omit a required field fail. Should validation run on the merged values? Should unknown keys be rejected and `default_value` applied on create?
+31. Which party fields are editable on update (`status`, `code`, `currency`, `external_reference`, `source`)?
+32. Should accounts with a non-zero balance, control accounts, bank GL accounts and the FX accounts in settings be protected from deactivation?
+33. Import posting is a placeholder (fixed accounts, 20% tax split, AR and AP posted without documents, non-financial entities create nothing, row validation done in the browser). What is the real per-entity import pipeline, and does it use field mappings and accounting rules?
+34. Accounting rules are not executed and `postings_count` is static. When and how does the API apply them to incoming events?
+35. Should `BankStatementLine`, `FiscalPeriod`, `FieldMapping`, `Currency` and `OrgSettings` carry the six audit fields, as the backend convention requires for every resource?
+36. Changing the base currency moves bank accounts, parties and drafts to the new currency. Is that the intended behaviour, or should the change be refused when such records exist?
+37. Ageing and dashboard figures ignore `as_at` for document issue dates and payment dates. Should they be true as-at figures?
+38. The ageing bucket keys are display labels with en dashes (`1–30 days`). Should the API use stable codes instead (which requires a frontend change)?
+
+---
+
+## 19. Mock simplifications the API must not copy
+
+The mock runs in one browser tab against one in-memory copy of the books. These shortcuts are acceptable there and wrong for a multi-user API.
+
+- **Identity and tenancy.** The mock decodes the JWT without verifying the signature (`alg: none` tokens are minted locally) and copies its `user_id` into `state.currentUserId`, which every action then trusts. The API must verify the token, take the user and `tenant_id` from verified claims, scope every query by `tenant_id` and `org-id`, and never accept an actor id from the request body or from shared mutable state.
+- **Permissions.** The mock checks no permissions. The API must enforce the permission id listed for each endpoint in the catalogue.
+- **Ids.** The mock generates ids itself (`{prefix}_{time in base 36}{counter}`) and derives account ids from codes (`acc_{code}`) and period ids from dates. The API should generate UUIDs; clients must treat ids as opaque strings.
+- **Numbering.** The mock computes the next number by scanning existing numbers for the maximum. Under concurrency this produces duplicates. Use a per-organisation, per-prefix database sequence or a locked counter row, and back every number with a unique constraint.
+- **Transactions.** The mock clones the whole state, applies the change and swaps it in. The API must perform each write (document, journal and lines, payment, balance fields, audit event) in one database transaction, and lock the rows it reads to make decisions, for example the document row when recording a payment, so that two concurrent payments cannot overpay.
+- **Idempotency.** Posting endpoints that have no natural state guard (`/receipts/add`, `/supplier-payments/add`, `/bank-accounts/transfer`, `/reconciliation/create-entry`, `/imports/add` with `post: true`, `/journals/add` with `intent: POST`) will post twice if the client retries. Support an idempotency key (for example an `Idempotency-Key` header stored with the result) on these endpoints.
+- **Rounding.** The mock rounds JavaScript floating-point numbers with `Math.round(x * 100) / 100`. Store money as `numeric(18,2)` and rates as `numeric(18,6)`, compute in `decimal`, and round explicitly with one agreed rounding mode. Round document and transfer rates to four decimals as the mock already does for manual and payment rates.
+- **Today.** The mock pins today to `2026-10-05`. Use the server clock in the organisation's time zone.
+- **Stored display names.** The mock stores names in `posted_by`, `approved_by`, `locked_by`, `created_by` and `updated_by`. Store user ids and resolve names when reading, as `docs/AUDIT_FIELDS.md` in tvs-accounting-bk requires.
+- **Audit actor type.** Every audit event in the mock has `actor_type: USER`, even when an integration is acting. Use `INTEGRATION` and `SYSTEM` where appropriate.
+- **Mass assignment.** Party update, settings update, field mapping update and custom field update copy the whole request body onto the record. Bind only the documented, editable fields.
+- **Server errors on bad input.** An unknown `party_id` on a document, an unknown `entity` on `PUT /custom-fields/values`, or a party update without `name` throws in the mock and becomes a 500. Return 400 with a message.
+- **System journals skip validation.** Journals produced by the engine are not passed through line validation. The API should still assert balance, non-group and existing accounts for every journal it writes.
+- **Secrets.** Data source connection values are masked by key name but otherwise kept in plain state. Store credentials in a secret store and never return them.
+- **Simulated integrations.** Manual sync invents a record count, and the reference-rate fetch invents rates by drifting the last one. Call the real sources.
+- **Client-side import validation.** Import rows arrive with a status chosen by the browser. Validate rows on the server and do not trust client-supplied `status` values.
+- **Report computation.** The mock recomputes every report by scanning every journal line. Use indexed queries or maintained balances.
+- **List filtering order.** The audit log list applies its date filter after pagination. Filter before paginating everywhere.
+- **Placeholder business logic.** Import posting (fixed accounts and a 20% VAT split), the hard-coded receipt and payment prefixes, and the fixed control-account ids are stand-ins and must be replaced by configuration or real logic.
