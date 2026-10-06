@@ -84,10 +84,10 @@ therefore put its message in `detail` even when it also fills `field_errors`.
 
 | Status | `error` | When | Client behaviour |
 | --- | --- | --- | --- |
-| 400 | `MISSING_HEADER` | A Trove header is missing (`field_errors` names it) | error message |
+| 400 | `MISSING_HEADER`, `INVALID_APP_ID` | A Trove header is missing, or `app-id` is wrong (`field_errors` names the header) | error message |
 | 400 | `VALIDATION_FAILED` | Bad JSON, missing query parameter, or a business rule failed | error message; form stays open |
 | 401 | `UNAUTHORIZED`, `TOKEN_EXPIRED` | No, bad or expired token | session cleared, back to login |
-| 403 | `INVALID_APP_ID`, `TENANT_NOT_FOUND`, `USER_NOT_IN_TENANT`, permission errors | Not allowed | error message |
+| 403 | `FORBIDDEN` (invalid platform context), permission errors | Not allowed | error message |
 | 404 | `NOT_FOUND` | Unknown route or record | error message |
 | 409 | `ORGANISATION_NOT_SET_UP` | Tenant has not completed `POST /organisation/setup` | routes to `/onboarding` |
 | 500 | `INTERNAL_ERROR` | Anything unexpected | "The books could not be loaded" screen or error toast |

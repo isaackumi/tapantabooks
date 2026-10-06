@@ -40,16 +40,16 @@ This document specifies the business rules that tvs-accounting-bk must enforce s
 
 ### 1.2 Request pipeline and error mapping
 
-The mock applies these checks in this order before running any business rule. The real API should produce the same status codes and `error` codes.
+The mock applies these checks in this order before running any business rule. The first six rows mirror `TroveRequestHeadersMiddleware` in the API template (same order, status codes and messages); the real API should produce the same status codes and `error` codes.
 
 | Check | Status | `error` | `detail` |
 |---|---|---|---|
-| Missing or undecodable bearer token | 401 | `UNAUTHORIZED` | `Unauthorized access` |
+| Missing `app-id`, `authorization`, `bus-id`, `loc-id` or `org-id` header (checked in that order) | 400 | `MISSING_HEADER` | `Validation failed.` with `field_errors: { "{header}": "Required header '{header}' is missing. Include it on every /api/v1/* request." }` |
+| `app-id` is not the accounting app id | 400 | `INVALID_APP_ID` | `Validation failed.` with `field_errors: { "app-id": "Header 'app-id' must be '{app id}'." }` |
+| `authorization` is not `Bearer <token>` | 401 | `UNAUTHORIZED` | `Validation failed.` with `field_errors: { "authorization": "Header 'authorization' must be a Bearer JWT." }` |
+| Token has no `tenant_id` claim | 401 | `UNAUTHORIZED` | `Validation failed.` with `field_errors: { "authorization": "JWT must include a tenant_id claim for platform context validation." }` |
 | Token expired | 401 | `TOKEN_EXPIRED` | `Token expired` |
-| Missing `app-id`, `org-id`, `bus-id` or `loc-id` header | 400 | `MISSING_HEADER` | `Missing required header: {header}.` with `field_errors: { "{header}": "{header} is required." }` |
-| `app-id` is not the accounting app id | 403 | `INVALID_APP_ID` | `Invalid app-id for this API.` |
-| Tenant from the token's `tenant_id` has no books | 403 | `TENANT_NOT_FOUND` | `TENANT_NOT_FOUND` |
-| Token `user_id` is not a user of the tenant | 403 | `USER_NOT_IN_TENANT` | `Unauthorized access` |
+| Tenant has no books, `org-id` / `bus-id` / `loc-id` are not the tenant's, or the token's `user_id` is not a tenant user | 403 | `FORBIDDEN` | `Invalid platform context: org-id, bus-id, loc-id, and app-id are not configured for this user/tenant, or the user has no access.` |
 | Organisation not set up and route not in the allowed list (section 15.1) | 409 | `ORGANISATION_NOT_SET_UP` | `Finish setting up the organisation before using the books.` |
 | No such route | 404 | `NOT_FOUND` | `No route for {METHOD} {path}.` |
 | Body is not valid JSON | 400 | `VALIDATION_FAILED` | `The request body is not valid JSON.` |

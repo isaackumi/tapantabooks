@@ -1,7 +1,7 @@
 import { http, HttpResponse } from "msw";
 import { setupWorker } from "msw/browser";
 import { AppConstants } from "@/core/appConstants";
-import { decodeToken, isExpired } from "@/core/session";
+import { decodeToken, isExpired, mockContextFor } from "@/core/session";
 import { setBaseCurrency } from "@/utils/format";
 import { handleCoreRequest } from "./core";
 import { tenantDb } from "./db";
@@ -17,7 +17,7 @@ const ALLOWED_BEFORE_SETUP = new Set([
   "GET /navigation",
 ]);
 
-const REQUIRED_HEADERS = ["app-id", "org-id", "bus-id", "loc-id"] as const;
+const REQUIRED_HEADERS = ["app-id", "authorization", "bus-id", "loc-id", "org-id"] as const;
 
 const json = (status: number, body: unknown) => HttpResponse.json(body as Record<string, unknown>, { status });
 
@@ -43,19 +43,40 @@ const accountingHandler = async (request: Request) => {
   const path = url.pathname.replace(/^.*?\/api\/v1/, "");
   const key = `${request.method} ${path}`;
 
-  const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  const claims = decodeToken(token);
-  if (!claims) return fault(401, "Unauthorized access", "UNAUTHORIZED");
-  if (isExpired(claims)) return fault(401, "Token expired", "TOKEN_EXPIRED");
+  // Same order, status codes and messages as TroveRequestHeadersMiddleware on tvs-accounting-bk.
+  const header = (name: string) => request.headers.get(name)?.trim() ?? "";
   for (const h of REQUIRED_HEADERS) {
-    if (!request.headers.get(h)) return fault(400, `Missing required header: ${h}.`, "MISSING_HEADER", { [h]: `${h} is required.` });
+    if (!header(h)) {
+      return fault(400, "Validation failed.", "MISSING_HEADER", {
+        [h]: `Required header '${h}' is missing. Include it on every /api/v1/* request.`,
+      });
+    }
   }
-  if (request.headers.get("app-id") !== AppConstants.appId) return fault(403, "Invalid app-id for this API.", "INVALID_APP_ID");
+  if (header("app-id").toLowerCase() !== AppConstants.appId.toLowerCase()) {
+    return fault(400, "Validation failed.", "INVALID_APP_ID", { "app-id": `Header 'app-id' must be '${AppConstants.appId}'.` });
+  }
+  const token = /^Bearer\s+(.+)$/i.exec(header("authorization"))?.[1];
+  if (!token) return fault(401, "Validation failed.", "UNAUTHORIZED", { authorization: "Header 'authorization' must be a Bearer JWT." });
+  const claims = decodeToken(token);
+  if (!claims?.tenant_id) {
+    return fault(401, "Validation failed.", "UNAUTHORIZED", {
+      authorization: "JWT must include a tenant_id claim for platform context validation.",
+    });
+  }
+  if (isExpired(claims)) return fault(401, "Token expired", "TOKEN_EXPIRED");
 
   const db = tenantDb(claims.tenant_id);
-  if (!db) return fault(403, "TENANT_NOT_FOUND", "TENANT_NOT_FOUND");
-  const state = db.ref.current;
-  if (!state.users.some((u) => u.id === claims.user_id)) return fault(403, "Unauthorized access", "USER_NOT_IN_TENANT");
+  const state = db?.ref.current;
+  const expected = mockContextFor(claims.tenant_id);
+  const contextOk =
+    header("org-id") === expected.org_id && header("bus-id") === expected.bus_id && header("loc-id") === expected.loc_id;
+  if (!db || !state || !contextOk || !state.users.some((u) => u.id === claims.user_id)) {
+    return fault(
+      403,
+      "Invalid platform context: org-id, bus-id, loc-id, and app-id are not configured for this user/tenant, or the user has no access.",
+      "FORBIDDEN",
+    );
+  }
   state.currentUserId = claims.user_id;
   setBaseCurrency(state.org.base_currency, state.currencies.find((c) => c.code === state.org.base_currency)?.symbol);
 
