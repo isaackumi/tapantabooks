@@ -38,6 +38,7 @@ export type SourceType =
   | "HR"
   | "IMPORT"
   | "FX_REVALUATION"
+  | "OPENING_BALANCE"
   | "SYSTEM";
 
 export interface SourceRef {
@@ -430,6 +431,52 @@ export interface OrgSettings {
   fx_unrealised_account_id: string;
   /** Warn when a rate typed on a document differs from the latest reference rate by more than this. */
   fx_rate_tolerance_pct: number;
+  /** Date the opening balances are posted at; set by PUT /opening-balances/update. */
+  conversion_date?: string | null;
+  /** The posted account-balances journal; replaced (reversed and re-posted) on every save. */
+  opening_balance_journal_id?: string | null;
+}
+
+export interface OpeningBalanceLine {
+  account_id: string;
+  debit: number;
+  credit: number;
+}
+
+/** An invoice or bill still open at the conversion date, in the base currency. */
+export interface OpeningItemInput {
+  party_id: string;
+  reference: string;
+  issue_date: string;
+  due_date: string;
+  amount: number;
+}
+
+/** Body of PUT /opening-balances/update. `lines` replaces the account balances; items are added; removed items are voided at the conversion date. */
+export interface OpeningBalancesInput {
+  date: string;
+  lines: OpeningBalanceLine[];
+  receivables: OpeningItemInput[];
+  payables: OpeningItemInput[];
+  removed_item_ids?: string[];
+}
+
+/** Response of GET /opening-balances/get. */
+export interface OpeningBalancesView {
+  conversion_date: string | null;
+  journal_id: string | null;
+  journal_number: string | null;
+  /** Account balances on the opening journal, excluding the Opening Balance Equity line. */
+  lines: OpeningBalanceLine[];
+  /** Unvoided invoices brought forward (source OPENING_BALANCE). */
+  receivables: SalesInvoice[];
+  payables: PurchaseBill[];
+  /** Debit-positive balance of Opening Balance Equity across all postings; zero when conversion is complete. */
+  opening_equity_balance: number;
+  /** Earliest posted entry that is not an opening balance; opening balances must be dated on or before it. */
+  first_transaction_date: string | null;
+  /** Why the opening balances cannot be changed right now (closed period), or null. */
+  locked_reason: string | null;
 }
 
 /** Body of POST /organisation/setup, sent once by the owner after sign-up. */

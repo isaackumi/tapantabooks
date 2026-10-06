@@ -13,6 +13,7 @@ const SOURCE_META: Record<SourceType, { label: string; className: string }> = {
   HR: { label: "ZelosHR", className: "bg-pink-50 text-pink-700 dark:bg-pink-900/30 dark:text-pink-300" },
   IMPORT: { label: "Import", className: "bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300" },
   FX_REVALUATION: { label: "FX revaluation", className: "bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300" },
+  OPENING_BALANCE: { label: "Opening balance", className: "bg-violet-50 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300" },
   SYSTEM: { label: "System", className: "bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200" },
 };
 

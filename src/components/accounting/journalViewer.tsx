@@ -43,10 +43,20 @@ const documentHref = (j: JournalEntry) => {
 };
 
 const documentLabel = (j: JournalEntry) =>
-  j.source.type === "SALES" ? "Open invoice" : j.source.type === "PURCHASES" ? "Open bill" : "Open revaluation";
+  j.source.type === "SALES"
+    ? "Open invoice"
+    : j.source.type === "PURCHASES"
+      ? "Open bill"
+      : j.source.type === "OPENING_BALANCE"
+        ? "Open opening balances"
+        : "Open revaluation";
 
 const revaluationHref = (j: JournalEntry) =>
-  j.source.type === "FX_REVALUATION" || j.reference?.startsWith("FX-REVAL") ? "/accounting/revaluation" : null;
+  j.source.type === "OPENING_BALANCE"
+    ? "/accounting/opening-balances"
+    : j.source.type === "FX_REVALUATION" || j.reference?.startsWith("FX-REVAL")
+      ? "/accounting/revaluation"
+      : null;
 
 export const JournalViewerProvider = ({ children }: { children: React.ReactNode }) => {
   const { state, actions } = useLedger();
@@ -83,7 +93,11 @@ export const JournalViewerProvider = ({ children }: { children: React.ReactNode 
   const ownEntry = journal?.created_by_id === user.id;
   const docLink = journal ? (documentHref(journal) ?? revaluationHref(journal)) : null;
   const canReverse =
-    journal?.status === "POSTED" && !journal.reversal_of_id && !journal.source.document_id;
+    journal?.status === "POSTED" &&
+    !journal.reversal_of_id &&
+    !journal.source.document_id &&
+    journal.source.type !== "OPENING_BALANCE" &&
+    journal.id !== state.org.opening_balance_journal_id;
 
   const footer = journal && (
     <div className="flex flex-wrap items-center justify-end gap-2">

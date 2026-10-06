@@ -133,6 +133,8 @@ Table: `acc_org_settings` (unique on `tenant_id`, `org_id`). Audit fields: no.
 | `fx_realised_account_id` | string | yes | account id; active, non-group, non-control; default account 6130 |
 | `fx_unrealised_account_id` | string | yes | account id; same rules; default account 6140 |
 | `fx_rate_tolerance_pct` | number | yes | percentage; ≥ 0; default 2 |
+| `conversion_date` | date or null | no | date opening balances are posted at; set only by `PUT /opening-balances/update` |
+| `opening_balance_journal_id` | string or null | no | the current posted opening-balances journal; set only by `PUT /opening-balances/update` |
 
 ### 3.2 CurrentUser
 
@@ -264,7 +266,7 @@ Store as columns on `acc_journal_entries`: `source_type`, `source_reference`, `s
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `type` | enum | yes | `MANUAL`, `SALES`, `PURCHASES`, `BANKING`, `STORE_MANAGEMENT`, `LOANS`, `HR`, `IMPORT`, `FX_REVALUATION`, `SYSTEM` |
+| `type` | enum | yes | `MANUAL`, `SALES`, `PURCHASES`, `BANKING`, `STORE_MANAGEMENT`, `LOANS`, `HR`, `IMPORT`, `FX_REVALUATION`, `OPENING_BALANCE`, `SYSTEM` |
 | `reference` | string | no | document number, payment number, `TRF-{YYYYMMDD}`, `FX-REVAL-{YYYY-MM}`, batch number, … |
 | `document_id` | string | no | invoice or bill id for document and payment journals; such journals cannot be reversed directly |
 
@@ -688,13 +690,25 @@ Used by `POST /organisation/setup`.
 | `email` | string | no | |
 | `phone` | string | no | |
 
-### 9.6 Inline request bodies
+### 9.6 OpeningBalancesInput
+
+Used by `PUT /opening-balances/update`. Rules in `docs/PROCESSING_RULES.md` section 18.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `date` | date | yes | conversion date; on or before the first non-opening transaction |
+| `lines` | object[] | yes | `{ account_id, debit, credit }`; replaces every account balance; zero lines are dropped; no control, group, inactive, foreign-bank or Opening Balance Equity accounts |
+| `receivables` | object[] | yes | new unpaid customer invoices: `{ party_id, reference, issue_date, due_date, amount }`; base currency |
+| `payables` | object[] | yes | new unpaid supplier bills, same shape |
+| `removed_item_ids` | string[] | no | existing opening invoices / bills to void; must be unpaid |
+
+### 9.7 Inline request bodies
 
 These bodies have no named type in the engine.
 
 | Endpoint | Body |
 |---|---|
-| `PUT /organisation/update` | `Partial<OrgSettings>`; `setup_completed` is ignored |
+| `PUT /organisation/update` | `Partial<OrgSettings>`; `setup_completed`, `conversion_date` and `opening_balance_journal_id` are ignored |
 | `POST /accounts/add` | `{ code, name, parent_id, subtype, description?, is_bank?, custom_fields? }` |
 | `PUT /accounts/update` | `{ name?, description?, is_active?, custom_fields? }` |
 | `POST /customers/add`, `POST /suppliers/add` | `Partial<Party>` with `name` required; `code`, `status`, `source` and audit fields are ignored on create |
@@ -740,6 +754,7 @@ These shapes are computed, not stored.
 | `GET /reports/cash-flow` | `{ operating, investing, financing, total_operating, total_investing, total_financing, opening, net_change, closing }`; sections are `[{ label, amount }]` |
 | `GET /reports/ar-ageing`, `GET /reports/ap-ageing` | `{ buckets: string[], rows: [{ party_id, party_name, buckets: { "<bucket label>": number }, total }], totals: { "<bucket label>": number, total } }` |
 | `GET /dashboard/statistics` | `{ as_at, revenue_mtd, expenses_mtd, net_income_mtd, net_income_ytd, cash_balance, receivables, overdue_receivables, payables, overdue_payables, journals_pending_approval, unmatched_statement_lines }` |
+| `GET /opening-balances/get`, `PUT /opening-balances/update` | `OpeningBalancesView`: `{ conversion_date, journal_id, journal_number, lines: [{ account_id, debit, credit }], receivables: SalesInvoice[], payables: PurchaseBill[], opening_equity_balance, first_transaction_date, locked_reason }` |
 | `GET /revaluations/preview` | `{ rates: { "<currency>": number }, lines: FxRevaluationLine[], missing: string[] }` |
 | `GET /navigation` | `{ items: [{ method, path, module, summary }] }` |
 

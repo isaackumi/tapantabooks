@@ -440,6 +440,27 @@ export const ENDPOINTS: EndpointDef[] = [
     invalidates: ["fxRevaluations", "journals", ...AUDIT],
   },
 
+  // ---- Opening balances ----------------------------------------------------
+  {
+    method: "GET",
+    path: "/opening-balances/get",
+    module: "Opening balances",
+    summary: "Conversion date, opening account balances and open receivables/payables brought forward",
+    returns: "OpeningBalancesView",
+    permission: perm("opening-balance", "get"),
+  },
+  {
+    method: "PUT",
+    path: "/opening-balances/update",
+    module: "Opening balances",
+    summary:
+      "Replace the opening account balances (reverse and re-post) and add or remove opening invoices and bills; the difference goes to Opening Balance Equity",
+    body: "OpeningBalancesInput",
+    returns: "OpeningBalancesView",
+    permission: perm("opening-balance", "update"),
+    invalidates: ["accounts", "journals", "invoices", "bills", "org", ...AUDIT],
+  },
+
   // ---- Customers & suppliers ---------------------------------------------
   list("Customers", "/customers/list", "customer", "Customer", { status: "ACTIVE | INACTIVE" }),
   get("Customers", "/customers/get", "customer", "customer_id", "Customer"),

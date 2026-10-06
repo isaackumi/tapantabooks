@@ -111,6 +111,7 @@ export const ACC = {
   bankLoan: "acc_2300",
   capital: "acc_3010",
   retained: "acc_3100",
+  openingEquity: "acc_3900",
   sales: "acc_4010",
   services: "acc_4020",
   interest: "acc_4100",
@@ -158,6 +159,12 @@ const A = (
 
 const G = (code: string, name: string, type: AccountType) =>
   A(code, name, type, "GROUP", null, { is_group: true });
+
+/** Takes the balancing side of opening balances; should be zero once conversion is complete. */
+export const openingEquityAccount = () =>
+  A("3900", "Opening Balance Equity", "EQUITY", "OPENING_BALANCE", "3000", {
+    description: "Balancing account for opening balances. Should be zero once every opening balance has been entered.",
+  });
 
 const LEGACY_ACCOUNT_CODES: Record<string, string> = {
   "1010": "QB-1000",
@@ -216,6 +223,7 @@ const chartOfAccounts = (): Account[] => [
   G("3000", "Equity", "EQUITY"),
   A("3010", "Owner's Capital", "EQUITY", "CAPITAL", "3000"),
   A("3100", "Retained Earnings", "EQUITY", "RETAINED_EARNINGS", "3000"),
+  openingEquityAccount(),
   G("4000", "Revenue", "REVENUE"),
   A("4010", "Sales Revenue", "REVENUE", "OPERATING_REVENUE", "4000"),
   A("4020", "Service Revenue", "REVENUE", "OPERATING_REVENUE", "4000"),
@@ -2399,7 +2407,11 @@ export const buildSeed = () => {
     fxRevaluations: [] as FxRevaluation[],
     rules: buildRules(),
     auditEvents: buildAuditEvents(ledger.journals),
-    org: buildOrg(),
+    org: {
+      ...buildOrg(),
+      conversion_date: d(1, 1) as string | null,
+      opening_balance_journal_id: ledger.journals.find((j) => j.source.reference === "IMP-0001")?.id ?? null,
+    },
   };
 };
 

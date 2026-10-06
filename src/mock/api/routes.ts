@@ -5,7 +5,7 @@ import { AGEING_BUCKETS, ageingBucket, emptyAgeing } from "@/lib/documents";
 import { bankBaseBalances, billRows, invoiceRows, type DocumentRow } from "@/store/selectors";
 import { round2 } from "@/utils/format";
 import { todayIso } from "@/utils/dates";
-import { revaluationPreview, type LedgerEngine, type LedgerState } from "./engine";
+import { openingBalancesView, revaluationPreview, type LedgerEngine, type LedgerState } from "./engine";
 import { ApiFault, found, fromResult, listResult, need, type HandlerResult } from "./http";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- request bodies are untyped JSON */
@@ -176,6 +176,10 @@ const HANDLERS: Record<string, Handler> = {
   "GET /revaluations/list": ({ state, q }) => listResult(state.fxRevaluations, q, { defaultSort: { field: "as_at", order: "desc" } }),
   "GET /revaluations/preview": ({ state, q }) => ({ data: revaluationPreview(state, need(q.get("as_at"), "as_at")) }),
   "POST /revaluations/run": ({ engine, q }) => fromResult(engine.runRevaluation(need(q.get("period_id"), "period_id")), 201),
+
+  // ---- Opening balances -----------------------------------------------------------------------
+  "GET /opening-balances/get": ({ state }) => ({ data: openingBalancesView(state) }),
+  "PUT /opening-balances/update": ({ engine, body }) => fromResult(engine.saveOpeningBalances(body)),
 
   // ---- Customers & suppliers ------------------------------------------------------------------------
   "GET /customers/list": ({ state, q }) =>

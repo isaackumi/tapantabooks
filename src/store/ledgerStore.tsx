@@ -16,6 +16,8 @@ import type {
   FxRevaluation,
   ImportBatch,
   JournalEntry,
+  OpeningBalancesInput,
+  OpeningBalancesView,
   OrgSettings,
   Payment,
   PeriodStatus,
@@ -150,6 +152,10 @@ const createActions = (
     deleteExchangeRate: (id: string) => call<ExchangeRate>("DELETE", "/exchange-rates/delete", { query: { exchange_rate_id: id } }),
     fetchReferenceRates: () => call<ExchangeRate[]>("POST", "/exchange-rates/fetch-reference"),
     runRevaluation: (periodId: string) => call<FxRevaluation>("POST", "/revaluations/run", { query: { period_id: periodId } }),
+
+    // ---- Opening balances ---------------------------------------------------------
+    saveOpeningBalances: (input: OpeningBalancesInput) =>
+      call<OpeningBalancesView>("PUT", "/opening-balances/update", { body: input }),
 
     // ---- Custom fields ------------------------------------------------------------
     addCustomField: (input: Omit<CustomField, "id" | "position" | "is_active" | keyof AuditFields>) =>

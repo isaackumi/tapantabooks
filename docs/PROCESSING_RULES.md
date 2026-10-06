@@ -25,8 +25,9 @@ This document specifies the business rules that tvs-accounting-bk must enforce s
 15. Organisation setup, settings, dimensions and users
 16. Audit trail
 17. Reports
-18. Open questions for backend
-19. Mock simplifications the API must not copy
+18. Opening balances
+19. Open questions for backend
+20. Mock simplifications the API must not copy
 
 ---
 
@@ -76,7 +77,7 @@ Notes:
 - "Today" means the current date of the organisation. The mock pins it to `2026-10-05` so that the demo data stays stable; the API must use the real date (see open questions on time zone).
 - "The actor" is the user identified by the JWT `user_id`. The actor is stamped into `created_by_id` / `updated_by_id`, into `posted_by`, `approved_by`, `locked_by`, and into the audit event.
 - "Base" means the organisation's base currency (`OrgSettings.base_currency`, default `GHS`). "FC" means the foreign (document or bank) currency amount.
-- `round2` means rounding to two decimals. The mock uses `Math.round(x * 100) / 100` on floating-point numbers; the API must use decimals (see section 19).
+- `round2` means rounding to two decimals. The mock uses `Math.round(x * 100) / 100` on floating-point numbers; the API must use decimals (see section 20).
 - "Ledger-affecting" journals are those with status `POSTED` or `REVERSED`. A reversed journal stays in the ledger and is cancelled by its own reversal entry, which is itself `POSTED`.
 
 ### 1.5 Standard accounts (account roles)
@@ -96,6 +97,7 @@ The engine refers to some accounts by role. In the seed they are the following; 
 | VAT output | 2100 | VAT & Levies Payable | subtype `TAX_PAYABLE` |
 | WHT payable | 2120 | Withholding Tax Payable | subtype `TAX_PAYABLE` |
 | Retained earnings | 3100 | Retained Earnings | subtype `RETAINED_EARNINGS` |
+| Opening Balance Equity | 3900 | Opening Balance Equity | subtype `OPENING_BALANCE`; balancing side of opening balances (section 18) |
 | Sales revenue | 4010 | Sales Revenue | |
 | Transport | 6040 | Transport & Logistics | used by import posting only |
 | FX realised | 6130 | Exchange Gains & Losses – Realised | `OrgSettings.fx_realised_account_id` |
@@ -668,7 +670,7 @@ Payment journals carry `source.document_id`, so they cannot be reversed through 
 
 - The base currency is `OrgSettings.base_currency` (ISO 4217, default `GHS`). Every journal debit and credit is in base currency.
 - An exchange rate is **base currency per one unit of the foreign currency** (for example 1 USD = 12.86 GHS is stored as `12.86`). Converting: base = round2(FC × rate).
-- Rates are stored with four decimals (manual rates and payment rates are rounded to four decimals; the mock does not round document and transfer rates, see section 19).
+- Rates are stored with four decimals (manual rates and payment rates are rounded to four decimals; the mock does not round document and transfer rates, see section 20).
 - The rate "on" a date is the latest rate for that currency dated on or before the date; ties on the same date are broken by the latest `created_at`, whatever the source.
 - Documents fix their rate at creation (`exchange_rate`). Later rate changes never alter posted documents.
 - Foreign amounts are carried on journal lines in `currency` and `amount_fc` (same side as the debit or credit) for foreign AR/AP lines and foreign bank lines.
@@ -1331,7 +1333,59 @@ Only the income-statement figures respect `as_at`; cash, receivables, payables a
 
 ---
 
-## 18. Open questions for backend
+## 18. Opening balances
+
+Opening balances bring the position from a previous system into the books at the **conversion date**. Account balances are posted as one journal; unpaid customer invoices and supplier bills are recreated as open documents so that receipts, payments, ageing and statements work from day one. Whatever does not balance goes to Opening Balance Equity (3900), which should be zero once conversion is complete.
+
+### 18.1 `GET /opening-balances/get`
+
+Returns `OpeningBalancesView`:
+
+- `conversion_date` and `journal_id` / `journal_number` from `OrgSettings.conversion_date` and `OrgSettings.opening_balance_journal_id` (the journal only while it is `POSTED`).
+- `lines`: that journal's lines as `{ account_id, debit, credit }`, excluding the Opening Balance Equity line.
+- `receivables` / `payables`: every invoice / bill with `source.type = OPENING_BALANCE` that is not `VOID`.
+- `opening_equity_balance`: debit-positive balance of account 3900 across all ledger-affecting journals (any date).
+- `first_transaction_date`: the earliest date of a ledger-affecting journal that is not an opening entry. An opening entry is a journal with `source.type = OPENING_BALANCE`, the current opening journal, or a journal whose reversal has `source.type = OPENING_BALANCE`.
+- `locked_reason`: the posting-date check message for `conversion_date` (section 3.1), or null.
+
+### 18.2 `PUT /opening-balances/update`
+
+Body `OpeningBalancesInput { date, lines[], receivables[], payables[], removed_item_ids? }`. Items are `{ party_id, reference, issue_date, due_date, amount }` in the base currency.
+
+Validation, in order:
+
+- Posting-date check on `date`.
+- `locked_reason` (above) when something has already been posted, because the previous entry must be reversed at its own date.
+- `Date the opening balances on or before your first transaction ({date}).` when `date` is after `first_transaction_date`.
+- Lines with both amounts zero are dropped. Each remaining line: the account must exist, not be a group, be active, not be Opening Balance Equity (`… is calculated for you; leave it out.`), not be a control account (AR/AP come from items), not be a foreign-currency bank GL (enter those as a manual journal with the FC amount), carry a debit or a credit but not both, and appear once.
+- Every `removed_item_ids` entry must be one of the current opening items, and must have `amount_paid = 0`.
+- Each item: party exists (customer for receivables, supplier for payables); `reference` required; `issue_date` ≤ `date`; `due_date` ≥ `issue_date`; `amount` > 0. A receivable's `reference` becomes the invoice number and must not match any existing invoice number (case-insensitive). A payable's `reference` becomes `supplier_reference` and must not match a non-void bill of that supplier. Duplicates within the request are rejected too.
+- `Enter at least one opening balance.` when the request is empty and nothing has been posted before.
+
+Processing:
+
+1. The previous opening journal, if `POSTED`, is reversed at its own date (memo `Reversal of {number} – replaced by updated opening balances`); the reversal gets `source.type = OPENING_BALANCE`.
+2. If any lines remain, a new journal is posted at `date` (`memo` `Opening balances at {date}`, `source` `{ type: OPENING_BALANCE, reference: OPENING }`, `branch_id` null) with the lines plus, when debits ≠ credits, one Opening Balance Equity line for the difference (credit when debits exceed credits), described `Balancing entry`. `opening_balance_journal_id` is set to it, or to null when there are no lines.
+3. Each removed item has its journal reversed at that journal's date and becomes `VOID`.
+4. When `date` differs from the saved conversion date, each remaining item's journal is reversed and re-posted at the new date (payments are unaffected because they are dated on or after the first transaction).
+5. Each new receivable becomes an `APPROVED` invoice: `number` = reference, base currency, rate 1, one line (quantity 1, unit price = amount, tax code `tax_exempt`, account Opening Balance Equity, description `Balance brought forward – {reference}`), notes `Brought forward from the previous system.`, `source.type = OPENING_BALANCE`. Its journal (dated `date`, `source` `{ OPENING_BALANCE, reference: invoice number, document_id }`) is Dr AR control / Cr Opening Balance Equity.
+6. Each new payable becomes an `APPROVED` bill numbered from `bill_prefix`, `supplier_reference` = reference, built the same way, with journal Dr Opening Balance Equity / Cr AP control.
+7. `conversion_date` = `date`.
+
+Audit `OPENING_BALANCES.UPDATED` (entity type `Opening balances`, label = new journal number), summary `{n} account balance(s) at {date} · {n} open item(s) added · {n} removed · Opening Balance Equity {amount}`, with a `conversion_date` change when it moved.
+
+Response: 200 with the updated `OpeningBalancesView`. Detail: `Opening balances saved and in balance`, or `Opening balances saved · {amount} left in Opening Balance Equity`.
+
+### 18.3 Guards elsewhere
+
+- `POST /journals/reverse` rejects opening journals: `Opening balances are changed from Accounting → Opening balances, not reversed.`
+- `POST /invoices/void` and `POST /bills/void` reject opening items: `Brought-forward items are removed from Accounting → Opening balances.`
+- `PUT /organisation/update` ignores `conversion_date` and `opening_balance_journal_id`.
+- Opening items are ordinary approved documents for receipts, payments, ageing and reports.
+
+---
+
+## 19. Open questions for backend
 
 These are behaviours that are ambiguous, missing or probably wrong in the mock. Each needs a decision before or during implementation.
 
@@ -1393,7 +1447,7 @@ These are behaviours that are ambiguous, missing or probably wrong in the mock. 
 
 ---
 
-## 19. Mock simplifications the API must not copy
+## 20. Mock simplifications the API must not copy
 
 The mock runs in one browser tab against one in-memory copy of the books. These shortcuts are acceptable there and wrong for a multi-user API.
 

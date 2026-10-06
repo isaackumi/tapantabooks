@@ -87,7 +87,7 @@ export default function JournalsPage() {
   const thisMonth = rows.filter((j) => monthKey(j.date) === monthKey(todayIso()) && j.status === "POSTED");
   const pending = rows.filter((j) => j.status === "PENDING_APPROVAL");
   const integrationShare = Math.round(
-    (rows.filter((j) => !["MANUAL", "SALES", "PURCHASES", "BANKING", "FX_REVALUATION"].includes(j.source.type)).length / rows.length) * 100,
+    (rows.filter((j) => !["MANUAL", "SALES", "PURCHASES", "BANKING", "FX_REVALUATION", "OPENING_BALANCE"].includes(j.source.type)).length / rows.length) * 100,
   );
 
   const columns: Column<Row>[] = [

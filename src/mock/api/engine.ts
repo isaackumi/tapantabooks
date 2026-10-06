@@ -21,6 +21,9 @@ import type {
   ImportRecord,
   JournalEntry,
   JournalStatus,
+  OpeningBalancesInput,
+  OpeningBalancesView,
+  OpeningItemInput,
   OrganisationSetupInput,
   OrgSettings,
   Payment,
@@ -31,8 +34,8 @@ import type {
   SourceRef,
   Supplier,
 } from "@/models/accounting";
-import { buildSeed, CURRENT_USER, USERS, ACC, stamp, type SeedData } from "@/mock/seed";
-import { isBalanced, lineTotals } from "@/lib/ledger";
+import { buildSeed, CURRENT_USER, USERS, ACC, TAX, openingEquityAccount, stamp, type SeedData } from "@/mock/seed";
+import { affectsLedger, isBalanced, lineTotals } from "@/lib/ledger";
 import { documentTotals } from "@/lib/documents";
 import {
   carryingBaseFor,
@@ -45,7 +48,7 @@ import {
   toBase,
 } from "@/lib/fx";
 import { customFieldUsage, normaliseCustomValues, recordsForEntity, validateCustomValues } from "@/lib/customFields";
-import { BASE_CURRENCY, CURRENCY_SYMBOLS, fmtCurrency, fmtMoney, fmtRate, round2 } from "@/utils/format";
+import { BASE_CURRENCY, CURRENCY_SYMBOLS, fmtCurrency, fmtDate, fmtMoney, fmtRate, round2 } from "@/utils/format";
 import { addDays, nowIso, todayIso } from "@/utils/dates";
 
 /** `users` stands in for the tenant's cp_users rows; `currentUserId` is the JWT `user_id` of the request being served. */
@@ -383,6 +386,79 @@ const reverseInto = (s: LedgerState, original: JournalEntry, date: string, reaso
 };
 
 // ---------------------------------------------------------------------------
+// Opening balances
+// ---------------------------------------------------------------------------
+
+const OPENING_SOURCE = { type: "OPENING_BALANCE", reference: "OPENING" } as const;
+
+/** Older tenants were provisioned before the account existed. */
+const ensureOpeningEquity = (s: LedgerState) => {
+  if (!s.accounts.some((a) => a.id === ACC.openingEquity)) s.accounts.push(openingEquityAccount());
+};
+
+const isOpeningEntry = (s: LedgerState, j: JournalEntry) => {
+  if (j.source.type === "OPENING_BALANCE" || j.id === s.org.opening_balance_journal_id) return true;
+  const reversal = j.reversed_by_id ? s.journals.find((r) => r.id === j.reversed_by_id) : null;
+  return reversal?.source.type === "OPENING_BALANCE";
+};
+
+const openingItems = (s: LedgerState) => ({
+  receivables: s.invoices.filter((i) => i.source.type === "OPENING_BALANCE" && i.state !== "VOID"),
+  payables: s.bills.filter((b) => b.source.type === "OPENING_BALANCE" && b.state !== "VOID"),
+});
+
+export const openingBalancesView = (s: LedgerState): OpeningBalancesView => {
+  const journal = s.journals.find((j) => j.id === s.org.opening_balance_journal_id && j.status === "POSTED") ?? null;
+  const firstTransaction = s.journals
+    .filter((j) => affectsLedger(j) && !isOpeningEntry(s, j))
+    .reduce<string | null>((min, j) => (min === null || j.date < min ? j.date : min), null);
+  const equity = s.journals
+    .filter(affectsLedger)
+    .flatMap((j) => j.lines)
+    .filter((l) => l.account_id === ACC.openingEquity)
+    .reduce((sum, l) => sum + l.debit - l.credit, 0);
+  return {
+    conversion_date: s.org.conversion_date ?? null,
+    journal_id: journal?.id ?? null,
+    journal_number: journal?.number ?? null,
+    lines: (journal?.lines ?? [])
+      .filter((l) => l.account_id !== ACC.openingEquity)
+      .map((l) => ({ account_id: l.account_id, debit: l.debit, credit: l.credit })),
+    ...openingItems(s),
+    opening_equity_balance: round2(equity),
+    first_transaction_date: firstTransaction,
+    locked_reason: s.org.conversion_date ? checkPeriod(s, s.org.conversion_date) : null,
+  };
+};
+
+const validateOpeningItem = (
+  s: LedgerState,
+  item: OpeningItemInput,
+  kind: "receivable" | "payable",
+  n: number,
+  date: string,
+  taken: Set<string>,
+): string | null => {
+  const label = `${kind === "receivable" ? "Receivable" : "Payable"} ${n}`;
+  const party = (kind === "receivable" ? s.customers : s.suppliers).find((p) => p.id === item.party_id);
+  if (!party) return `${label}: choose a ${kind === "receivable" ? "customer" : "supplier"}.`;
+  const reference = item.reference?.trim();
+  if (!reference) return `${label}: enter the invoice number from your old system.`;
+  if (!item.issue_date) return `${label}: enter the invoice date.`;
+  if (item.issue_date > date) return `${label}: the invoice date must be on or before the conversion date.`;
+  if (!item.due_date || item.due_date < item.issue_date) return `${label}: the due date cannot be before the invoice date.`;
+  if (!(round2(Number(item.amount) || 0) > 0)) return `${label}: enter the amount still outstanding.`;
+  const key = kind === "receivable" ? reference.toLowerCase() : `${party.id}|${reference.toLowerCase()}`;
+  const clash =
+    kind === "receivable"
+      ? s.invoices.some((i) => i.number.toLowerCase() === key)
+      : s.bills.some((b) => b.state !== "VOID" && `${b.supplier_id}|${b.supplier_reference.toLowerCase()}` === key);
+  if (clash || taken.has(key)) return `${label}: ${reference} is already recorded${kind === "payable" ? ` for ${party.name}` : ""}.`;
+  taken.add(key);
+  return null;
+};
+
+// ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
 
@@ -438,6 +514,8 @@ export const createTenantState = (owner: CurrentUser, orgName: string): LedgerSt
       email: owner.email,
       phone: "",
       setup_completed: false,
+      conversion_date: null,
+      opening_balance_journal_id: null,
     },
     currentUserId: owner.id,
     users: [owner],
@@ -699,6 +777,9 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
           if (j.source.document_id) {
             return fail("This entry belongs to a document. Void the invoice, bill or payment instead.");
           }
+          if (j.source.type === "OPENING_BALANCE" || j.id === s.org.opening_balance_journal_id) {
+            return fail("Opening balances are changed from Accounting → Opening balances, not reversed.");
+          }
           if (!reason.trim()) return fail("Give a reason for the reversal. It is kept on the audit trail.");
           if (date < j.date) return fail("The reversal date cannot be before the original entry.");
           const periodError = checkPeriod(s, date);
@@ -920,6 +1001,7 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
             kind === "invoice" ? s.invoices.find((i) => i.id === id) : s.bills.find((b) => b.id === id);
           if (!doc) return fail("Document not found.");
           if (doc.state === "VOID") return fail("Already void.");
+          if (doc.source.type === "OPENING_BALANCE") return fail("Brought-forward items are removed from Accounting → Opening balances.");
           if (doc.amount_paid > 0) return fail("Payments have been recorded against it. Reverse those first.");
           if (!reason.trim()) return fail("Give a reason for voiding.");
           if (doc.journal_id) {
@@ -1803,6 +1885,228 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
         }),
 
       // ---- Settings ---------------------------------------------------------
+      // ---- Opening balances ---------------------------------------------------
+      saveOpeningBalances: (input: OpeningBalancesInput) =>
+        commit((s) => {
+          ensureOpeningEquity(s);
+          const date = input.date;
+          const periodError = checkPeriod(s, date);
+          if (periodError) return fail(periodError);
+          const before = openingBalancesView(s);
+          const hasExisting = Boolean(before.journal_id) || before.receivables.length > 0 || before.payables.length > 0;
+          if (hasExisting && before.locked_reason) return fail(before.locked_reason);
+          if (before.first_transaction_date && date > before.first_transaction_date) {
+            return fail(`Date the opening balances on or before your first transaction (${fmtDate(before.first_transaction_date)}).`);
+          }
+
+          const lines = (input.lines ?? [])
+            .map((l) => ({ account_id: l.account_id, debit: round2(Number(l.debit) || 0), credit: round2(Number(l.credit) || 0) }))
+            .filter((l) => l.debit > 0 || l.credit > 0);
+          const seen = new Set<string>();
+          for (const l of lines) {
+            const account = s.accounts.find((a) => a.id === l.account_id);
+            if (!account) return fail("An opening balance refers to an account that does not exist.");
+            const name = `${account.code} ${account.name}`;
+            if (account.is_group) return fail(`${name} is a group account and cannot hold a balance.`);
+            if (!account.is_active) return fail(`${name} is inactive.`);
+            if (account.id === ACC.openingEquity) return fail(`${name} is calculated for you; leave it out.`);
+            if (account.is_control) {
+              return fail(`${name} is built from the open invoices and bills you list below, not entered directly.`);
+            }
+            if (l.debit < 0 || l.credit < 0) return fail(`${name}: amounts cannot be negative.`);
+            if (l.debit > 0 && l.credit > 0) return fail(`${name}: enter a debit or a credit, not both.`);
+            const bank = s.bankAccounts.find((b) => b.gl_account_id === account.id);
+            if (bank && isForeign(bank.currency)) {
+              return fail(`${name} is held in ${bank.currency}. Record its opening balance as a manual journal with the ${bank.currency} amount.`);
+            }
+            if (seen.has(account.id)) return fail(`${name} appears more than once.`);
+            seen.add(account.id);
+          }
+
+          const removed = new Set(input.removed_item_ids ?? []);
+          const existing = [...before.receivables, ...before.payables];
+          for (const id of removed) {
+            if (!existing.some((d) => d.id === id)) return fail("Only open invoices and bills brought forward can be removed here.");
+          }
+          for (const doc of existing) {
+            if (removed.has(doc.id) && doc.amount_paid > 0) {
+              return fail(`${doc.number} has payments recorded against it. Reverse those before removing it.`);
+            }
+          }
+
+          const taken = new Set<string>();
+          for (const [i, item] of (input.receivables ?? []).entries()) {
+            const err = validateOpeningItem(s, item, "receivable", i + 1, date, taken);
+            if (err) return fail(err);
+          }
+          for (const [i, item] of (input.payables ?? []).entries()) {
+            const err = validateOpeningItem(s, item, "payable", i + 1, date, taken);
+            if (err) return fail(err);
+          }
+          const remaining = existing.filter((d) => !removed.has(d.id));
+          if (lines.length === 0 && !input.receivables?.length && !input.payables?.length && remaining.length === 0 && !hasExisting) {
+            return fail("Enter at least one opening balance.");
+          }
+
+          const replaceJournal = (old: JournalEntry | undefined) => {
+            if (!old || old.status !== "POSTED") return;
+            const reversal = reverseInto(s, old, old.date, "replaced by updated opening balances");
+            reversal.source = { ...OPENING_SOURCE };
+          };
+
+          // Account balances: reverse the previous journal and post the new set.
+          replaceJournal(s.journals.find((j) => j.id === s.org.opening_balance_journal_id));
+          s.org.opening_balance_journal_id = null;
+          let journalNumber: string | null = null;
+          if (lines.length > 0) {
+            const t = lineTotals(lines);
+            const diff = round2(t.debit - t.credit);
+            const j = writeJournal(
+              s,
+              {
+                date,
+                memo: `Opening balances at ${fmtDate(date)}`,
+                branch_id: null,
+                lines: [
+                  ...lines,
+                  ...(diff === 0
+                    ? []
+                    : [{ account_id: ACC.openingEquity, debit: diff < 0 ? -diff : 0, credit: diff > 0 ? diff : 0, description: "Balancing entry" }]),
+                ],
+              },
+              "POSTED",
+              { ...OPENING_SOURCE },
+            );
+            s.org.opening_balance_journal_id = j.id;
+            journalNumber = j.number;
+          }
+
+          const user = actorOf(s);
+          const partyName = (doc: SalesInvoice | PurchaseBill) =>
+            "customer_id" in doc
+              ? s.customers.find((c) => c.id === doc.customer_id)?.name ?? ""
+              : s.suppliers.find((c) => c.id === doc.supplier_id)?.name ?? "";
+          const postItem = (doc: SalesInvoice | PurchaseBill) => {
+            const amount = documentTotals(doc.lines, s.taxCodes).total;
+            const isInvoice = "customer_id" in doc;
+            const j = writeJournal(
+              s,
+              {
+                date,
+                memo: `Opening ${isInvoice ? "receivable" : "payable"} ${isInvoice ? doc.number : (doc as PurchaseBill).supplier_reference} – ${partyName(doc)}`,
+                branch_id: null,
+                lines: isInvoice
+                  ? [
+                      { account_id: ACC.ar, debit: amount, credit: 0, description: partyName(doc) },
+                      { account_id: ACC.openingEquity, debit: 0, credit: amount },
+                    ]
+                  : [
+                      { account_id: ACC.openingEquity, debit: amount, credit: 0 },
+                      { account_id: ACC.ap, debit: 0, credit: amount, description: partyName(doc) },
+                    ],
+              },
+              "POSTED",
+              { type: "OPENING_BALANCE", reference: doc.number, document_id: doc.id },
+            );
+            doc.journal_id = j.id;
+          };
+
+          for (const doc of existing) {
+            if (removed.has(doc.id)) {
+              replaceJournal(s.journals.find((j) => j.id === doc.journal_id));
+              const row = "customer_id" in doc ? s.invoices.find((i) => i.id === doc.id)! : s.bills.find((b) => b.id === doc.id)!;
+              row.state = "VOID";
+              touch(s, row);
+            } else if (date !== before.conversion_date) {
+              const row = "customer_id" in doc ? s.invoices.find((i) => i.id === doc.id)! : s.bills.find((b) => b.id === doc.id)!;
+              replaceJournal(s.journals.find((j) => j.id === row.journal_id));
+              postItem(row);
+              touch(s, row);
+            }
+          }
+
+          const documentFor = (item: OpeningItemInput, prefix: string): Pick<SalesInvoice, "lines" | "issue_date" | "due_date"> => ({
+            issue_date: item.issue_date,
+            due_date: item.due_date,
+            lines: [
+              {
+                id: newId(prefix),
+                description: `Balance brought forward – ${item.reference.trim()}`,
+                quantity: 1,
+                unit_price: round2(Number(item.amount)),
+                tax_code_id: TAX.exempt,
+                account_id: ACC.openingEquity,
+              },
+            ],
+          });
+          const common = {
+            state: "APPROVED" as const,
+            currency: s.org.base_currency,
+            exchange_rate: 1,
+            amount_paid: 0,
+            amount_paid_base: 0,
+            journal_id: null,
+            branch_id: null,
+            notes: "Brought forward from the previous system.",
+          };
+          for (const item of input.receivables ?? []) {
+            const invoice: SalesInvoice = {
+              id: newId("inv"),
+              number: item.reference.trim(),
+              customer_id: item.party_id,
+              ...documentFor(item, "il"),
+              ...common,
+              source: { type: "OPENING_BALANCE", reference: "OPENING" },
+              ...stamp(nowIso(), user),
+            };
+            s.invoices.push(invoice);
+            postItem(invoice);
+          }
+          for (const item of input.payables ?? []) {
+            const bill: PurchaseBill = {
+              id: newId("bill"),
+              number: nextNumber(
+                s.bills.map((b) => b.number),
+                s.org.bill_prefix,
+              ),
+              supplier_reference: item.reference.trim(),
+              supplier_id: item.party_id,
+              ...documentFor(item, "bl"),
+              ...common,
+              source: { type: "OPENING_BALANCE", reference: "OPENING" },
+              ...stamp(nowIso(), user),
+            };
+            s.bills.push(bill);
+            postItem(bill);
+          }
+
+          const previousDate = before.conversion_date;
+          s.org.conversion_date = date;
+          const after = openingBalancesView(s);
+          const added = (input.receivables?.length ?? 0) + (input.payables?.length ?? 0);
+          audit(s, {
+            action: "OPENING_BALANCES.UPDATED",
+            entity_type: "Opening balances",
+            entity_id: "opening_balances",
+            entity_label: journalNumber ?? "Opening balances",
+            summary: [
+              `${lines.length} account balance${lines.length === 1 ? "" : "s"} at ${fmtDate(date)}`,
+              added ? `${added} open item${added === 1 ? "" : "s"} added` : "",
+              removed.size ? `${removed.size} removed` : "",
+              `Opening Balance Equity ${fmtCurrency(after.opening_equity_balance)}`,
+            ]
+              .filter(Boolean)
+              .join(" · "),
+            changes: previousDate !== date ? [{ field: "conversion_date", from: previousDate, to: date }] : undefined,
+          });
+          return ok(
+            after,
+            after.opening_equity_balance === 0
+              ? "Opening balances saved and in balance"
+              : `Opening balances saved · ${fmtCurrency(Math.abs(after.opening_equity_balance))} left in Opening Balance Equity`,
+          );
+        }),
+
       setupOrganisation: (input: OrganisationSetupInput) =>
         commit((s) => {
           if (s.org.setup_completed) return fail("This organisation is already set up. Change its details in Settings.");
@@ -1846,6 +2150,8 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
         commit((s) => {
           const patch = { ...input };
           delete patch.setup_completed;
+          delete patch.conversion_date;
+          delete patch.opening_balance_journal_id;
           if (patch.name !== undefined && !patch.name.trim()) return fail("Trading name is required.");
           if (patch.base_currency !== undefined && patch.base_currency !== s.org.base_currency) {
             if (s.journals.some((j) => j.status === "POSTED" || j.status === "REVERSED")) {
