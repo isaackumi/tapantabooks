@@ -1,43 +1,63 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { FiAlertTriangle, FiCheckCircle } from "react-icons/fi";
 import { Callout, PageHeader, compactInputClass } from "@/components/ui";
-import { ReportSheet, ReportToolbar, StatementHeading, StatementSection, TotalRow, withPrior } from "@/components/reports/reportKit";
+import { QueryState, Skeleton } from "@/components/queryState";
+import {
+  ReportSheet,
+  ReportToolbar,
+  StatementHeading,
+  StatementSection,
+  TotalRow,
+  useReportPresets,
+  withPrior,
+} from "@/components/reports/reportKit";
 import { useLedger } from "@/store/ledgerStore";
-import { balanceSheet } from "@/lib/ledger";
+import { useReport } from "@/services/useApiQuery";
+import { fiscalYearFor } from "@/lib/fiscalYears";
+import type { BalanceSheetReport } from "@/models/reports";
 import { downloadCsv } from "@/utils/csv";
-import { fmtCurrency, fmtDate, round2 } from "@/utils/format";
-import { endOfMonth, todayIso } from "@/utils/dates";
+import { fmtCurrency, fmtDate } from "@/utils/format";
+import { addDays, todayIso } from "@/utils/dates";
 
-const ledgerHref = (id: string) => `/accounting/general-ledger?account=${id}`;
-const sum = (ls: { amount: number }[]) => round2(ls.reduce((s, l) => s + l.amount, 0));
-const short = (iso: string) => new Date(`${iso}T00:00:00`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+const short = (iso: string) =>
+  new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 
 export default function BalanceSheetPage() {
   const { state } = useLedger();
-  const [asAt, setAsAt] = useState(todayIso());
-  const [compareTo, setCompareTo] = useState(endOfMonth("2026-06"));
+  const presets = useReportPresets();
+  const today = todayIso();
+  const [asAt, setAsAt] = useState(today);
+  const priorYearEnd = addDays(fiscalYearFor(state.org, today).start_date, -1);
+  const [compareTo, setCompareTo] = useState(priorYearEnd);
 
-  const bs = useMemo(() => balanceSheet(state.accounts, state.journals, asAt), [state, asAt]);
-  const prior = useMemo(
-    () => (compareTo ? balanceSheet(state.accounts, state.journals, compareTo) : null),
-    [state, compareTo],
-  );
-  const compare = !!prior;
-  const p = prior ?? bs;
-  const balanced = Math.abs(bs.difference) < 0.005;
+  const current = useReport<BalanceSheetReport>("/reports/balance-sheet", { as_at: asAt });
+  const prior = useReport<BalanceSheetReport>(compareTo ? "/reports/balance-sheet" : null, { as_at: compareTo });
+  const priorHasBalances =
+    !!prior.data &&
+    [prior.data.current_assets, prior.data.fixed_assets, prior.data.current_liabilities, prior.data.long_term_liabilities, prior.data.equity].some(
+      (s) => s.length > 0,
+    );
+  const compare = !!compareTo && priorHasBalances;
+  const ledgerHref = (id: string) => `/accounting/general-ledger?account=${id}&to=${asAt}`;
+  const earningsFrom = fiscalYearFor(state.org, asAt).start_date;
+
+  const compareOptions = [...new Set([...presets.asAt.filter((p) => p.to !== today).map((p) => p.to), compareTo].filter(Boolean))].sort().reverse();
 
   const exportCsv = () => {
-    const rows: (string | number)[][] = [["Section", "Code", "Account", asAt, ...(prior ? [compareTo] : [])]];
-    const add = (section: string, cur: typeof bs.currentAssets, pr: typeof bs.currentAssets) =>
-      withPrior(cur, pr).forEach((l) => rows.push([section, l.code ?? "", l.label, l.amount, ...(prior ? [l.prior ?? 0] : [])]));
-    add("Current assets", bs.currentAssets, p.currentAssets);
-    add("Non-current assets", bs.fixedAssets, p.fixedAssets);
-    add("Current liabilities", bs.currentLiabilities, p.currentLiabilities);
-    add("Non-current liabilities", bs.longTermLiabilities, p.longTermLiabilities);
-    add("Equity", bs.equity, p.equity);
-    rows.push(["Equity", "", "Current year earnings", bs.currentEarnings, ...(prior ? [p.currentEarnings] : [])]);
+    const bs = current.data;
+    if (!bs) return;
+    const p = compare ? prior.data! : null;
+    const rows: (string | number)[][] = [["Section", "Code", "Account", asAt, ...(p ? [compareTo] : [])]];
+    const add = (section: string, cur: BalanceSheetReport["equity"], pr: BalanceSheetReport["equity"]) =>
+      withPrior(cur, pr).forEach((l) => rows.push([section, l.code ?? "", l.label, l.amount, ...(p ? [l.prior ?? 0] : [])]));
+    add("Current assets", bs.current_assets, p?.current_assets ?? []);
+    add("Non-current assets", bs.fixed_assets, p?.fixed_assets ?? []);
+    add("Current liabilities", bs.current_liabilities, p?.current_liabilities ?? []);
+    add("Non-current liabilities", bs.long_term_liabilities, p?.long_term_liabilities ?? []);
+    add("Equity", bs.equity, p?.equity ?? []);
+    rows.push(["Equity", "", "Current year earnings", bs.current_earnings, ...(p ? [p.current_earnings] : [])]);
     downloadCsv(`balance-sheet-${asAt}.csv`, rows);
   };
 
@@ -49,94 +69,101 @@ export default function BalanceSheetPage() {
         backHref="/reports"
         backLabel="Reports"
       />
-      <ReportToolbar
-        to={asAt}
-        onTo={setAsAt}
-        onExport={exportCsv}
-        presets={[
-          { label: "Today", to: todayIso() },
-          { label: "30 Sep", to: endOfMonth("2026-09") },
-          { label: "30 Jun", to: endOfMonth("2026-06") },
-        ]}
-      />
-      <div className="mx-auto mb-4 flex max-w-4xl flex-wrap items-center justify-between gap-3" data-no-print>
-        <label className="flex items-center gap-2 text-sm">
-          <span className="text-neutral-500 dark:text-neutral-400">Compare with</span>
-          <select value={compareTo} onChange={(e) => setCompareTo(e.target.value)} className={`${compactInputClass} w-44`}>
-            <option value="">No comparison</option>
-            <option value={endOfMonth("2026-09")}>30 Sep 2026</option>
-            <option value={endOfMonth("2026-06")}>30 Jun 2026</option>
-            <option value={endOfMonth("2026-03")}>31 Mar 2026</option>
-            <option value="2026-01-01">1 Jan 2026 (opening)</option>
-          </select>
-        </label>
-        {balanced ? (
-          <span className="inline-flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400">
-            <FiCheckCircle /> Assets equal liabilities plus equity
-          </span>
-        ) : (
-          <Callout tone="danger" icon={FiAlertTriangle}>
-            Out of balance by {fmtCurrency(bs.difference)}
-          </Callout>
-        )}
-      </div>
+      <ReportToolbar to={asAt} onTo={setAsAt} onExport={current.data ? exportCsv : undefined} presets={presets.asAt} />
 
-      <ReportSheet title="Statement of Financial Position" period={`As at ${fmtDate(asAt)}`}>
-        <StatementHeading current={short(asAt)} prior={compare ? short(compareTo) : undefined} />
-        <StatementSection
-          title="Current assets"
-          lines={withPrior(bs.currentAssets, p.currentAssets, ledgerHref)}
-          totalLabel="Total current assets"
-          total={sum(bs.currentAssets)}
-          priorTotal={sum(p.currentAssets)}
-          compare={compare}
-        />
-        <StatementSection
-          title="Non-current assets"
-          lines={withPrior(bs.fixedAssets, p.fixedAssets, ledgerHref)}
-          totalLabel="Total non-current assets"
-          total={sum(bs.fixedAssets)}
-          priorTotal={sum(p.fixedAssets)}
-          compare={compare}
-        />
-        <TotalRow label="Total assets" amount={bs.totalAssets} prior={compare ? p.totalAssets : undefined} strong className="mb-10" />
+      <QueryState query={current} className="mx-auto max-w-4xl" skeleton={<Skeleton rows={14} />}>
+        {(bs) => {
+          const p = compare ? prior.data! : null;
+          const balanced = Math.abs(bs.difference) < 0.005;
+          return (
+            <>
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3" data-no-print>
+                <label className="flex items-center gap-2 text-sm">
+                  <span className="text-neutral-500 dark:text-neutral-400">Compare with</span>
+                  <select value={compareTo} onChange={(e) => setCompareTo(e.target.value)} className={`${compactInputClass} w-48`}>
+                    <option value="">No comparison</option>
+                    {compareOptions.map((d) => (
+                      <option key={d} value={d}>
+                        {short(d)}
+                        {d === priorYearEnd ? " (prior year end)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {compareTo && prior.data && !priorHasBalances && (
+                    <span className="text-xs text-neutral-500 dark:text-neutral-400">No balances on {short(compareTo)}</span>
+                  )}
+                </label>
+                {balanced ? (
+                  <span className="inline-flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400">
+                    <FiCheckCircle /> Assets equal liabilities plus equity
+                  </span>
+                ) : (
+                  <Callout tone="danger" icon={FiAlertTriangle}>
+                    Out of balance by {fmtCurrency(bs.difference)}
+                  </Callout>
+                )}
+              </div>
 
-        <StatementSection
-          title="Current liabilities"
-          lines={withPrior(bs.currentLiabilities, p.currentLiabilities, ledgerHref)}
-          totalLabel="Total current liabilities"
-          total={sum(bs.currentLiabilities)}
-          priorTotal={sum(p.currentLiabilities)}
-          compare={compare}
-        />
-        <StatementSection
-          title="Non-current liabilities"
-          lines={withPrior(bs.longTermLiabilities, p.longTermLiabilities, ledgerHref)}
-          totalLabel="Total non-current liabilities"
-          total={sum(bs.longTermLiabilities)}
-          priorTotal={sum(p.longTermLiabilities)}
-          compare={compare}
-        />
-        <TotalRow label="Total liabilities" amount={bs.totalLiabilities} prior={compare ? p.totalLiabilities : undefined} className="mb-6" />
+              <ReportSheet title="Statement of Financial Position" period={`As at ${fmtDate(asAt)}`}>
+                <StatementHeading current={short(asAt)} prior={p ? short(compareTo) : undefined} />
+                <StatementSection
+                  title="Current assets"
+                  lines={withPrior(bs.current_assets, p?.current_assets ?? [], ledgerHref)}
+                  totalLabel="Total current assets"
+                  total={bs.total_current_assets}
+                  priorTotal={p?.total_current_assets}
+                  compare={!!p}
+                />
+                <StatementSection
+                  title="Non-current assets"
+                  lines={withPrior(bs.fixed_assets, p?.fixed_assets ?? [], ledgerHref)}
+                  totalLabel="Total non-current assets"
+                  total={bs.total_fixed_assets}
+                  priorTotal={p?.total_fixed_assets}
+                  compare={!!p}
+                />
+                <TotalRow label="Total assets" amount={bs.total_assets} prior={p?.total_assets} strong className="mb-10" />
 
-        <StatementSection
-          title="Equity"
-          lines={[
-            ...withPrior(bs.equity, p.equity, ledgerHref),
-            { label: "Current year earnings", amount: bs.currentEarnings, prior: p.currentEarnings, href: "/reports/income-statement" },
-          ]}
-          totalLabel="Total equity"
-          total={bs.totalEquity}
-          priorTotal={p.totalEquity}
-          compare={compare}
-        />
-        <TotalRow
-          label="Total liabilities and equity"
-          amount={round2(bs.totalLiabilities + bs.totalEquity)}
-          prior={compare ? round2(p.totalLiabilities + p.totalEquity) : undefined}
-          strong
-        />
-      </ReportSheet>
+                <StatementSection
+                  title="Current liabilities"
+                  lines={withPrior(bs.current_liabilities, p?.current_liabilities ?? [], ledgerHref)}
+                  totalLabel="Total current liabilities"
+                  total={bs.total_current_liabilities}
+                  priorTotal={p?.total_current_liabilities}
+                  compare={!!p}
+                />
+                <StatementSection
+                  title="Non-current liabilities"
+                  lines={withPrior(bs.long_term_liabilities, p?.long_term_liabilities ?? [], ledgerHref)}
+                  totalLabel="Total non-current liabilities"
+                  total={bs.total_long_term_liabilities}
+                  priorTotal={p?.total_long_term_liabilities}
+                  compare={!!p}
+                />
+                <TotalRow label="Total liabilities" amount={bs.total_liabilities} prior={p?.total_liabilities} className="mb-6" />
+
+                <StatementSection
+                  title="Equity"
+                  lines={[
+                    ...withPrior(bs.equity, p?.equity ?? [], ledgerHref),
+                    {
+                      label: "Current year earnings",
+                      amount: bs.current_earnings,
+                      prior: p?.current_earnings,
+                      href: `/reports/income-statement?from=${earningsFrom}&to=${asAt}`,
+                    },
+                  ]}
+                  totalLabel="Total equity"
+                  total={bs.total_equity}
+                  priorTotal={p?.total_equity}
+                  compare={!!p}
+                />
+                <TotalRow label="Total liabilities and equity" amount={bs.total_liabilities_and_equity} prior={p?.total_liabilities_and_equity} strong />
+              </ReportSheet>
+            </>
+          );
+        }}
+      </QueryState>
     </div>
   );
 }

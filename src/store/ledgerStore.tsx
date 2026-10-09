@@ -82,6 +82,7 @@ const createActions = (
   stateRef: { current: LedgerState | null },
   apply: (patch: Partial<LedgerState>) => void,
   reloadAll: () => Promise<void>,
+  bumpRevision: () => void,
 ) => {
   /** Writes in flight, keyed by request. A repeated click joins the pending request instead of sending it twice. */
   const inFlight = new Map<string, Promise<Result<unknown>>>();
@@ -108,6 +109,7 @@ const createActions = (
               : await api.post<T>(path, opts.body, opts.query);
       const invalidates = endpointFor(method, path)?.invalidates ?? [];
       if (invalidates.length) apply(await reload(invalidates));
+      if (method !== "GET") bumpRevision();
       const detail = res.detail && res.detail !== "Success" ? res.detail : undefined;
       return { ok: true, data: res.data as T, message: detail };
     } catch (e) {
@@ -275,6 +277,8 @@ export type LedgerActions = ReturnType<typeof createActions>;
 interface LedgerContextValue {
   state: LedgerState;
   actions: LedgerActions;
+  /** Increments after every successful write or reload; report queries refetch when it changes. */
+  revision: number;
 }
 
 interface LedgerShell {
@@ -293,7 +297,9 @@ export const LedgerProvider = ({ children }: { children: ReactNode }) => {
   const [status, setStatus] = useState<LedgerStatus>("loading");
   const [error, setError] = useState<string | null>(null);
   const [org, setOrg] = useState<OrgSettings | null>(null);
+  const [revision, setRevision] = useState(0);
   const stateRef = useRef<LedgerState | null>(null);
+  const bumpRevision = useCallback(() => setRevision((r) => r + 1), []);
 
   const apply = useCallback((patch: Partial<LedgerState>) => {
     if (!stateRef.current) return;
@@ -328,6 +334,7 @@ export const LedgerProvider = ({ children }: { children: ReactNode }) => {
       applyCurrency(loadedOrg, next.currencies);
       stateRef.current = next;
       setState(next);
+      setRevision((r) => r + 1);
       setStatus("ready");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load the books.");
@@ -339,20 +346,20 @@ export const LedgerProvider = ({ children }: { children: ReactNode }) => {
     void loadAll();
   }, [loadAll]);
 
-  const actions = useMemo(() => createActions(stateRef, apply, loadAll), [apply, loadAll]);
+  const actions = useMemo(() => createActions(stateRef, apply, loadAll, bumpRevision), [apply, loadAll, bumpRevision]);
 
   const shell = useMemo<LedgerShell>(
     () => ({
       status,
       error,
       org,
-      value: state ? { state, actions } : null,
+      value: state ? { state, actions, revision } : null,
       retry: () => {
         setStatus("loading");
         void loadAll();
       },
     }),
-    [status, error, org, state, actions, loadAll],
+    [status, error, org, state, actions, revision, loadAll],
   );
 
   return <LedgerContext.Provider value={shell}>{children}</LedgerContext.Provider>;

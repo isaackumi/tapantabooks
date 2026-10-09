@@ -1362,7 +1362,8 @@ Using signed balances from the beginning of the books to `as_at`:
 - `long_term_liabilities`: `LIABILITY` accounts with subtype `LONG_TERM`.
 - `equity`: `EQUITY` accounts.
 - `current_earnings` = net income from 1 January of the `as_at` year to `as_at`, plus net income for all earlier dates (prior years' profit that has not been closed into retained earnings).
-- `total_assets` = current + fixed; `total_liabilities` = current + long-term; `total_equity` = equity + `current_earnings`.
+- `total_current_assets`, `total_fixed_assets`, `total_current_liabilities`, `total_long_term_liabilities`: sums of the sections.
+- `total_assets` = current + fixed; `total_liabilities` = current + long-term; `total_equity` = equity + `current_earnings`; `total_liabilities_and_equity` = `total_liabilities` + `total_equity`.
 - `difference` = `total_assets` − `total_liabilities` − `total_equity` (zero for balanced books).
 
 ### 17.5 Cash flow (`GET /reports/cash-flow?from_date=&to_date=`)
@@ -1384,13 +1385,14 @@ Revaluations of foreign bank accounts touch cash accounts and therefore appear a
 
 ### 17.6 AR and AP ageing (`GET /reports/ar-ageing?as_at=`, `GET /reports/ap-ageing?as_at=`)
 
-- Rows are all invoices (AR) or bills (AP) with a base-currency `outstanding` greater than zero, computed as in section 7.1 from the **current** `amount_paid_base`.
+- Rows are all invoices (AR) or bills (AP) issued on or before `as_at` with a base-currency `outstanding` greater than zero, computed as in section 7.1 from the **current** `amount_paid_base`.
 - Each document goes into a bucket by days overdue = (`as_at` − `due_date`) in days: ≤ 0 `Current`; 1–30 `1–30 days`; 31–60 `31–60 days`; 61–90 `61–90 days`; over 90 `90+ days`.
 - Amounts are grouped by party and summed per bucket; rows are sorted by total, largest first.
+- Each row lists its `documents`, sorted by due date then number, so the report drills down to the invoices or bills behind every figure. `days_overdue` is never negative.
 
-Response: `{ buckets: ["Current", "1–30 days", "31–60 days", "61–90 days", "90+ days"], rows: [{ party_id, party_name, buckets: { "{bucket}": amount }, total }], totals: { "{bucket}": amount, total } }`. The bucket keys are these exact labels (with an en dash).
+Response: `{ as_at, buckets: ["Current", "1–30 days", "31–60 days", "61–90 days", "90+ days"], rows: [{ party_id, party_code, party_name, buckets: { "{bucket}": amount }, total, documents: [{ document_id, number, issue_date, due_date, days_overdue, bucket, outstanding }] }], totals: { "{bucket}": amount, total } }`. The bucket keys are these exact labels (with an en dash).
 
-`as_at` semantics: in the mock, `as_at` only moves the ageing reference date. Documents issued after `as_at` and payments dated after `as_at` are not excluded, so this is not a true historical ageing (open question).
+`as_at` semantics: documents issued after `as_at` are excluded, but payments and credits dated after `as_at` still reduce `outstanding`, so this is not yet a true historical ageing. The statement ageing (section 17.8) shows the correct calculation; the API should apply it here too (open question).
 
 ### 17.7 Dashboard statistics (`GET /dashboard/statistics?as_at=`)
 
@@ -1400,16 +1402,22 @@ Response: `{ buckets: ["Current", "1–30 days", "31–60 days", "61–90 days",
 | `revenue_mtd` | income statement `total_revenue` from the first day of the `as_at` month to `as_at` |
 | `expenses_mtd` | `total_cost_of_sales` + `total_operating` for the same range |
 | `net_income_mtd` | `net_income` for the same range |
-| `net_income_ytd` | `net_income` from 1 January of the `as_at` year to `as_at` |
+| `revenue_ytd` | income statement `total_revenue` from 1 January of the `as_at` year to `as_at` |
+| `net_income_ytd` | `net_income` for the same range |
 | `cash_balance` | sum of every bank account's GL balance in base currency, over all dates |
 | `receivables` | sum of base `outstanding` over all invoices |
 | `overdue_receivables` | the same, for invoices whose display status is `OVERDUE` |
+| `overdue_invoices` | number of invoices whose display status is `OVERDUE` |
 | `payables` | sum of base `outstanding` over all bills |
 | `overdue_payables` | the same, for bills whose display status is `OVERDUE` |
+| `payables_due_7_days` | base `outstanding` on bills due on or before `as_at` + 7 days, including overdue bills |
 | `journals_pending_approval` | number of journals in `PENDING_APPROVAL` |
+| `draft_journals` | number of journals in `DRAFT` |
 | `unmatched_statement_lines` | number of statement lines not `MATCHED` (includes `SUGGESTED`) |
 
-Only the income-statement figures respect `as_at`; cash, receivables, payables and the overdue figures use all data and today's date (open question).
+Only the income-statement figures and `payables_due_7_days` respect `as_at`; cash, receivables, payables and the overdue figures use all data and today's date (open question). The year-to-date figures use the calendar year, like the report defaults (open question: `fiscal_year_start`).
+
+The dashboard reads every figure from this endpoint, `GET /reports/ar-ageing` and `GET /reports/monthly-trend`; it does not total ledger lines itself.
 
 ### 17.8 Customer and supplier statements (`GET /reports/customer-statement`, `GET /reports/supplier-statement`)
 
@@ -1445,6 +1453,18 @@ Ageing is a true historical view at `to_date` (unlike section 17.6):
 Response: `{ kind: "CUSTOMER" | "SUPPLIER", party_id, party_name, party_code, currency, currencies, from_date, to_date, opening_balance, entries: [{ date, type, number, document_id, description, charge, credit, balance }], total_charges, total_credits, closing_balance, ageing: { "<bucket label>": number, total }, open_documents: [{ document_id, number, issue_date, due_date, total, outstanding, bucket }] }`.
 
 The statement page (`/reports/statements`) prints this with the organisation letterhead; customer and supplier drawers link to it.
+
+### 17.9 Monthly trend (`GET /reports/monthly-trend?from_date=&to_date=`)
+
+One row per calendar month from the month of `from_date` to the month of `to_date`, both included. Defaults: `to_date` today; `from_date` the first day of the month eleven months earlier (twelve months in all). 400 when `from_date` is after `to_date` or the range spans more than 24 months.
+
+- `revenue`: credit − debit on `REVENUE` accounts for the month's ledger-affecting journals, ignoring `YEAR_END` journals (as section 17.3).
+- `expenses`: debit − credit on all `EXPENSE` accounts (cost of sales and operating) for the same journals.
+- `net_income` = `revenue` − `expenses`; equal to the income statement's `net_income` for that month.
+- `closing_cash`: the sum of the cash accounts' (`is_bank`) balances, from the beginning of the books to the month end.
+- Journals dated after `to_date` are left out, so the last month runs to `to_date` rather than the month end.
+
+Response: `{ from_date, to_date, months: [{ month: "YYYY-MM", revenue, expenses, net_income, closing_cash }] }`. The dashboard and the income statement chart use it; it does not change any other report.
 
 ---
 

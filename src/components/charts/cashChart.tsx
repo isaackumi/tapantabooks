@@ -2,10 +2,11 @@
 
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useChartTheme } from "./chartTheme";
-import { fmtCompact, fmtCurrency } from "@/utils/format";
+import { fmtAxis, fmtCurrency } from "@/utils/format";
 import { monthLabel } from "@/utils/dates";
+import type { MonthlyTrendPoint } from "@/models/reports";
 
-const CashChart = ({ data, height = 300 }: { data: { month: string; balance: number }[]; height?: number }) => {
+const CashChart = ({ data, height = 300 }: { data: Pick<MonthlyTrendPoint, "month" | "closing_cash">[]; height?: number }) => {
   const t = useChartTheme();
   return (
     <ResponsiveContainer width="100%" height={height}>
@@ -18,7 +19,7 @@ const CashChart = ({ data, height = 300 }: { data: { month: string; balance: num
         </defs>
         <CartesianGrid strokeDasharray="3 3" stroke={t.grid} vertical={false} />
         <XAxis dataKey="month" tickFormatter={monthLabel} stroke={t.axis} fontSize={12} tickLine={false} axisLine={false} />
-        <YAxis tickFormatter={fmtCompact} stroke={t.axis} fontSize={12} tickLine={false} axisLine={false} width={60} />
+        <YAxis tickFormatter={fmtAxis} stroke={t.axis} fontSize={12} tickLine={false} axisLine={false} width={52} />
         <Tooltip
           contentStyle={{
             background: t.tooltipBg,
@@ -30,7 +31,7 @@ const CashChart = ({ data, height = 300 }: { data: { month: string; balance: num
           labelFormatter={(l) => monthLabel(String(l))}
           formatter={(v) => [fmtCurrency(Number(v)), "Cash & bank"]}
         />
-        <Area type="monotone" dataKey="balance" stroke={t.brand} strokeWidth={2} fill="url(#cashFill)" />
+        <Area type="monotone" dataKey="closing_cash" stroke={t.brand} strokeWidth={2} fill="url(#cashFill)" />
       </AreaChart>
     </ResponsiveContainer>
   );

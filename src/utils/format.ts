@@ -70,6 +70,16 @@ export const fmtCompact = (value: number) => {
   return `${sign}${CURRENCY_SYMBOL}${abs.toFixed(0)}`;
 };
 
+/** Chart axis ticks: compact and without the currency symbol, which the chart's panel states once. */
+export const fmtAxis = (value: number) => {
+  const abs = Math.abs(value);
+  const sign = value < 0 ? "-" : "";
+  const trim = (n: number) => String(Number(n.toFixed(1)));
+  if (abs >= 1_000_000) return `${sign}${trim(abs / 1_000_000)}M`;
+  if (abs >= 1_000) return `${sign}${trim(abs / 1_000)}K`;
+  return `${sign}${abs.toFixed(0)}`;
+};
+
 export const fmtDate = (iso: string | null | undefined) => {
   if (!iso) return "—";
   const d = new Date(iso.length === 10 ? `${iso}T00:00:00` : iso);

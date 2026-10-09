@@ -1,12 +1,21 @@
 import type { CreditNote, CustomFieldEntity, PeriodStatus } from "@/models/accounting";
 import { ENDPOINTS, endpointKey } from "@/services/catalogue";
-import { balanceSheet, cashFlow, generalLedger, incomeStatement, trialBalance } from "@/lib/ledger";
+import type { AgeingReport, DashboardStatistics, MonthlyTrendReport } from "@/models/reports";
+import {
+  balanceSheet,
+  cashBalanceSeries,
+  cashFlow,
+  generalLedger,
+  incomeStatement,
+  monthlyProfitAndLoss,
+  trialBalance,
+} from "@/lib/ledger";
 import { AGEING_BUCKETS, ageingBucket, emptyAgeing } from "@/lib/documents";
 import { partyStatement } from "@/lib/statements";
 import { fiscalYearsView, yearEndPreview } from "@/lib/fiscalYears";
 import { bankBaseBalances, billRows, invoiceRows, type DocumentRow } from "@/store/selectors";
 import { round2 } from "@/utils/format";
-import { todayIso } from "@/utils/dates";
+import { addDays, addMonths, daysBetween, todayIso } from "@/utils/dates";
 import { openingBalancesView, revaluationPreview, type LedgerEngine, type LedgerState } from "./engine";
 import { ApiFault, found, fromResult, listResult, need, type HandlerResult } from "./http";
 
@@ -56,29 +65,71 @@ const statement = (state: LedgerState, q: URLSearchParams, kind: "CUSTOMER" | "S
   return { data: found(data ?? undefined, kind === "CUSTOMER" ? "Customer" : "Supplier") };
 };
 
-const ageing = <T>(rows: DocumentRow<T>[], partyOf: (doc: T) => string, asAt: string) => {
-  const byParty = new Map<string, { party_id: string; party_name: string; buckets: Record<string, number>; total: number }>();
+type AgeingDoc = { id: string; number: string; issue_date: string; due_date: string };
+
+const ageing = <T extends AgeingDoc>(rows: DocumentRow<T>[], partyOf: (doc: T) => string, asAt: string) => {
+  const byParty = new Map<string, AgeingReport["rows"][number]>();
   const totals = emptyAgeing() as Record<string, number>;
   for (const r of rows) {
-    if (r.outstanding <= 0) continue;
+    if (r.outstanding <= 0 || r.doc.issue_date > asAt) continue;
     const id = partyOf(r.doc);
-    const due = (r.doc as { due_date: string }).due_date;
-    const bucket = ageingBucket(due, asAt);
+    const bucket = ageingBucket(r.doc.due_date, asAt);
     const entry = byParty.get(id) ?? {
       party_id: id,
+      party_code: r.party?.code ?? "",
       party_name: r.party?.name ?? "Unknown",
       buckets: emptyAgeing() as Record<string, number>,
       total: 0,
+      documents: [],
     };
     entry.buckets[bucket] = round2(entry.buckets[bucket] + r.outstanding);
     entry.total = round2(entry.total + r.outstanding);
+    entry.documents.push({
+      document_id: r.doc.id,
+      number: r.doc.number,
+      issue_date: r.doc.issue_date,
+      due_date: r.doc.due_date,
+      days_overdue: Math.max(0, daysBetween(r.doc.due_date, asAt)),
+      bucket,
+      outstanding: r.outstanding,
+    });
     totals[bucket] = round2(totals[bucket] + r.outstanding);
     byParty.set(id, entry);
   }
-  return {
-    buckets: AGEING_BUCKETS,
+  for (const entry of byParty.values()) entry.documents.sort((a, b) => a.due_date.localeCompare(b.due_date) || a.number.localeCompare(b.number));
+  const data: AgeingReport = {
+    as_at: asAt,
+    buckets: [...AGEING_BUCKETS],
     rows: [...byParty.values()].sort((a, b) => b.total - a.total),
     totals: { ...totals, total: round2(Object.values(totals).reduce((t, v) => t + v, 0)) },
+  };
+  return data;
+};
+
+const MAX_TREND_MONTHS = 24;
+
+const monthlyTrend = (state: LedgerState, q: URLSearchParams): MonthlyTrendReport => {
+  const to = q.get("to_date") || todayIso();
+  const from = q.get("from_date") || `${addMonths(to.slice(0, 7), -11)}-01`;
+  if (from > to) throw new ApiFault(400, "from_date must be on or before to_date.", { from_date: "Must be on or before to_date" });
+  const months: string[] = [];
+  for (let m = from.slice(0, 7); m <= to.slice(0, 7); m = addMonths(m, 1)) months.push(m);
+  if (months.length > MAX_TREND_MONTHS) {
+    throw new ApiFault(400, `The trend covers at most ${MAX_TREND_MONTHS} months.`, { from_date: `At most ${MAX_TREND_MONTHS} months before to_date` });
+  }
+  const upToTo = state.journals.filter((j) => j.date <= to);
+  const pnl = monthlyProfitAndLoss(state.accounts, upToTo, months);
+  const cash = cashBalanceSeries(state.accounts, upToTo, months);
+  return {
+    from_date: from,
+    to_date: to,
+    months: pnl.map((p, i) => ({
+      month: p.month,
+      revenue: p.revenue,
+      expenses: p.expenses,
+      net_income: p.profit,
+      closing_cash: cash[i].balance,
+    })),
   };
 };
 
@@ -405,23 +456,28 @@ const HANDLERS: Record<string, Handler> = {
     const ar = invoiceRows(state);
     const ap = billRows(state);
     const sum = (xs: number[]) => round2(xs.reduce((t, v) => t + v, 0));
-    return {
-      data: {
-        as_at: asAt,
-        revenue_mtd: month.totalRevenue,
-        expenses_mtd: round2(month.totalCostOfSales + month.totalOperating),
-        net_income_mtd: month.netIncome,
-        net_income_ytd: year.netIncome,
-        cash_balance: sum([...bankBaseBalances(state).values()]),
-        receivables: sum(ar.map((r) => r.outstanding)),
-        overdue_receivables: sum(ar.filter((r) => r.status === "OVERDUE").map((r) => r.outstanding)),
-        payables: sum(ap.map((r) => r.outstanding)),
-        overdue_payables: sum(ap.filter((r) => r.status === "OVERDUE").map((r) => r.outstanding)),
-        journals_pending_approval: state.journals.filter((j) => j.status === "PENDING_APPROVAL").length,
-        unmatched_statement_lines: state.statementLines.filter((l) => l.status !== "MATCHED").length,
-      },
+    const overdueAr = ar.filter((r) => r.status === "OVERDUE");
+    const data: DashboardStatistics = {
+      as_at: asAt,
+      revenue_mtd: month.totalRevenue,
+      expenses_mtd: round2(month.totalCostOfSales + month.totalOperating),
+      net_income_mtd: month.netIncome,
+      revenue_ytd: year.totalRevenue,
+      net_income_ytd: year.netIncome,
+      cash_balance: sum([...bankBaseBalances(state).values()]),
+      receivables: sum(ar.map((r) => r.outstanding)),
+      overdue_receivables: sum(overdueAr.map((r) => r.outstanding)),
+      overdue_invoices: overdueAr.filter((r) => r.outstanding > 0).length,
+      payables: sum(ap.map((r) => r.outstanding)),
+      overdue_payables: sum(ap.filter((r) => r.status === "OVERDUE").map((r) => r.outstanding)),
+      payables_due_7_days: sum(ap.filter((r) => r.outstanding > 0 && r.doc.due_date <= addDays(asAt, 7)).map((r) => r.outstanding)),
+      journals_pending_approval: state.journals.filter((j) => j.status === "PENDING_APPROVAL").length,
+      draft_journals: state.journals.filter((j) => j.status === "DRAFT").length,
+      unmatched_statement_lines: state.statementLines.filter((l) => l.status !== "MATCHED").length,
     };
+    return { data };
   },
+  "GET /reports/monthly-trend": ({ state, q }) => ({ data: monthlyTrend(state, q) }),
   "GET /reports/trial-balance": ({ state, q }) => report(trialBalance(state.accounts, state.journals, q.get("as_at") || todayIso())),
   "GET /reports/general-ledger": ({ state, q }) => {
     const account = found(state.accounts.find((a) => a.id === need(q.get("account_id"), "account_id")), "Account");

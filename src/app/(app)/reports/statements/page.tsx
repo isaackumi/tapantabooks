@@ -1,14 +1,16 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { FiFileText } from "react-icons/fi";
 import { PageHeader, compactInputClass } from "@/components/ui";
 import EmptyState from "@/components/emptyState";
-import { ReportToolbar } from "@/components/reports/reportKit";
+import { QueryState, Skeleton } from "@/components/queryState";
+import { ReportToolbar, useReportPresets } from "@/components/reports/reportKit";
 import { useLedger } from "@/store/ledgerStore";
-import { partyStatement, type StatementEntryType } from "@/lib/statements";
+import { useReport } from "@/services/useApiQuery";
+import type { PartyStatement, StatementEntryType } from "@/lib/statements";
 import { AGEING_BUCKETS } from "@/lib/documents";
 import { downloadCsv } from "@/utils/csv";
 import { classNames, fmtAccounting, fmtDate, fmtMoney } from "@/utils/format";
@@ -41,6 +43,7 @@ export default function StatementsPage() {
   const { state } = useLedger();
   const params = useSearchParams();
   const today = todayIso();
+  const presets = useReportPresets();
   const [kind, setKind] = useState<Kind>(params.get("kind") === "supplier" ? "supplier" : "customer");
   const parties = kind === "customer" ? state.customers : state.suppliers;
   const [partyId, setPartyId] = useState(params.get("party") ?? "");
@@ -49,10 +52,13 @@ export default function StatementsPage() {
   const [to, setTo] = useState(today);
 
   const activeId = parties.some((p) => p.id === partyId) ? partyId : (parties[0]?.id ?? "");
-  const statement = useMemo(
-    () => (activeId ? partyStatement(state, kind === "customer" ? "CUSTOMER" : "SUPPLIER", activeId, from, to, currency || undefined) : null),
-    [state, kind, activeId, from, to, currency],
-  );
+  const query = useReport<PartyStatement>(activeId ? `/reports/${kind}-statement` : null, {
+    [`${kind}_id`]: activeId,
+    from_date: from,
+    to_date: to,
+    currency: currency || undefined,
+  });
+  const statement = query.data;
   const party = parties.find((p) => p.id === activeId);
   const isCustomer = kind === "customer";
   const money = (v: number) => fmtMoney(v, statement?.currency);
@@ -132,183 +138,183 @@ export default function StatementsPage() {
         onFrom={setFrom}
         onTo={setTo}
         onExport={statement ? exportCsv : undefined}
-        presets={[
-          { label: "Year to date", from: startOfYear(today), to: today },
-          { label: "Q3", from: "2026-07-01", to: "2026-09-30" },
-          { label: "September", from: "2026-09-01", to: "2026-09-30" },
-        ]}
+        presets={presets.period}
       />
 
-      {!statement || !party ? (
+      {!party ? (
         <EmptyState icon={FiFileText} title={`No ${kind}s yet`} description={`Add a ${kind} to produce a statement.`} />
       ) : (
-        <div className="mx-auto max-w-5xl rounded-xl border border-neutral-200 bg-white px-6 py-8 sm:px-10 dark:border-neutral-700 dark:bg-neutral-800 print:border-0 print:px-0">
-          <div className="mb-8 flex flex-wrap items-start justify-between gap-6">
-            <div>
-              <p className="text-sm font-semibold uppercase tracking-wider text-brand-700 dark:text-brand-300">{state.org.legal_name}</p>
-              <p className="mt-1 whitespace-pre-line text-xs text-neutral-500 dark:text-neutral-400">{state.org.address}</p>
-              <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                {state.org.email} · {state.org.phone}
-              </p>
-              <p className="text-xs text-neutral-500 dark:text-neutral-400">TIN {state.org.tin}</p>
-            </div>
-            <div className="text-right">
-              <h2 className="text-xl font-bold">Statement of account</h2>
-              <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
-                {fmtDate(from)} – {fmtDate(to)}
-              </p>
-              <p className="text-xs text-neutral-400">Amounts in {statement.currency}</p>
-            </div>
-          </div>
+        <QueryState query={query} className="mx-auto max-w-5xl" skeleton={<Skeleton rows={10} />}>
+          {(statement) => (
+            <div className="rounded-xl border border-neutral-200 bg-white px-6 py-8 sm:px-10 dark:border-neutral-700 dark:bg-neutral-800 print:border-0 print:px-0">
+              <div className="mb-8 flex flex-wrap items-start justify-between gap-6">
+                <div>
+                  <p className="text-sm font-semibold uppercase tracking-wider text-brand-700 dark:text-brand-300">{state.org.legal_name}</p>
+                  <p className="mt-1 whitespace-pre-line text-xs text-neutral-500 dark:text-neutral-400">{state.org.address}</p>
+                  <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                    {state.org.email} · {state.org.phone}
+                  </p>
+                  <p className="text-xs text-neutral-500 dark:text-neutral-400">TIN {state.org.tin}</p>
+                </div>
+                <div className="text-right">
+                  <h2 className="text-xl font-bold">Statement of account</h2>
+                  <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+                    {fmtDate(from)} – {fmtDate(to)}
+                  </p>
+                  <p className="text-xs text-neutral-400">Amounts in {statement.currency}</p>
+                </div>
+              </div>
 
-          <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div className="rounded-xl border border-neutral-200 p-4 text-sm dark:border-neutral-700">
-              <p className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">{isCustomer ? "Statement for" : "Supplier"}</p>
-              <p className="mt-1 font-semibold">{party.name}</p>
-              <p className="text-neutral-500 dark:text-neutral-400">
-                {party.code} · {party.city}
-              </p>
-              <p className="text-neutral-500 dark:text-neutral-400">{party.email}</p>
-              {party.tin && <p className="text-neutral-500 dark:text-neutral-400">TIN {party.tin}</p>}
-            </div>
-            <div className="rounded-xl bg-brand-50 p-4 text-sm dark:bg-brand-900/20">
-              <div className="flex justify-between py-0.5">
-                <span className="text-neutral-600 dark:text-neutral-300">Opening balance</span>
-                <span className="tabular-nums">{money(statement.opening_balance)}</span>
+              <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div className="rounded-xl border border-neutral-200 p-4 text-sm dark:border-neutral-700">
+                  <p className="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">{isCustomer ? "Statement for" : "Supplier"}</p>
+                  <p className="mt-1 font-semibold">{party.name}</p>
+                  <p className="text-neutral-500 dark:text-neutral-400">
+                    {party.code} · {party.city}
+                  </p>
+                  <p className="text-neutral-500 dark:text-neutral-400">{party.email}</p>
+                  {party.tin && <p className="text-neutral-500 dark:text-neutral-400">TIN {party.tin}</p>}
+                </div>
+                <div className="rounded-xl bg-brand-50 p-4 text-sm dark:bg-brand-900/20">
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-neutral-600 dark:text-neutral-300">Opening balance</span>
+                    <span className="tabular-nums">{money(statement.opening_balance)}</span>
+                  </div>
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-neutral-600 dark:text-neutral-300">{isCustomer ? "Invoiced" : "Billed"}</span>
+                    <span className="tabular-nums">{money(statement.total_charges)}</span>
+                  </div>
+                  <div className="flex justify-between py-0.5">
+                    <span className="text-neutral-600 dark:text-neutral-300">Payments & credits</span>
+                    <span className="tabular-nums">{money(-statement.total_credits)}</span>
+                  </div>
+                  <div className="mt-1 flex justify-between border-t border-brand-200 pt-2 font-bold dark:border-brand-800">
+                    <span>{isCustomer ? "Balance due" : "Balance owed"}</span>
+                    <span className="tabular-nums text-brand-700 dark:text-brand-300">{money(statement.closing_balance)}</span>
+                  </div>
+                </div>
               </div>
-              <div className="flex justify-between py-0.5">
-                <span className="text-neutral-600 dark:text-neutral-300">{isCustomer ? "Invoiced" : "Billed"}</span>
-                <span className="tabular-nums">{money(statement.total_charges)}</span>
-              </div>
-              <div className="flex justify-between py-0.5">
-                <span className="text-neutral-600 dark:text-neutral-300">Payments & credits</span>
-                <span className="tabular-nums">{money(-statement.total_credits)}</span>
-              </div>
-              <div className="mt-1 flex justify-between border-t border-brand-200 pt-2 font-bold dark:border-brand-800">
-                <span>{isCustomer ? "Balance due" : "Balance owed"}</span>
-                <span className="tabular-nums text-brand-700 dark:text-brand-300">{money(statement.closing_balance)}</span>
-              </div>
-            </div>
-          </div>
 
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead className="border-b border-neutral-200 text-left text-xs uppercase tracking-wide text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
-                <tr>
-                  <th className={TH}>Date</th>
-                  <th className={TH}>Type</th>
-                  <th className={TH}>Number</th>
-                  <th className={TH}>Description</th>
-                  <th className={`${TH} text-right`}>Charges</th>
-                  <th className={`${TH} text-right`}>Payments & credits</th>
-                  <th className={`${TH} text-right`}>Balance</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
-                <tr className="bg-neutral-50/60 dark:bg-neutral-900/20">
-                  <td className="px-3 py-2 whitespace-nowrap">{fmtDate(from)}</td>
-                  <td className="px-3 py-2" colSpan={3}>
-                    Opening balance
-                  </td>
-                  <td className={NUM} />
-                  <td className={NUM} />
-                  <td className={`${NUM} font-medium`}>{fmtAccounting(statement.opening_balance)}</td>
-                </tr>
-                {statement.entries.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="px-3 py-6 text-center text-neutral-500">
-                      No activity in this period.
-                    </td>
-                  </tr>
-                )}
-                {statement.entries.map((e, i) => (
-                  <tr key={`${e.number}-${i}`}>
-                    <td className="px-3 py-2 whitespace-nowrap">{fmtDate(e.date)}</td>
-                    <td className="px-3 py-2 whitespace-nowrap text-neutral-500 dark:text-neutral-400">{TYPE_LABEL[e.type]}</td>
-                    <td className="px-3 py-2 whitespace-nowrap font-mono text-xs">
-                      <Link href={`${LINK_BASE[e.type]}?open=${e.document_id}`} className="hover:text-brand-700 dark:hover:text-brand-300">
-                        {e.number}
-                      </Link>
-                    </td>
-                    <td className="px-3 py-2 text-neutral-600 dark:text-neutral-300">{e.description}</td>
-                    <td className={NUM}>{e.charge ? fmtAccounting(e.charge) : ""}</td>
-                    <td className={NUM}>{e.credit ? fmtAccounting(e.credit) : ""}</td>
-                    <td className={`${NUM} font-medium`}>{fmtAccounting(e.balance)}</td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr className="border-t-2 border-neutral-800 font-semibold dark:border-neutral-300">
-                  <td className="px-3 py-2" colSpan={4}>
-                    Closing balance at {fmtDate(to)}
-                  </td>
-                  <td className={NUM}>{fmtAccounting(statement.total_charges)}</td>
-                  <td className={NUM}>{fmtAccounting(statement.total_credits)}</td>
-                  <td className={NUM}>{fmtAccounting(statement.closing_balance)}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-
-          <h3 className="mt-8 mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Ageing at {fmtDate(to)}</h3>
-          <div className="grid grid-cols-3 gap-px overflow-hidden rounded-xl border border-neutral-200 bg-neutral-200 text-sm sm:grid-cols-6 dark:border-neutral-700 dark:bg-neutral-700">
-            {AGEING_BUCKETS.map((b) => (
-              <div key={b} className="bg-white p-3 dark:bg-neutral-800">
-                <p className="text-xs text-neutral-500 dark:text-neutral-400">{b}</p>
-                <p className={classNames("mt-0.5 tabular-nums", b !== "Current" && statement.ageing[b] > 0 && "font-semibold text-red-600 dark:text-red-400")}>
-                  {fmtAccounting(statement.ageing[b])}
-                </p>
-              </div>
-            ))}
-            <div className="bg-neutral-50 p-3 dark:bg-neutral-900/40">
-              <p className="text-xs text-neutral-500 dark:text-neutral-400">Total due</p>
-              <p className="mt-0.5 font-semibold tabular-nums">{fmtAccounting(statement.ageing.total)}</p>
-            </div>
-          </div>
-
-          {statement.open_documents.length > 0 && (
-            <>
-              <h3 className="mt-8 mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-                Open {isCustomer ? "invoices" : "bills"}
-              </h3>
-              <table className="min-w-full text-sm">
-                <thead className="border-b border-neutral-200 text-left text-xs uppercase tracking-wide text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
-                  <tr>
-                    <th className={TH}>Number</th>
-                    <th className={TH}>Issued</th>
-                    <th className={TH}>Due</th>
-                    <th className={TH}>Age</th>
-                    <th className={`${TH} text-right`}>Total</th>
-                    <th className={`${TH} text-right`}>Outstanding</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
-                  {statement.open_documents.map((d) => (
-                    <tr key={d.document_id}>
-                      <td className="px-3 py-2 font-mono text-xs">
-                        <Link href={`${isCustomer ? "/sales/invoices" : "/purchases/bills"}?open=${d.document_id}`} className="hover:text-brand-700 dark:hover:text-brand-300">
-                          {d.number}
-                        </Link>
-                      </td>
-                      <td className="px-3 py-2">{fmtDate(d.issue_date)}</td>
-                      <td className="px-3 py-2">{fmtDate(d.due_date)}</td>
-                      <td className={classNames("px-3 py-2", d.bucket !== "Current" && "text-red-600 dark:text-red-400")}>{d.bucket}</td>
-                      <td className={NUM}>{fmtAccounting(d.total)}</td>
-                      <td className={`${NUM} font-medium`}>{fmtAccounting(d.outstanding)}</td>
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead className="border-b border-neutral-200 text-left text-xs uppercase tracking-wide text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
+                    <tr>
+                      <th className={TH}>Date</th>
+                      <th className={TH}>Type</th>
+                      <th className={TH}>Number</th>
+                      <th className={TH}>Description</th>
+                      <th className={`${TH} text-right`}>Charges</th>
+                      <th className={`${TH} text-right`}>Payments & credits</th>
+                      <th className={`${TH} text-right`}>Balance</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </>
-          )}
+                  </thead>
+                  <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
+                    <tr className="bg-neutral-50/60 dark:bg-neutral-900/20">
+                      <td className="px-3 py-2 whitespace-nowrap">{fmtDate(from)}</td>
+                      <td className="px-3 py-2" colSpan={3}>
+                        Opening balance
+                      </td>
+                      <td className={NUM} />
+                      <td className={NUM} />
+                      <td className={`${NUM} font-medium`}>{fmtAccounting(statement.opening_balance)}</td>
+                    </tr>
+                    {statement.entries.length === 0 && (
+                      <tr>
+                        <td colSpan={7} className="px-3 py-6 text-center text-neutral-500">
+                          No activity in this period.
+                        </td>
+                      </tr>
+                    )}
+                    {statement.entries.map((e, i) => (
+                      <tr key={`${e.number}-${i}`}>
+                        <td className="px-3 py-2 whitespace-nowrap">{fmtDate(e.date)}</td>
+                        <td className="px-3 py-2 whitespace-nowrap text-neutral-500 dark:text-neutral-400">{TYPE_LABEL[e.type]}</td>
+                        <td className="px-3 py-2 whitespace-nowrap font-mono text-xs">
+                          <Link href={`${LINK_BASE[e.type]}?open=${e.document_id}`} className="hover:text-brand-700 dark:hover:text-brand-300">
+                            {e.number}
+                          </Link>
+                        </td>
+                        <td className="px-3 py-2 text-neutral-600 dark:text-neutral-300">{e.description}</td>
+                        <td className={NUM}>{e.charge ? fmtAccounting(e.charge) : ""}</td>
+                        <td className={NUM}>{e.credit ? fmtAccounting(e.credit) : ""}</td>
+                        <td className={`${NUM} font-medium`}>{fmtAccounting(e.balance)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t-2 border-neutral-800 font-semibold dark:border-neutral-300">
+                      <td className="px-3 py-2" colSpan={4}>
+                        Closing balance at {fmtDate(to)}
+                      </td>
+                      <td className={NUM}>{fmtAccounting(statement.total_charges)}</td>
+                      <td className={NUM}>{fmtAccounting(statement.total_credits)}</td>
+                      <td className={NUM}>{fmtAccounting(statement.closing_balance)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
 
-          <p className="mt-8 border-t border-neutral-100 pt-4 text-xs text-neutral-500 dark:border-neutral-700">
-            {isCustomer
-              ? `Please quote the invoice number with your payment. Questions about this statement: ${state.org.email}.`
-              : "Balances are as recorded in our books. Please send a copy of your own statement if your figures differ."}{" "}
-            Draft and voided documents are not shown.
-          </p>
-        </div>
+              <h3 className="mt-8 mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Ageing at {fmtDate(to)}</h3>
+              <div className="grid grid-cols-3 gap-px overflow-hidden rounded-xl border border-neutral-200 bg-neutral-200 text-sm sm:grid-cols-6 dark:border-neutral-700 dark:bg-neutral-700">
+                {AGEING_BUCKETS.map((b) => (
+                  <div key={b} className="bg-white p-3 dark:bg-neutral-800">
+                    <p className="text-xs text-neutral-500 dark:text-neutral-400">{b}</p>
+                    <p className={classNames("mt-0.5 tabular-nums", b !== "Current" && statement.ageing[b] > 0 && "font-semibold text-red-600 dark:text-red-400")}>
+                      {fmtAccounting(statement.ageing[b])}
+                    </p>
+                  </div>
+                ))}
+                <div className="bg-neutral-50 p-3 dark:bg-neutral-900/40">
+                  <p className="text-xs text-neutral-500 dark:text-neutral-400">Total due</p>
+                  <p className="mt-0.5 font-semibold tabular-nums">{fmtAccounting(statement.ageing.total)}</p>
+                </div>
+              </div>
+
+              {statement.open_documents.length > 0 && (
+                <>
+                  <h3 className="mt-8 mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+                    Open {isCustomer ? "invoices" : "bills"}
+                  </h3>
+                  <table className="min-w-full text-sm">
+                    <thead className="border-b border-neutral-200 text-left text-xs uppercase tracking-wide text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
+                      <tr>
+                        <th className={TH}>Number</th>
+                        <th className={TH}>Issued</th>
+                        <th className={TH}>Due</th>
+                        <th className={TH}>Age</th>
+                        <th className={`${TH} text-right`}>Total</th>
+                        <th className={`${TH} text-right`}>Outstanding</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
+                      {statement.open_documents.map((d) => (
+                        <tr key={d.document_id}>
+                          <td className="px-3 py-2 font-mono text-xs">
+                            <Link href={`${isCustomer ? "/sales/invoices" : "/purchases/bills"}?open=${d.document_id}`} className="hover:text-brand-700 dark:hover:text-brand-300">
+                              {d.number}
+                            </Link>
+                          </td>
+                          <td className="px-3 py-2">{fmtDate(d.issue_date)}</td>
+                          <td className="px-3 py-2">{fmtDate(d.due_date)}</td>
+                          <td className={classNames("px-3 py-2", d.bucket !== "Current" && "text-red-600 dark:text-red-400")}>{d.bucket}</td>
+                          <td className={NUM}>{fmtAccounting(d.total)}</td>
+                          <td className={`${NUM} font-medium`}>{fmtAccounting(d.outstanding)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+
+              <p className="mt-8 border-t border-neutral-100 pt-4 text-xs text-neutral-500 dark:border-neutral-700">
+                {isCustomer
+                  ? `Please quote the invoice number with your payment. Questions about this statement: ${state.org.email}.`
+                  : "Balances are as recorded in our books. Please send a copy of your own statement if your figures differ."}{" "}
+                Draft and voided documents are not shown.
+              </p>
+            </div>
+          )}
+        </QueryState>
       )}
     </div>
   );

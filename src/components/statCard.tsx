@@ -29,7 +29,7 @@ export const StatCard = ({ label, value, sub, trend, info, tone = "default" }: S
         {info && <InfoTooltip text={info} label={`What ${label} means`} />}
       </p>
       <div className="mt-1 flex items-center gap-2">
-        <span className={`text-2xl font-bold tabular-nums ${TONE[tone]}`}>{value}</span>
+        <span className={`whitespace-nowrap text-2xl font-bold tabular-nums ${TONE[tone]}`}>{value}</span>
         {trend && (
           <span
             className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-xs font-semibold ${

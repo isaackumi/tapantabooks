@@ -1,44 +1,61 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { PageHeader, Panel } from "@/components/ui";
-import { ReportSheet, ReportToolbar, StatementHeading, StatementSection, TotalRow, withPrior } from "@/components/reports/reportKit";
+import { QueryState, Skeleton } from "@/components/queryState";
+import {
+  ReportSheet,
+  ReportToolbar,
+  StatementHeading,
+  StatementSection,
+  TotalRow,
+  useReportPresets,
+  withPrior,
+} from "@/components/reports/reportKit";
 import ProfitChart from "@/components/charts/profitChart";
-import { useLedger } from "@/store/ledgerStore";
-import { incomeStatement, monthlyProfitAndLoss } from "@/lib/ledger";
+import { useReport } from "@/services/useApiQuery";
+import type { IncomeStatementReport, MonthlyTrendReport } from "@/models/reports";
 import { downloadCsv } from "@/utils/csv";
 import { fmtDate } from "@/utils/format";
-import { addDays, daysBetween, endOfMonth, startOfYear, todayIso } from "@/utils/dates";
+import { useQueryParam } from "@/utils/useQueryParam";
+import { addDays, daysBetween, isIsoDate, startOfYear, todayIso } from "@/utils/dates";
 
-const ledgerHref = (id: string) => `/accounting/general-ledger?account=${id}`;
-const MONTHS = Array.from({ length: 10 }, (_, i) => `2026-${String(i + 1).padStart(2, "0")}`);
+const hasActivity = (r: IncomeStatementReport | null) =>
+  !!r && r.revenue.length + r.cost_of_sales.length + r.operating.length > 0;
 
 export default function IncomeStatementPage() {
-  const { state } = useLedger();
   const today = todayIso();
+  const presets = useReportPresets();
   const [from, setFrom] = useState(startOfYear(today));
   const [to, setTo] = useState(today);
+  useQueryParam("from", (v) => {
+    if (isIsoDate(v)) setFrom(v);
+  });
+  useQueryParam("to", (v) => {
+    if (isIsoDate(v)) setTo(v);
+  });
 
   const priorTo = addDays(from, -1);
   const priorFrom = addDays(priorTo, -daysBetween(from, to));
-  const hasPrior = priorFrom >= "2026-01-01";
 
-  const is = useMemo(() => incomeStatement(state.accounts, state.journals, from, to), [state, from, to]);
-  const pr = useMemo(
-    () => incomeStatement(state.accounts, state.journals, priorFrom, priorTo),
-    [state, priorFrom, priorTo],
-  );
-  const monthly = useMemo(() => monthlyProfitAndLoss(state.accounts, state.journals, MONTHS), [state]);
+  const current = useReport<IncomeStatementReport>("/reports/income-statement", { from_date: from, to_date: to });
+  const prior = useReport<IncomeStatementReport>("/reports/income-statement", { from_date: priorFrom, to_date: priorTo });
+  const trend = useReport<MonthlyTrendReport>("/reports/monthly-trend", { to_date: to });
+  const pr = prior.data;
+  const hasPrior = hasActivity(pr);
+  const ledgerHref = (id: string) => `/accounting/general-ledger?account=${id}&from=${from}&to=${to}`;
   const margin = (n: number, r: number) => (r ? `${((n / r) * 100).toFixed(1)}%` : "—");
 
   const exportCsv = () => {
+    const is = current.data;
+    if (!is) return;
     const rows: (string | number)[][] = [["Section", "Code", "Account", `${from} to ${to}`, ...(hasPrior ? [`${priorFrom} to ${priorTo}`] : [])]];
-    const add = (s: string, a: typeof is.revenue, b: typeof is.revenue) =>
+    const add = (s: string, a: IncomeStatementReport["revenue"], b: IncomeStatementReport["revenue"]) =>
       withPrior(a, b).forEach((l) => rows.push([s, l.code ?? "", l.label, l.amount, ...(hasPrior ? [l.prior ?? 0] : [])]));
-    add("Revenue", is.revenue, pr.revenue);
-    add("Cost of sales", is.costOfSales, pr.costOfSales);
-    add("Operating expenses", is.operating, pr.operating);
-    rows.push(["", "", "Net profit", is.netIncome, ...(hasPrior ? [pr.netIncome] : [])]);
+    add("Revenue", is.revenue, pr?.revenue ?? []);
+    add("Cost of sales", is.cost_of_sales, pr?.cost_of_sales ?? []);
+    add("Operating expenses", is.operating, pr?.operating ?? []);
+    rows.push(["", "", "Net profit", is.net_income, ...(hasPrior && pr ? [pr.net_income] : [])]);
     downloadCsv(`income-statement-${from}-to-${to}.csv`, rows);
   };
 
@@ -55,57 +72,58 @@ export default function IncomeStatementPage() {
         to={to}
         onFrom={setFrom}
         onTo={setTo}
-        onExport={exportCsv}
-        presets={[
-          { label: "This month", from: "2026-10-01", to: today },
-          { label: "September", from: "2026-09-01", to: endOfMonth("2026-09") },
-          { label: "Q3", from: "2026-07-01", to: endOfMonth("2026-09") },
-          { label: "Year to date", from: startOfYear(today), to: today },
-        ]}
+        onExport={current.data ? exportCsv : undefined}
+        presets={presets.period}
       />
 
-      <Panel title="Monthly trend" className="mx-auto mb-6 max-w-4xl" bodyClassName="pt-2" >
-        <ProfitChart data={monthly} height={220} />
+      <Panel title="Monthly trend" subtitle="Last twelve months to the report end date" className="mx-auto mb-6 max-w-4xl" bodyClassName="pt-2">
+        <QueryState query={trend} skeleton={<Skeleton rows={5} />}>
+          {(t) => <ProfitChart data={t.months} height={220} />}
+        </QueryState>
       </Panel>
 
-      <ReportSheet
-        title="Statement of Profit or Loss"
-        period={`${fmtDate(from)} to ${fmtDate(to)}`}
-        footnote={
-          <>
-            Gross margin {margin(is.grossProfit, is.totalRevenue)} · net margin {margin(is.netIncome, is.totalRevenue)}.
-            {hasPrior && ` Comparative column covers ${fmtDate(priorFrom)} to ${fmtDate(priorTo)}.`}
-          </>
-        }
-      >
-        <StatementHeading current="This period" prior={hasPrior ? "Prior period" : undefined} />
-        <StatementSection
-          title="Revenue"
-          lines={withPrior(is.revenue, pr.revenue, ledgerHref)}
-          totalLabel="Total revenue"
-          total={is.totalRevenue}
-          priorTotal={pr.totalRevenue}
-          compare={hasPrior}
-        />
-        <StatementSection
-          title="Cost of sales"
-          lines={withPrior(is.costOfSales, pr.costOfSales, ledgerHref)}
-          totalLabel="Total cost of sales"
-          total={is.totalCostOfSales}
-          priorTotal={pr.totalCostOfSales}
-          compare={hasPrior}
-        />
-        <TotalRow label="Gross profit" amount={is.grossProfit} prior={hasPrior ? pr.grossProfit : undefined} className="mb-8" />
-        <StatementSection
-          title="Operating expenses"
-          lines={withPrior(is.operating, pr.operating, ledgerHref)}
-          totalLabel="Total operating expenses"
-          total={is.totalOperating}
-          priorTotal={pr.totalOperating}
-          compare={hasPrior}
-        />
-        <TotalRow label="Net profit" amount={is.netIncome} prior={hasPrior ? pr.netIncome : undefined} strong />
-      </ReportSheet>
+      <QueryState query={current} className="mx-auto max-w-4xl" skeleton={<Skeleton rows={12} />}>
+        {(is) => (
+          <ReportSheet
+            title="Statement of Profit or Loss"
+            period={`${fmtDate(from)} to ${fmtDate(to)}`}
+            footnote={
+              <>
+                Gross margin {margin(is.gross_profit, is.total_revenue)} · net margin {margin(is.net_income, is.total_revenue)}.
+                {hasPrior && ` Comparative column covers ${fmtDate(priorFrom)} to ${fmtDate(priorTo)}.`}
+              </>
+            }
+          >
+            <StatementHeading current="This period" prior={hasPrior ? "Prior period" : undefined} />
+            <StatementSection
+              title="Revenue"
+              lines={withPrior(is.revenue, pr?.revenue ?? [], ledgerHref)}
+              totalLabel="Total revenue"
+              total={is.total_revenue}
+              priorTotal={pr?.total_revenue}
+              compare={hasPrior}
+            />
+            <StatementSection
+              title="Cost of sales"
+              lines={withPrior(is.cost_of_sales, pr?.cost_of_sales ?? [], ledgerHref)}
+              totalLabel="Total cost of sales"
+              total={is.total_cost_of_sales}
+              priorTotal={pr?.total_cost_of_sales}
+              compare={hasPrior}
+            />
+            <TotalRow label="Gross profit" amount={is.gross_profit} prior={hasPrior ? pr?.gross_profit : undefined} className="mb-8" />
+            <StatementSection
+              title="Operating expenses"
+              lines={withPrior(is.operating, pr?.operating ?? [], ledgerHref)}
+              totalLabel="Total operating expenses"
+              total={is.total_operating}
+              priorTotal={pr?.total_operating}
+              compare={hasPrior}
+            />
+            <TotalRow label="Net profit" amount={is.net_income} prior={hasPrior ? pr?.net_income : undefined} strong />
+          </ReportSheet>
+        )}
+      </QueryState>
     </div>
   );
 }

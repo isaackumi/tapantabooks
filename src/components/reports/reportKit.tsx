@@ -4,7 +4,9 @@ import Link from "next/link";
 import { FiDownload, FiPrinter } from "react-icons/fi";
 import { Button, compactInputClass } from "@/components/ui";
 import { useLedger } from "@/store/ledgerStore";
+import { fiscalYearFor } from "@/lib/fiscalYears";
 import { classNames, fmtAccounting } from "@/utils/format";
+import { addDays, addMonths, endOfMonth, monthName, startOfMonth, startOfQuarter, todayIso } from "@/utils/dates";
 
 /** Printable report sheet with the company heading. */
 export const ReportSheet = ({
@@ -142,6 +144,42 @@ export const withPrior = (
     else map.set(l.account.id, { label: l.account.name, code: l.account.code, amount: 0, prior: l.amount, href: href?.(l.account.id) });
   }
   return [...map.values()].sort((a, b) => (a.code ?? "").localeCompare(b.code ?? ""));
+};
+
+export interface ReportPreset {
+  label: string;
+  from?: string;
+  to: string;
+}
+
+const dayMonth = (iso: string) =>
+  new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+
+/** Date presets derived from today and the organisation's financial year, for range and as-at reports. */
+export const useReportPresets = (): { period: ReportPreset[]; asAt: ReportPreset[] } => {
+  const { state } = useLedger();
+  const today = todayIso();
+  const fy = fiscalYearFor(state.org, today);
+  const priorFy = fiscalYearFor(state.org, addDays(fy.start_date, -1));
+  const lastMonth = addMonths(today.slice(0, 7), -1);
+  const quarterStart = startOfQuarter(today);
+  const lastQuarterEnd = addDays(quarterStart, -1);
+  const fyLabel = fy.start_date.endsWith("-01-01") ? "Year to date" : `${fy.name} to date`;
+  return {
+    period: [
+      { label: "This month", from: startOfMonth(today), to: today },
+      { label: monthName(lastMonth).split(" ")[0], from: `${lastMonth}-01`, to: endOfMonth(lastMonth) },
+      { label: "Quarter to date", from: quarterStart, to: today },
+      { label: fyLabel, from: fy.start_date, to: today },
+      { label: priorFy.name, from: priorFy.start_date, to: priorFy.end_date },
+    ],
+    asAt: [
+      { label: "Today", to: today },
+      { label: dayMonth(endOfMonth(lastMonth)), to: endOfMonth(lastMonth) },
+      ...(lastQuarterEnd !== endOfMonth(lastMonth) ? [{ label: dayMonth(lastQuarterEnd), to: lastQuarterEnd }] : []),
+      { label: `End ${priorFy.name}`, to: priorFy.end_date },
+    ],
+  };
 };
 
 /** Date controls and export/print actions shown above a report. */

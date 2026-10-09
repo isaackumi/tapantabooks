@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import {
   FiAlertTriangle,
@@ -19,14 +19,15 @@ import ProfitChart from "@/components/charts/profitChart";
 import CashChart from "@/components/charts/cashChart";
 import DocumentFormModal from "@/components/documents/documentFormModal";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
+import { QueryState, Skeleton } from "@/components/queryState";
 import { useCurrentUser, useLedger } from "@/store/ledgerStore";
-import { billRows, invoiceRows } from "@/store/selectors";
-import { balancesByAccount, cashBalanceSeries, incomeStatement, monthlyProfitAndLoss } from "@/lib/ledger";
-import { AGEING_BUCKETS, ageingBucket, emptyAgeing } from "@/lib/documents";
-import { addDays, monthKey, startOfYear, todayIso } from "@/utils/dates";
-import { fmtCompact, fmtCurrency, fmtDate, fmtRelative, round2 } from "@/utils/format";
+import { useReport } from "@/services/useApiQuery";
+import { fiscalYearFor } from "@/lib/fiscalYears";
+import type { AgeingReport, DashboardStatistics, MonthlyTrendReport } from "@/models/reports";
+import { addMonths, daysBetween, endOfMonth, monthLabel, monthName, startOfMonth, startOfYear, todayIso } from "@/utils/dates";
+import { fmtCompact, fmtCurrency, fmtDate, fmtRelative } from "@/utils/format";
 
-const MONTHS = Array.from({ length: 10 }, (_, i) => `2026-${String(i + 1).padStart(2, "0")}`);
+const AGEING_BAR = ["bg-emerald-500", "bg-amber-400", "bg-orange-500", "bg-red-500", "bg-red-700"];
 
 const greeting = () => {
   const h = new Date().getHours();
@@ -39,56 +40,60 @@ export default function DashboardPage() {
   const { openJournal, newJournal } = useJournalViewer();
   const [invoiceOpen, setInvoiceOpen] = useState(false);
   const today = todayIso();
+  const fy = fiscalYearFor(state.org, today);
 
-  const data = useMemo(() => {
-    const balances = balancesByAccount(state.accounts, state.journals, { to: today });
-    const cash = round2(state.accounts.filter((a) => a.is_bank).reduce((s, a) => s + (balances.get(a.id) ?? 0), 0));
-    const invoices = invoiceRows(state);
-    const bills = billRows(state);
-    const receivable = round2(invoices.reduce((s, r) => s + r.outstanding, 0));
-    const overdueAr = round2(invoices.filter((r) => r.status === "OVERDUE").reduce((s, r) => s + r.outstanding, 0));
-    const payable = round2(bills.reduce((s, r) => s + r.outstanding, 0));
-    const dueSoon = round2(
-      bills
-        .filter((r) => r.outstanding > 0 && r.doc.due_date <= addDays(today, 7))
-        .reduce((s, r) => s + r.outstanding, 0),
-    );
-    const ytd = incomeStatement(state.accounts, state.journals, startOfYear(today), today);
-    const margin = ytd.totalRevenue ? (ytd.netIncome / ytd.totalRevenue) * 100 : 0;
-    const pnl = monthlyProfitAndLoss(state.accounts, state.journals, MONTHS);
-    const cashSeries = cashBalanceSeries(state.accounts, state.journals, MONTHS);
-    const thisMonth = pnl.find((p) => p.month === monthKey(today));
-    const lastMonth = pnl.find((p) => p.month === "2026-09");
+  const statsQuery = useReport<DashboardStatistics>("/dashboard/statistics", { as_at: today });
+  const trendQuery = useReport<MonthlyTrendReport>("/reports/monthly-trend", { from_date: fy.start_date, to_date: today });
+  const ageingQuery = useReport<AgeingReport>("/reports/ar-ageing", { as_at: today });
+  const stats = statsQuery.data;
 
-    const ageing = emptyAgeing();
-    for (const r of invoices) if (r.outstanding > 0) ageing[ageingBucket(r.doc.due_date, today)] += r.outstanding;
-
-    return { cash, receivable, overdueAr, payable, dueSoon, ytd, margin, pnl, cashSeries, thisMonth, lastMonth, ageing };
-  }, [state, today]);
+  const thisMonthKey = today.slice(0, 7);
+  const lastMonthKey = addMonths(thisMonthKey, -1);
+  const months = trendQuery.data?.months ?? [];
+  const thisMonth = months.find((m) => m.month === thisMonthKey);
+  const lastMonth = months.find((m) => m.month === lastMonthKey);
+  const daysIntoMonth = daysBetween(startOfMonth(today), today) + 1;
+  const monthComplete = today === endOfMonth(thisMonthKey);
 
   const pending = state.journals.filter((j) => j.status === "PENDING_APPROVAL");
-  const drafts = state.journals.filter((j) => j.status === "DRAFT");
-  const unmatched = state.statementLines.filter((l) => l.status !== "MATCHED").length;
   const reviewImports = state.importBatches.filter((b) => b.status === "NEEDS_REVIEW" || b.status === "FAILED");
   const troubled = state.dataSources.filter((d) => d.status === "ERROR" || d.status === "WARNING");
-  const overdueCount = invoiceRows(state).filter((r) => r.status === "OVERDUE").length;
   const connected = state.dataSources.filter((d) => d.status !== "NOT_CONNECTED");
-  const ageingMax = Math.max(...AGEING_BUCKETS.map((b) => data.ageing[b]), 1);
 
   const attention = [
     {
-      count: pending.length,
-      label: "journals awaiting approval",
+      count: stats?.journals_pending_approval ?? 0,
+      label: ["journal awaiting approval", "journals awaiting approval"],
       href: "/accounting/journals?tab=PENDING_APPROVAL",
       icon: FiCheckSquare,
       tone: "amber",
     },
-    { count: unmatched, label: "bank lines to reconcile", href: "/banking/reconciliation", icon: FiRepeat, tone: "orange" },
-    { count: overdueCount, label: "overdue customer invoices", href: "/sales/invoices?tab=OVERDUE", icon: FiFileText, tone: "red" },
-    { count: reviewImports.length, label: "imports need review", href: "/integrations/imports", icon: FiUploadCloud, tone: "amber" },
-    { count: troubled.length, label: "integrations need attention", href: "/integrations/sources", icon: FiLink, tone: "red" },
-    { count: drafts.length, label: "draft journals", href: "/accounting/journals?tab=DRAFT", icon: FiFileText, tone: "neutral" },
-  ].filter((a) => a.count > 0);
+    {
+      count: stats?.unmatched_statement_lines ?? 0,
+      label: ["bank line to reconcile", "bank lines to reconcile"],
+      href: "/banking/reconciliation",
+      icon: FiRepeat,
+      tone: "orange",
+    },
+    {
+      count: stats?.overdue_invoices ?? 0,
+      label: ["overdue customer invoice", "overdue customer invoices"],
+      href: "/sales/invoices?tab=OVERDUE",
+      icon: FiFileText,
+      tone: "red",
+    },
+    { count: reviewImports.length, label: ["import needs review", "imports need review"], href: "/integrations/imports", icon: FiUploadCloud, tone: "amber" },
+    {
+      count: troubled.length,
+      label: ["integration needs attention", "integrations need attention"],
+      href: "/integrations/sources",
+      icon: FiLink,
+      tone: "red",
+    },
+    { count: stats?.draft_journals ?? 0, label: ["draft journal", "draft journals"], href: "/accounting/journals?tab=DRAFT", icon: FiFileText, tone: "neutral" },
+  ]
+    .filter((a) => a.count > 0)
+    .map((a) => ({ ...a, label: a.count === 1 ? a.label[0] : a.label[1] }));
 
   return (
     <div>
@@ -107,40 +112,49 @@ export default function DashboardPage() {
         }
       />
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" data-tour="stats">
-        <StatCard
-          label="Cash & bank"
-          value={fmtCurrency(data.cash)}
-          sub={`${state.bankAccounts.length} accounts · ledger balance`}
-          info="Sum of every bank, mobile money and cash account in the general ledger."
-        />
-        <StatCard
-          label="Receivables"
-          value={fmtCurrency(data.receivable)}
-          sub={<span className="text-orange-600 dark:text-orange-400">{fmtCurrency(data.overdueAr)} overdue</span>}
-          info="Approved customer invoices not yet paid."
-        />
-        <StatCard
-          label="Payables"
-          value={fmtCurrency(data.payable)}
-          sub={`${fmtCurrency(data.dueSoon)} due within 7 days`}
-          info="Approved supplier bills not yet paid."
-        />
-        <StatCard
-          label="Net profit (YTD)"
-          value={fmtCurrency(data.ytd.netIncome)}
-          tone={data.ytd.netIncome >= 0 ? "success" : "danger"}
-          trend={data.ytd.netIncome >= 0 ? "up" : "down"}
-          sub={`${data.margin.toFixed(1)}% margin on ${fmtCompact(data.ytd.totalRevenue)} revenue`}
-          info="Revenue less cost of sales and operating expenses since 1 January, from posted journals."
-        />
+      <div data-tour="stats">
+        <QueryState query={statsQuery} skeleton={<Skeleton rows={2} />}>
+          {(s) => (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              <StatCard
+                label="Cash & bank"
+                value={fmtCurrency(s.cash_balance)}
+                sub={`${state.bankAccounts.length} accounts · ledger balance`}
+                info="Sum of every bank, mobile money and cash account in the general ledger."
+              />
+              <StatCard
+                label="Receivables"
+                value={fmtCurrency(s.receivables)}
+                sub={<span className="text-orange-600 dark:text-orange-400">{fmtCurrency(s.overdue_receivables)} overdue</span>}
+                info="Approved customer invoices not yet paid."
+              />
+              <StatCard
+                label="Payables"
+                value={fmtCurrency(s.payables)}
+                sub={`${fmtCurrency(s.payables_due_7_days)} due within 7 days`}
+                info="Approved supplier bills not yet paid."
+              />
+              <StatCard
+                label="Net profit (YTD)"
+                value={fmtCurrency(s.net_income_ytd)}
+                tone={s.net_income_ytd >= 0 ? "success" : "danger"}
+                sub={
+                  s.revenue_ytd
+                    ? `${((s.net_income_ytd / s.revenue_ytd) * 100).toFixed(1)}% margin on ${fmtCompact(s.revenue_ytd)} revenue`
+                    : "No revenue posted this year"
+                }
+                info={`Revenue less cost of sales and operating expenses since ${fmtDate(startOfYear(today))}, from posted journals.`}
+              />
+            </div>
+          )}
+        </QueryState>
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
         <Panel
           tour="profit-chart"
           title="Revenue vs expenses"
-          subtitle="Posted activity by month, 2026"
+          subtitle={`Posted activity by month, ${fy.name}`}
           className="xl:col-span-2"
           actions={
             <Link href="/reports/income-statement" className="text-sm font-medium text-brand-700 hover:underline dark:text-brand-300">
@@ -148,10 +162,14 @@ export default function DashboardPage() {
             </Link>
           }
         >
-          <ProfitChart data={data.pnl} />
+          <QueryState query={trendQuery} skeleton={<Skeleton rows={7} />}>
+            {(t) => <ProfitChart data={t.months} />}
+          </QueryState>
         </Panel>
-        <Panel title="Cash position" subtitle="Month-end balance across bank, MoMo and cash">
-          <CashChart data={data.cashSeries} />
+        <Panel title="Cash position" subtitle={`Month-end balance across bank, MoMo and cash · ${state.org.base_currency}`}>
+          <QueryState query={trendQuery} skeleton={<Skeleton rows={7} />}>
+            {(t) => <CashChart data={t.months} />}
+          </QueryState>
         </Panel>
       </div>
 
@@ -198,9 +216,9 @@ export default function DashboardPage() {
                   onClick={() => openJournal(j.id)}
                   className="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-sm hover:bg-neutral-50 dark:hover:bg-neutral-700/50"
                 >
-                  <span className="min-w-0">
-                    <span className="font-mono text-xs text-neutral-500">{j.number}</span>
-                    <span className="ml-2 truncate">{j.memo}</span>
+                  <span className="flex min-w-0 items-baseline gap-2">
+                    <span className="shrink-0 whitespace-nowrap font-mono text-xs text-neutral-500">{j.number}</span>
+                    <span className="truncate">{j.memo}</span>
                   </span>
                   <span className="ml-3 shrink-0 tabular-nums font-medium">
                     {fmtCurrency(j.lines.reduce((s, l) => s + l.debit, 0))}
@@ -213,31 +231,36 @@ export default function DashboardPage() {
 
         <Panel
           title="Receivables ageing"
-          subtitle={`${fmtCurrency(data.receivable)} outstanding`}
+          subtitle={ageingQuery.data ? `${fmtCurrency(ageingQuery.data.totals.total)} outstanding` : "Outstanding by days past due"}
           actions={
             <Link href="/reports/ar-ageing" className="text-sm font-medium text-brand-700 hover:underline dark:text-brand-300">
               Details
             </Link>
           }
         >
-          <ul className="space-y-3">
-            {AGEING_BUCKETS.map((b, i) => (
-              <li key={b}>
-                <div className="mb-1 flex justify-between text-sm">
-                  <span className="text-neutral-600 dark:text-neutral-300">{b}</span>
-                  <span className="tabular-nums font-medium">{fmtCurrency(data.ageing[b])}</span>
-                </div>
-                <div className="h-2 rounded-full bg-neutral-100 dark:bg-neutral-700">
-                  <div
-                    className={`h-2 rounded-full ${
-                      ["bg-emerald-500", "bg-amber-400", "bg-orange-500", "bg-red-500", "bg-red-700"][i]
-                    }`}
-                    style={{ width: `${(data.ageing[b] / ageingMax) * 100}%` }}
-                  />
-                </div>
-              </li>
-            ))}
-          </ul>
+          <QueryState query={ageingQuery} skeleton={<Skeleton rows={5} />}>
+            {(a) => {
+              const max = Math.max(...a.buckets.map((b) => a.totals[b] ?? 0), 1);
+              return (
+                <ul className="space-y-3">
+                  {a.buckets.map((b, i) => (
+                    <li key={b}>
+                      <div className="mb-1 flex justify-between text-sm">
+                        <span className="text-neutral-600 dark:text-neutral-300">{b}</span>
+                        <span className="tabular-nums font-medium">{fmtCurrency(a.totals[b] ?? 0)}</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-neutral-100 dark:bg-neutral-700">
+                        <div
+                          className={`h-2 rounded-full ${AGEING_BAR[i] ?? AGEING_BAR[AGEING_BAR.length - 1]}`}
+                          style={{ width: `${((a.totals[b] ?? 0) / max) * 100}%` }}
+                        />
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              );
+            }}
+          </QueryState>
         </Panel>
 
         <Panel
@@ -267,26 +290,42 @@ export default function DashboardPage() {
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <Panel title="This month" subtitle="October to date vs September">
-          <dl className="space-y-3 text-sm">
-            {[
-              { label: "Revenue", now: data.thisMonth?.revenue ?? 0, prev: data.lastMonth?.revenue ?? 0 },
-              { label: "Expenses", now: data.thisMonth?.expenses ?? 0, prev: data.lastMonth?.expenses ?? 0 },
-              { label: "Net profit", now: data.thisMonth?.profit ?? 0, prev: data.lastMonth?.profit ?? 0 },
-            ].map((r) => (
-              <div key={r.label} className="flex items-center justify-between">
-                <dt className="text-neutral-500 dark:text-neutral-400">{r.label}</dt>
-                <dd className="text-right">
-                  <span className="font-semibold tabular-nums">{fmtCurrency(r.now)}</span>
-                  <span className="ml-2 text-xs text-neutral-400 tabular-nums">Sep {fmtCompact(r.prev)}</span>
-                </dd>
-              </div>
-            ))}
-          </dl>
-          <p className="mt-4 flex items-start gap-2 rounded-lg bg-neutral-50 p-3 text-xs text-neutral-500 dark:bg-neutral-900/40 dark:text-neutral-400">
-            <FiAlertTriangle className="mt-0.5 shrink-0" />
-            October is five days in; month-end payroll, depreciation and Store Management summaries are not posted yet.
-          </p>
+        <Panel
+          title="This month"
+          subtitle={`${monthName(thisMonthKey).split(" ")[0]} to date vs ${monthName(lastMonthKey).split(" ")[0]}`}
+        >
+          <QueryState query={trendQuery} skeleton={<Skeleton rows={3} />}>
+            {() => (
+              <>
+                <dl className="space-y-3 text-sm">
+                  {[
+                    { label: "Revenue", now: thisMonth?.revenue ?? 0, prev: lastMonth?.revenue },
+                    { label: "Expenses", now: thisMonth?.expenses ?? 0, prev: lastMonth?.expenses },
+                    { label: "Net profit", now: thisMonth?.net_income ?? 0, prev: lastMonth?.net_income },
+                  ].map((r) => (
+                    <div key={r.label} className="flex items-center justify-between">
+                      <dt className="text-neutral-500 dark:text-neutral-400">{r.label}</dt>
+                      <dd className="text-right">
+                        <span className="font-semibold tabular-nums">{fmtCurrency(r.now)}</span>
+                        {r.prev !== undefined && (
+                          <span className="ml-2 text-xs text-neutral-400 tabular-nums">
+                            {monthLabel(lastMonthKey)} {fmtCompact(r.prev)}
+                          </span>
+                        )}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+                {!monthComplete && (
+                  <p className="mt-4 flex items-start gap-2 rounded-lg bg-neutral-50 p-3 text-xs text-neutral-500 dark:bg-neutral-900/40 dark:text-neutral-400">
+                    <FiAlertTriangle className="mt-0.5 shrink-0" />
+                    {daysIntoMonth} {daysIntoMonth === 1 ? "day" : "days"} into {monthName(thisMonthKey).split(" ")[0]}; month-end entries such as
+                    payroll, depreciation and accruals may not be posted yet.
+                  </p>
+                )}
+              </>
+            )}
+          </QueryState>
         </Panel>
 
         <Panel

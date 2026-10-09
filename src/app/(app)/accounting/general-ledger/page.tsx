@@ -1,36 +1,49 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { FiDownload, FiPrinter, FiBookOpen } from "react-icons/fi";
 import { Button, PageHeader, Field, compactInputClass } from "@/components/ui";
 import StatCard from "@/components/statCard";
 import SourceBadge from "@/components/sourceBadge";
 import EmptyState from "@/components/emptyState";
+import { QueryState, Skeleton } from "@/components/queryState";
 import AccountSelect from "@/components/accounting/accountSelect";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
 import { useLedger } from "@/store/ledgerStore";
-import { generalLedger, isDebitNormal } from "@/lib/ledger";
-import { ACC } from "@/mock/seed";
+import { useReport } from "@/services/useApiQuery";
+import { isDebitNormal } from "@/lib/ledger";
+import type { GeneralLedgerReport } from "@/models/reports";
 import { matchesSearch, useGlobalState } from "@/utils/globalStateContext";
 import { useQueryParam } from "@/utils/useQueryParam";
 import { downloadCsv } from "@/utils/csv";
 import { fmtAccounting, fmtCurrency, fmtDate, humanize } from "@/utils/format";
-import { startOfYear, todayIso } from "@/utils/dates";
+import { isIsoDate, startOfYear, todayIso } from "@/utils/dates";
 
 export default function GeneralLedgerPage() {
   const { state } = useLedger();
   const { openJournal } = useJournalViewer();
   const { searchQuery } = useGlobalState();
-  const [accountId, setAccountId] = useState<string>(ACC.gcb);
+  const defaultAccount = state.bankAccounts[0]?.gl_account_id ?? "";
+  const [accountId, setAccountId] = useState<string>(defaultAccount);
   const [from, setFrom] = useState(startOfYear(todayIso()));
   const [to, setTo] = useState(todayIso());
   useQueryParam("account", setAccountId);
+  useQueryParam("from", (v) => {
+    if (isIsoDate(v)) setFrom(v);
+  });
+  useQueryParam("to", (v) => {
+    if (!isIsoDate(v)) return;
+    setTo(v);
+    if (v < from) setFrom(startOfYear(v));
+  });
 
   const account = state.accounts.find((a) => a.id === accountId);
-  const ledger = useMemo(
-    () => (account ? generalLedger(account, state.journals, from, to) : null),
-    [account, state.journals, from, to],
-  );
+  const query = useReport<GeneralLedgerReport>(account ? "/reports/general-ledger" : null, {
+    account_id: accountId,
+    from_date: from,
+    to_date: to,
+  });
+  const ledger = query.data;
   const rows = ledger?.rows.filter((r) =>
     matchesSearch(searchQuery, r.journal.number, r.journal.memo, r.line.description, r.journal.source.reference),
   );
@@ -60,7 +73,7 @@ export default function GeneralLedgerPage() {
         description="Every posted movement on one account with a running balance. Click an entry to see the full journal."
         actions={
           <>
-            <Button variant="secondary" icon={FiDownload} onClick={exportCsv}>
+            <Button variant="secondary" icon={FiDownload} onClick={exportCsv} disabled={!ledger}>
               Export CSV
             </Button>
             <Button variant="secondary" icon={FiPrinter} onClick={() => window.print()}>
@@ -82,7 +95,7 @@ export default function GeneralLedgerPage() {
         </Field>
       </div>
 
-      {!account || !ledger ? (
+      {!account ? (
         <EmptyState icon={FiBookOpen} title="Choose an account" description="Pick an account to see its ledger." />
       ) : (
         <>
@@ -98,77 +111,85 @@ export default function GeneralLedgerPage() {
             {fmtDate(from)} to {fmtDate(to)}
           </p>
 
-          <div className="mb-6 grid grid-cols-2 gap-4 xl:grid-cols-4">
-            <StatCard label="Opening balance" value={fmtCurrency(ledger.opening)} />
-            <StatCard label="Debits" value={fmtCurrency(ledger.totals.debit)} sub={`${ledger.rows.filter((r) => r.line.debit).length} lines`} />
-            <StatCard label="Credits" value={fmtCurrency(ledger.totals.credit)} sub={`${ledger.rows.filter((r) => r.line.credit).length} lines`} />
-            <StatCard label="Closing balance" value={fmtCurrency(ledger.closing)} />
-          </div>
+          <QueryState query={query} skeleton={<Skeleton rows={10} />}>
+            {(data) => (
+              <>
+                <div className="mb-6 grid grid-cols-2 gap-4 xl:grid-cols-4">
+                  <StatCard label="Opening balance" value={fmtCurrency(data.opening)} />
+                  <StatCard label="Debits" value={fmtCurrency(data.totals.debit)} sub={`${data.rows.filter((r) => r.line.debit).length} lines`} />
+                  <StatCard label="Credits" value={fmtCurrency(data.totals.credit)} sub={`${data.rows.filter((r) => r.line.credit).length} lines`} />
+                  <StatCard label="Closing balance" value={fmtCurrency(data.closing)} />
+                </div>
 
-          <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-800">
-            <table className="min-w-full text-sm">
-              <thead className="bg-neutral-50/60 text-left text-neutral-500 dark:bg-neutral-800 dark:text-neutral-300">
-                <tr>
-                  <th className="px-4 py-3 font-normal">Date</th>
-                  <th className="px-4 py-3 font-normal">Entry</th>
-                  <th className="px-4 py-3 font-normal">Description</th>
-                  <th className="px-4 py-3 font-normal">Source</th>
-                  <th className="px-4 py-3 font-normal text-right">Debit</th>
-                  <th className="px-4 py-3 font-normal text-right">Credit</th>
-                  <th className="px-4 py-3 font-normal text-right">Balance</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
-                <tr className="bg-neutral-50/50 dark:bg-neutral-900/20">
-                  <td className="px-4 py-2.5">{fmtDate(from)}</td>
-                  <td />
-                  <td className="px-4 py-2.5 font-medium" colSpan={4}>
-                    Opening balance
-                  </td>
-                  <td className="px-4 py-2.5 text-right font-medium tabular-nums">{fmtAccounting(ledger.opening)}</td>
-                </tr>
-                {rows?.map((r) => (
-                  <tr
-                    key={r.line.id}
-                    onClick={() => openJournal(r.journal.id)}
-                    className="cursor-pointer hover:bg-neutral-50 dark:hover:bg-neutral-700/40"
-                  >
-                    <td className="whitespace-nowrap px-4 py-2.5">{fmtDate(r.journal.date)}</td>
-                    <td className="px-4 py-2.5 font-mono text-xs">{r.journal.number}</td>
-                    <td className="px-4 py-2.5">
-                      <p className="max-w-md truncate">{r.journal.memo}</p>
-                      {r.line.description && (
-                        <p className="max-w-md truncate text-xs text-neutral-500 dark:text-neutral-400">{r.line.description}</p>
+                <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-800">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-neutral-50/60 text-left text-neutral-500 dark:bg-neutral-800 dark:text-neutral-300">
+                      <tr>
+                        <th className="px-4 py-3 font-normal">Date</th>
+                        <th className="px-4 py-3 font-normal">Entry</th>
+                        <th className="px-4 py-3 font-normal">Description</th>
+                        <th className="px-4 py-3 font-normal">Source</th>
+                        <th className="px-4 py-3 font-normal text-right">Debit</th>
+                        <th className="px-4 py-3 font-normal text-right">Credit</th>
+                        <th className="px-4 py-3 font-normal text-right">Balance</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
+                      <tr className="bg-neutral-50/50 dark:bg-neutral-900/20">
+                        <td className="px-4 py-2.5">{fmtDate(from)}</td>
+                        <td />
+                        <td className="px-4 py-2.5 font-medium" colSpan={4}>
+                          Opening balance
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-medium tabular-nums">{fmtAccounting(data.opening)}</td>
+                      </tr>
+                      {rows?.map((r) => (
+                        <tr
+                          key={r.line.id}
+                          onClick={() => openJournal(r.journal.id)}
+                          className="cursor-pointer hover:bg-neutral-50 dark:hover:bg-neutral-700/40"
+                        >
+                          <td className="whitespace-nowrap px-4 py-2.5">{fmtDate(r.journal.date)}</td>
+                          <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs">{r.journal.number}</td>
+                          <td className="w-full max-w-0 px-4 py-2.5">
+                            <p className="truncate" title={r.journal.memo}>
+                              {r.journal.memo}
+                            </p>
+                            {r.line.description && (
+                              <p className="truncate text-xs text-neutral-500 dark:text-neutral-400">{r.line.description}</p>
+                            )}
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <SourceBadge type={r.journal.source.type} />
+                          </td>
+                          <td className="px-4 py-2.5 text-right tabular-nums">{fmtAccounting(r.line.debit)}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums">{fmtAccounting(r.line.credit)}</td>
+                          <td className="px-4 py-2.5 text-right font-medium tabular-nums">{fmtAccounting(r.balance)}</td>
+                        </tr>
+                      ))}
+                      {rows?.length === 0 && (
+                        <tr>
+                          <td colSpan={7} className="px-4 py-8 text-center text-neutral-500">
+                            {data.rows.length === 0 ? "No postings in this range." : "No postings match the search."}
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <SourceBadge type={r.journal.source.type} />
-                    </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">{fmtAccounting(r.line.debit)}</td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">{fmtAccounting(r.line.credit)}</td>
-                    <td className="px-4 py-2.5 text-right font-medium tabular-nums">{fmtAccounting(r.balance)}</td>
-                  </tr>
-                ))}
-                {rows?.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="px-4 py-8 text-center text-neutral-500">
-                      No postings in this range.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-              <tfoot className="border-t-2 border-neutral-200 bg-neutral-50 font-semibold dark:border-neutral-600 dark:bg-neutral-900/40">
-                <tr>
-                  <td className="px-4 py-3" colSpan={4}>
-                    Closing balance
-                  </td>
-                  <td className="px-4 py-3 text-right tabular-nums">{fmtAccounting(ledger.totals.debit)}</td>
-                  <td className="px-4 py-3 text-right tabular-nums">{fmtAccounting(ledger.totals.credit)}</td>
-                  <td className="px-4 py-3 text-right tabular-nums">{fmtAccounting(ledger.closing)}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
+                    </tbody>
+                    <tfoot className="border-t-2 border-neutral-200 bg-neutral-50 font-semibold dark:border-neutral-600 dark:bg-neutral-900/40">
+                      <tr>
+                        <td className="px-4 py-3" colSpan={4}>
+                          Closing balance
+                        </td>
+                        <td className="px-4 py-3 text-right tabular-nums">{fmtAccounting(data.totals.debit)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums">{fmtAccounting(data.totals.credit)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums">{fmtAccounting(data.closing)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </>
+            )}
+          </QueryState>
         </>
       )}
     </div>

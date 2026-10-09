@@ -33,6 +33,27 @@ export const endOfMonth = (key: string) => {
   return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
 };
 
+export const startOfMonth = (iso: string) => `${iso.slice(0, 7)}-01`;
+
+/** Month key `n` months after `key` (negative goes back). */
+export const addMonths = (key: string, n: number) => {
+  const [y, m] = key.split("-").map(Number);
+  const d = new Date(Date.UTC(y, m - 1 + n, 1));
+  return d.toISOString().slice(0, 7);
+};
+
+/** "October 2026". */
+export const monthName = (key: string) => {
+  const [y, m] = key.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
+};
+
+/** Start of the calendar quarter containing `iso`. */
+export const startOfQuarter = (iso: string) => {
+  const [y, m] = iso.split("-").map(Number);
+  return `${y}-${String(Math.floor((m - 1) / 3) * 3 + 1).padStart(2, "0")}-01`;
+};
+
 export const nowIso = () => new Date().toISOString();
 
 /** True for a real calendar date written YYYY-MM-DD (rejects 2026-02-30). */

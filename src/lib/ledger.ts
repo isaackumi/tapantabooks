@@ -185,8 +185,12 @@ export const balanceSheet = (accounts: Account[], journals: JournalEntry[], asAt
   // Prior years' P&L that has not been closed into retained earnings.
   const priorEarnings = incomeStatement(accounts, journals, "0000-01-01", addDayBefore(yearStart), raw).netIncome;
 
-  const totalAssets = round2(sumLines(currentAssets) + sumLines(fixedAssets));
-  const totalLiabilities = round2(sumLines(currentLiabilities) + sumLines(longTermLiabilities));
+  const totalCurrentAssets = sumLines(currentAssets);
+  const totalFixedAssets = sumLines(fixedAssets);
+  const totalCurrentLiabilities = sumLines(currentLiabilities);
+  const totalLongTermLiabilities = sumLines(longTermLiabilities);
+  const totalAssets = round2(totalCurrentAssets + totalFixedAssets);
+  const totalLiabilities = round2(totalCurrentLiabilities + totalLongTermLiabilities);
   const totalEquity = round2(sumLines(equity) + currentEarnings + priorEarnings);
   return {
     currentAssets,
@@ -195,9 +199,14 @@ export const balanceSheet = (accounts: Account[], journals: JournalEntry[], asAt
     longTermLiabilities,
     equity,
     currentEarnings: round2(currentEarnings + priorEarnings),
+    totalCurrentAssets,
+    totalFixedAssets,
+    totalCurrentLiabilities,
+    totalLongTermLiabilities,
     totalAssets,
     totalLiabilities,
     totalEquity,
+    totalLiabilitiesAndEquity: round2(totalLiabilities + totalEquity),
     difference: round2(totalAssets - totalLiabilities - totalEquity),
   };
 };
