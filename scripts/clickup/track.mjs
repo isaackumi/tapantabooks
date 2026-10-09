@@ -6,13 +6,15 @@
 //   node scripts/clickup/track.mjs status <task-id> "<status>"   backlog | to do | in progress | block | bug | review | complete | Closed
 //   node scripts/clickup/track.mjs comment <task-id> "<text>"    markdown comment
 //   node scripts/clickup/track.mjs move <task-id> <sprint1|sprint2|backlog|list-id>
+//   node scripts/clickup/track.mjs create <sprint1|sprint2|backlog|list-id> "<name>" "<markdown>" ["<status>"]
+//   node scripts/clickup/track.mjs subtask <parent-id> "<name>" "<markdown>" ["<status>"]
 //
 // Token: CLICKUP_API_TOKEN or ~/.config/clickup/token.
 
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { WORKSPACE_ID, LISTS } from "./manifest.mjs";
+import { ASSIGNEE_ID, WORKSPACE_ID, LISTS } from "./manifest.mjs";
 
 const tokenFile = join(homedir(), ".config", "clickup", "token");
 const TOKEN = process.env.CLICKUP_API_TOKEN || (existsSync(tokenFile) ? readFileSync(tokenFile, "utf8").trim() : "");
@@ -79,7 +81,30 @@ switch (cmd) {
     console.log(line(t));
     break;
   }
+  case "create":
+  case "subtask": {
+    const [name, description = "", status] = rest;
+    let listId;
+    let parent;
+    if (cmd === "subtask") {
+      parent = await api("GET", `/v2/task/${id}`);
+      listId = parent.list.id;
+    } else {
+      listId = LISTS[id]?.id ?? id;
+    }
+    const listStatus = Object.values(LISTS).find((l) => l.id === listId)?.status;
+    const t = await api("POST", `/v2/list/${listId}/task`, {
+      name,
+      markdown_description: description,
+      status: status ?? listStatus,
+      assignees: [ASSIGNEE_ID],
+      ...(parent ? { parent: parent.id } : {}),
+    });
+    console.log(line(t));
+    console.log(t.url);
+    break;
+  }
   default:
-    console.error("Commands: find, show, status, comment, move");
+    console.error("Commands: find, show, status, comment, move, create, subtask");
     process.exit(1);
 }
