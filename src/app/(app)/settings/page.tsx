@@ -9,6 +9,8 @@ import StatusBadge from "@/components/statusBadge";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { useCurrentUser, useLedger } from "@/store/ledgerStore";
 import type { AccountType, Dimension, OrgSettings } from "@/models/accounting";
+import type { JournalStatistics } from "@/models/lists";
+import { useReport } from "@/services/useApiQuery";
 import AccountSelect from "@/components/accounting/accountSelect";
 import { useQueryParam } from "@/utils/useQueryParam";
 import { CurrencySettings } from "@/components/settings/currencySettings";
@@ -71,7 +73,8 @@ const OrganisationTab = () => {
 
   const set = <K extends keyof OrgSettings>(k: K, v: OrgSettings[K]) => setForm((f) => ({ ...f, [k]: v }));
   const dirty = JSON.stringify(form) !== JSON.stringify(state.org);
-  const hasPostings = state.journals.some((j) => j.status === "POSTED" || j.status === "REVERSED");
+  const journalCounts = useReport<JournalStatistics>("/journals/statistics", {}).data?.status_counts;
+  const hasPostings = !journalCounts || journalCounts.POSTED + journalCounts.REVERSED > 0;
   const [saving, setSaving] = useState(false);
 
   const save = async () => {

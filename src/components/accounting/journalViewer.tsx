@@ -19,6 +19,8 @@ import { fmtAccounting, fmtCurrency, fmtDate, fmtDateTime, fmtMoney } from "@/ut
 import { CustomFieldDetails, EditCustomFieldsModal } from "@/components/customFields";
 import { AppConstants } from "@/core/appConstants";
 import { usePending } from "@/services/usePending";
+import { useReport } from "@/services/useApiQuery";
+import { QueryError, Skeleton } from "@/components/queryState";
 import { todayIso } from "@/utils/dates";
 
 interface JournalViewerValue {
@@ -32,6 +34,12 @@ export const useJournalViewer = () => {
   const ctx = useContext(JournalViewerContext);
   if (!ctx) throw new Error("useJournalViewer must be used within JournalViewerProvider");
   return ctx;
+};
+
+/** A related journal (reversal or original); null until it has loaded. */
+const useJournal = (id: string | null | undefined) => {
+  const { data } = useReport<JournalEntry>(id ? "/journals/get" : null, { journal_id: id ?? "" });
+  return id && data?.id === id ? data : null;
 };
 
 /** Where the business document behind a journal lives in the UI. */
@@ -73,7 +81,10 @@ export const JournalViewerProvider = ({ children }: { children: React.ReactNode 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [editCustom, setEditCustom] = useState(false);
 
-  const journal = openId ? state.journals.find((j) => j.id === openId) ?? null : null;
+  const journalQuery = useReport<JournalEntry>(openId ? "/journals/get" : null, { journal_id: openId ?? "" });
+  const journal = openId && journalQuery.data?.id === openId ? journalQuery.data : null;
+  const reversal = useJournal(journal?.reversed_by_id);
+  const original = useJournal(journal?.reversal_of_id);
   const accounts = useMemo(() => new Map(state.accounts.map((a) => [a.id, a])), [state.accounts]);
 
   const openJournal = useCallback((id: string) => setOpenId(id), []);
@@ -92,8 +103,6 @@ export const JournalViewerProvider = ({ children }: { children: React.ReactNode 
   };
 
   const totals = journal ? lineTotals(journal.lines) : null;
-  const reversal = journal?.reversed_by_id ? state.journals.find((j) => j.id === journal.reversed_by_id) : null;
-  const original = journal?.reversal_of_id ? state.journals.find((j) => j.id === journal.reversal_of_id) : null;
   const ownEntry = journal?.created_by_id === user.id;
   const docLink = journal ? (documentHref(journal) ?? revaluationHref(journal)) : null;
   const canReverse =
@@ -154,7 +163,7 @@ export const JournalViewerProvider = ({ children }: { children: React.ReactNode 
       {children}
 
       <RightDrawer
-        open={!!journal}
+        open={!!openId}
         onClose={() => setOpenId(null)}
         widthClass="max-w-2xl"
         title={
@@ -168,6 +177,12 @@ export const JournalViewerProvider = ({ children }: { children: React.ReactNode 
         subtitle={journal && `${fmtDate(journal.date)} · ${journal.memo}`}
         footer={footer}
       >
+        {!journal &&
+          (journalQuery.error && !journalQuery.loading ? (
+            <QueryError message={journalQuery.error} onRetry={journalQuery.refetch} />
+          ) : (
+            <Skeleton rows={8} />
+          ))}
         {journal && totals && (
           <div className="space-y-5">
             {journal.status === "PENDING_APPROVAL" && (

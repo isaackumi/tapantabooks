@@ -18,9 +18,13 @@ import type {
 } from "@/models/lists";
 import { ENDPOINTS, endpointKey } from "@/services/catalogue";
 import type {
+  AccountBalances,
   AgeingReport,
+  CustomFieldUsage,
   DashboardStatistics,
   MonthlyTrendReport,
+  PeriodStatistics,
+  ReportsSummary,
   TaxAccountBalance,
   TaxReturnStatus,
   TaxSummaryMonth,
@@ -41,6 +45,7 @@ import {
 import { AGEING_BUCKETS, ageingBucket, emptyAgeing } from "@/lib/documents";
 import { partyStatement } from "@/lib/statements";
 import { fiscalYearFor, fiscalYearsView, yearEndPreview } from "@/lib/fiscalYears";
+import { customFieldUsage } from "@/lib/customFields";
 import { bankBaseBalances, billRows, invoiceRows, type DocumentRow } from "@/store/selectors";
 import { round2 } from "@/utils/format";
 import { addDays, addMonths, daysBetween, endOfMonth, todayIso } from "@/utils/dates";
@@ -421,6 +426,11 @@ const HANDLERS: Record<string, Handler> = {
       filters: { entity: "entity", is_active: "is_active" },
       defaultSort: { field: "position", order: "asc" },
     }),
+  "GET /custom-fields/usage": ({ state }) => ({
+    data: {
+      items: state.customFields.map((f): CustomFieldUsage => ({ custom_field_id: f.id, record_count: customFieldUsage(state, f) })),
+    },
+  }),
   "POST /custom-fields/add": ({ engine, body }) => fromResult(engine.addCustomField(body), 201),
   "PUT /custom-fields/update": ({ engine, q, body }) =>
     fromResult(engine.updateCustomField(need(q.get("custom_field_id"), "custom_field_id"), body)),
@@ -444,6 +454,16 @@ const HANDLERS: Record<string, Handler> = {
       filters: { type: "type", is_active: "is_active", parent_id: "parent_id" },
       defaultSort: { field: "code", order: "asc" },
     }),
+  "GET /accounts/balances": ({ state, q }) => {
+    const asAt = q.get("as_at") || todayIso();
+    const balances = balancesByAccount(state.accounts, state.journals, { to: asAt });
+    const posted = new Set(state.journals.filter((j) => affectsLedger(j) && j.date <= asAt).flatMap((j) => j.lines.map((l) => l.account_id)));
+    const data: AccountBalances = {
+      as_at: asAt,
+      items: state.accounts.map((a) => ({ account_id: a.id, balance: balances.get(a.id) ?? 0, has_postings: posted.has(a.id) })),
+    };
+    return { data };
+  },
   "GET /accounts/get": ({ state, q }) => ({
     data: found(state.accounts.find((a) => a.id === need(q.get("account_id"), "account_id")), "Account"),
   }),
@@ -451,13 +471,16 @@ const HANDLERS: Record<string, Handler> = {
   "PUT /accounts/update": ({ engine, q, body }) => fromResult(engine.updateAccount(need(q.get("account_id"), "account_id"), body)),
 
   // ---- Journals ----------------------------------------------------------------------
-  "GET /journals/list": ({ state, q }) =>
-    listResult(journalItems(state), q, {
+  "GET /journals/list": ({ state, q }) => {
+    const accountId = q.get("account_id");
+    const items = journalItems(state);
+    return listResult(accountId ? items.filter((j) => j.lines.some((l) => l.account_id === accountId)) : items, q, {
       search: ["number", "memo", "reference", "created_by", "source.type", "source.reference", "custom_fields"],
       filters: { status: "status", source_type: "source.type", branch_id: "branch_id" },
       dateField: "date",
       defaultSort: { field: "date", order: "desc", then: "number" },
-    }),
+    });
+  },
   "GET /journals/statistics": ({ state }) => ({ data: journalStatistics(state) }),
   "GET /journals/get": ({ state, q }) => ({
     data: found(state.journals.find((j) => j.id === need(q.get("journal_id"), "journal_id")), "Journal"),
@@ -478,6 +501,19 @@ const HANDLERS: Record<string, Handler> = {
   // ---- Fiscal periods -----------------------------------------------------------------------
   "GET /fiscal-periods/list": ({ state, q }) =>
     listResult(state.periods, q, { filters: { status: "status" }, defaultSort: { field: "start_date", order: "asc" } }),
+  "GET /fiscal-periods/statistics": ({ state }) => {
+    const items: PeriodStatistics[] = state.periods.map((p) => {
+      const inPeriod = state.journals.filter((j) => j.date >= p.start_date && j.date <= p.end_date);
+      const posted = inPeriod.filter(affectsLedger);
+      return {
+        period_id: p.id,
+        posted_count: posted.length,
+        posted_total: round2(posted.reduce((t, j) => t + lineTotals(j.lines).debit, 0)),
+        open_count: inPeriod.filter((j) => j.status === "DRAFT" || j.status === "PENDING_APPROVAL").length,
+      };
+    });
+    return { data: { items } };
+  },
   "PUT /fiscal-periods/update-status": ({ engine, q, body }) =>
     fromResult(engine.setPeriodStatus(need(q.get("period_id"), "period_id"), body.status as PeriodStatus)),
   "GET /fiscal-years/list": ({ state }) => ({ data: { items: fiscalYearsView(state) } }),
@@ -694,6 +730,24 @@ const HANDLERS: Record<string, Handler> = {
       journals_pending_approval: state.journals.filter((j) => j.status === "PENDING_APPROVAL").length,
       draft_journals: state.journals.filter((j) => j.status === "DRAFT").length,
       unmatched_statement_lines: state.statementLines.filter((l) => l.status !== "MATCHED").length,
+      imports_needing_review: state.importBatches.filter((b) => b.status === "NEEDS_REVIEW" || b.status === "FAILED").length,
+    };
+    return { data };
+  },
+  "GET /reports/summary": ({ state, q }) => {
+    const asAt = q.get("as_at") || todayIso();
+    const from = fiscalYearFor(state.org, asAt).start_date;
+    const sum = (rows: DocumentRow<{ issue_date: string }>[]) =>
+      round2(rows.filter((r) => r.doc.issue_date <= asAt).reduce((t, r) => t + r.outstanding, 0));
+    const data: ReportsSummary = {
+      as_at: asAt,
+      from_date: from,
+      total_assets: balanceSheet(state.accounts, state.journals, asAt).totalAssets,
+      net_income: incomeStatement(state.accounts, state.journals, from, asAt).netIncome,
+      cash_net_change: cashFlow(state.accounts, state.journals, from, asAt).netChange,
+      receivables: sum(invoiceRows(state)),
+      payables: sum(billRows(state)),
+      trial_balance_total: trialBalance(state.accounts, state.journals, asAt).totals.debit,
     };
     return { data };
   },

@@ -267,6 +267,14 @@ export const ENDPOINTS: EndpointDef[] = [
     is_active: "true | false",
   }),
   {
+    method: "GET",
+    path: "/custom-fields/usage",
+    module: "Custom fields",
+    summary: "How many records hold a value for each custom field",
+    returns: "{ items: CustomFieldUsage[] }",
+    permission: perm("custom-field", "list"),
+  },
+  {
     method: "POST",
     path: "/custom-fields/add",
     module: "Custom fields",
@@ -328,6 +336,15 @@ export const ENDPOINTS: EndpointDef[] = [
   }),
   get("Chart of accounts", "/accounts/get", "account", "account_id", "Account"),
   {
+    method: "GET",
+    path: "/accounts/balances",
+    module: "Chart of accounts",
+    summary: "Signed balance of every account (groups roll up) and whether it has postings",
+    query: { as_at: "YYYY-MM-DD (default today)" },
+    returns: "AccountBalances: { as_at, items: [{ account_id, balance, has_postings }] }",
+    permission: perm("account", "list"),
+  },
+  {
     method: "POST",
     path: "/accounts/add",
     module: "Chart of accounts",
@@ -354,6 +371,7 @@ export const ENDPOINTS: EndpointDef[] = [
     status: "DRAFT | PENDING_APPROVAL | POSTED | REVERSED",
     source_type: "MANUAL | SALES | PURCHASES | BANKING | IMPORT | …",
     branch_id: "Branch dimension id",
+    account_id: "Only journals with a line on this account",
     from_date: "YYYY-MM-DD",
     to_date: "YYYY-MM-DD",
     ...CUSTOM_FIELD_QUERY,
@@ -436,6 +454,14 @@ export const ENDPOINTS: EndpointDef[] = [
 
   // ---- Fiscal periods ----------------------------------------------------
   list("Fiscal periods", "/fiscal-periods/list", "fiscal-period", "FiscalPeriod", { status: "OPEN | LOCKED | CLOSED" }),
+  {
+    method: "GET",
+    path: "/fiscal-periods/statistics",
+    module: "Fiscal periods",
+    summary: "Posted entries, posted volume and open (draft or pending) entries per period",
+    returns: "{ items: PeriodStatistics[] }",
+    permission: perm("fiscal-period", "list"),
+  },
   {
     method: "PUT",
     path: "/fiscal-periods/update-status",
@@ -963,9 +989,18 @@ export const ENDPOINTS: EndpointDef[] = [
     method: "GET",
     path: "/dashboard/statistics",
     module: "Reports",
-    summary: "Dashboard KPIs and work-queue counts: revenue, profit, cash, receivables, payables, journals, bank lines",
+    summary: "Dashboard KPIs and work-queue counts: revenue, profit, cash, receivables, payables, journals, bank lines, imports",
     query: { as_at: "YYYY-MM-DD" },
     returns: "DashboardStatistics",
+    permission: perm("report", "get"),
+  },
+  {
+    method: "GET",
+    path: "/reports/summary",
+    module: "Reports",
+    summary: "Headline figure for each report on the reports page; year to date from the fiscal year start",
+    query: { as_at: "YYYY-MM-DD" },
+    returns: "ReportsSummary",
     permission: perm("report", "get"),
   },
   {

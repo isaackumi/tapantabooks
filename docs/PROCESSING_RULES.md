@@ -192,6 +192,10 @@ Response: the `FiscalPeriod`. Detail: `{name} is now {open|locked|closed}`.
 
 Periods are generated when the organisation is set up (section 15.2): twelve monthly `OPEN` periods for the financial year that contains today, starting in the month given by `fiscal_year_start`. Later years are added by `POST /fiscal-years/add` or automatically by a year-end close (section 3.4). Period ids in the mock are `per_{YYYY}_{MM}` and names are `{Month} {YYYY}`.
 
+### 3.3a `GET /fiscal-periods/statistics`
+
+`{ items: [{ period_id, posted_count, posted_total, open_count }] }`, one item per period. Over journals dated within the period: `posted_count` counts `POSTED` and `REVERSED` journals, `posted_total` sums their debits, and `open_count` counts `DRAFT` and `PENDING_APPROVAL` journals (which block closing the period). The fiscal periods page shows them per month; the financial year cards read `GET /fiscal-years/list` and the close dialog reads `GET /fiscal-years/close-preview`.
+
 ### 3.4 Financial years and year-end close
 
 A **financial year** is not stored. It is derived from the periods: each period belongs to the year that starts on the most recent `fiscal_year_start` (`MM-01`) on or before its start date.
@@ -418,7 +422,7 @@ Response: 200 with the **reversal** `JournalEntry`. Detail: `{original number} r
 **`GET /journals/list`.** Each item is the `JournalEntry` plus `total`, the sum of its line debits (equal to the credits for any balanced journal).
 
 - `search`: number, memo, reference, `created_by`, source type, source reference, custom field values.
-- Filters: `status`, `source_type` (`source.type`), `branch_id`; `from_date` / `to_date` on `date`; `cf_<key>`.
+- Filters: `status`, `source_type` (`source.type`), `branch_id`, `account_id` (journals with at least one line on that account); `from_date` / `to_date` on `date`; `cf_<key>`.
 - Default order: `date` descending, then `number` descending.
 
 **`GET /journals/statistics`.** Computed over every journal, ignoring list filters.
@@ -476,6 +480,15 @@ Side effects: name (trimmed), description (trimmed, removed when blank), `is_act
 Response: the `Account`. Detail: `Account updated`.
 
 The mock lets any account be deactivated, including accounts with a balance, control accounts, bank GL accounts and the accounts referenced by `OrgSettings` (open question).
+
+### 5.4 `GET /accounts/balances`
+
+Query `as_at` (default today). Returns `{ as_at, items: [{ account_id, balance, has_postings }] }` with one item per account, groups included.
+
+- `balance`: signed balance (section 17, shared definitions) from ledger-affecting journals dated on or before `as_at`. A group's balance is the sum of the posting accounts beneath it.
+- `has_postings`: the account appears on a line of a `POSTED` or `REVERSED` journal dated on or before `as_at`. Always false for groups.
+
+The chart of accounts shows these balances and uses them to warn before deactivating an account that still has one.
 
 ---
 
@@ -1139,6 +1152,10 @@ Side effects: values are normalised and merged. When nothing changed the respons
 
 Response: the updated record. Detail: `Details saved`.
 
+### 13.6 `GET /custom-fields/usage`
+
+`{ items: [{ custom_field_id, record_count }] }`, one item per field (active or not). `record_count` is the number of records of the field's entity whose value for the field's key is present and not empty. Settings shows it next to each field and in the edit form, where it explains why the type and key cannot change.
+
 ---
 
 ## 14. Integrations
@@ -1485,6 +1502,9 @@ Response: `{ as_at, buckets: ["Current", "1–30 days", "31–60 days", "61–90
 | `journals_pending_approval` | number of journals in `PENDING_APPROVAL` |
 | `draft_journals` | number of journals in `DRAFT` |
 | `unmatched_statement_lines` | number of statement lines not `MATCHED` (includes `SUGGESTED`) |
+| `imports_needing_review` | number of import batches in `NEEDS_REVIEW` or `FAILED` |
+
+The sidebar badges for Journals, Reconciliation and Imports read `journals_pending_approval`, `unmatched_statement_lines` and `imports_needing_review` from this endpoint.
 
 Only the income-statement figures and `payables_due_7_days` respect `as_at`; cash, receivables, payables and the overdue figures use all data and today's date (open question). The year-to-date figures use the calendar year, like the report defaults (open question: `fiscal_year_start`).
 
@@ -1560,6 +1580,18 @@ For each month, over ledger-affecting journals dated in the month and within the
 `next_return` is the earliest month with status `DUE` or `OVERDUE`, or null. `accounts.output`, `accounts.input` and `accounts.withholding` list each tax account with its balance as at `to_date` in the account's normal direction (from the beginning of the books, settlements included). `totals` sum the monthly columns.
 
 Response: `TaxSummaryReport` (`DATA_MODEL.md` section 10). The Tax page uses it; nothing else changes.
+
+### 17.11 Reports summary (`GET /reports/summary?as_at=`)
+
+One headline figure per card on the Reports page, so the page does not run six reports. `as_at` defaults to today; `from_date` is the start of the financial year containing `as_at` (from `fiscal_year_start`).
+
+| Field | Definition |
+|---|---|
+| `total_assets` | `total_assets` of the balance sheet as at `as_at` |
+| `net_income` | `net_income` of the income statement from `from_date` to `as_at` |
+| `cash_net_change` | `net_change` of the cash flow from `from_date` to `as_at` |
+| `receivables`, `payables` | Base `outstanding` on invoices (bills) issued on or before `as_at`, using today's payment position like the ageing reports (section 17.6) |
+| `trial_balance_total` | Total of the debit column of the trial balance as at `as_at` |
 
 ---
 

@@ -24,6 +24,9 @@ import { useCurrentUser, useLedger } from "@/store/ledgerStore";
 import { useReport } from "@/services/useApiQuery";
 import { fiscalYearFor } from "@/lib/fiscalYears";
 import type { AgeingReport, DashboardStatistics, MonthlyTrendReport } from "@/models/reports";
+import type { JournalListItem } from "@/models/lists";
+import type { AuditEvent } from "@/models/accounting";
+import type { ListData } from "@/core/apiClient";
 import { addMonths, daysBetween, endOfMonth, monthLabel, monthName, startOfMonth, startOfYear, todayIso } from "@/utils/dates";
 import { fmtCompact, fmtCurrency, fmtDate, fmtRelative } from "@/utils/format";
 
@@ -55,8 +58,8 @@ export default function DashboardPage() {
   const daysIntoMonth = daysBetween(startOfMonth(today), today) + 1;
   const monthComplete = today === endOfMonth(thisMonthKey);
 
-  const pending = state.journals.filter((j) => j.status === "PENDING_APPROVAL");
-  const reviewImports = state.importBatches.filter((b) => b.status === "NEEDS_REVIEW" || b.status === "FAILED");
+  const pending = useReport<ListData<JournalListItem>>("/journals/list", { status: "PENDING_APPROVAL", size: 3 }).data?.items ?? [];
+  const activityQuery = useReport<ListData<AuditEvent>>("/audit-logs/list", { size: 7 });
   const troubled = state.dataSources.filter((d) => d.status === "ERROR" || d.status === "WARNING");
   const connected = state.dataSources.filter((d) => d.status !== "NOT_CONNECTED");
 
@@ -82,7 +85,7 @@ export default function DashboardPage() {
       icon: FiFileText,
       tone: "red",
     },
-    { count: reviewImports.length, label: ["import needs review", "imports need review"], href: "/integrations/imports", icon: FiUploadCloud, tone: "amber" },
+    { count: stats?.imports_needing_review ?? 0, label: ["import needs review", "imports need review"], href: "/integrations/imports", icon: FiUploadCloud, tone: "amber" },
     {
       count: troubled.length,
       label: ["integration needs attention", "integrations need attention"],
@@ -210,7 +213,7 @@ export default function DashboardPage() {
           {pending.length > 0 && (
             <div className="mt-4 border-t border-neutral-100 pt-4 dark:border-neutral-700">
               <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-400">Awaiting approval</p>
-              {pending.slice(0, 3).map((j) => (
+              {pending.map((j) => (
                 <button
                   key={j.id}
                   onClick={() => openJournal(j.id)}
@@ -220,9 +223,7 @@ export default function DashboardPage() {
                     <span className="shrink-0 whitespace-nowrap font-mono text-xs text-neutral-500">{j.number}</span>
                     <span className="truncate">{j.memo}</span>
                   </span>
-                  <span className="ml-3 shrink-0 tabular-nums font-medium">
-                    {fmtCurrency(j.lines.reduce((s, l) => s + l.debit, 0))}
-                  </span>
+                  <span className="ml-3 shrink-0 tabular-nums font-medium">{fmtCurrency(j.total)}</span>
                 </button>
               ))}
             </div>
@@ -339,8 +340,15 @@ export default function DashboardPage() {
             </Link>
           }
         >
+          <QueryState
+            query={activityQuery}
+            skeleton={<Skeleton rows={7} />}
+            isEmpty={(d) => d.items.length === 0}
+            empty={<p className="text-sm text-neutral-500">No activity yet.</p>}
+          >
+            {(d) => (
           <ul className="divide-y divide-neutral-100 dark:divide-neutral-700">
-            {state.auditEvents.slice(0, 7).map((e) => (
+            {d.items.map((e) => (
               <li key={e.id} className="flex items-start gap-3 py-2.5">
                 <span
                   className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
@@ -358,6 +366,8 @@ export default function DashboardPage() {
               </li>
             ))}
           </ul>
+            )}
+          </QueryState>
         </Panel>
       </div>
 

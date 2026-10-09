@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import toast from "react-hot-toast";
 import { FiAlertTriangle, FiArchive, FiCalendar, FiPlus, FiRotateCcw, FiXCircle } from "react-icons/fi";
 import { Button, Callout } from "@/components/ui";
@@ -8,7 +8,10 @@ import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import ReasonModal from "./reasonModal";
 import { useJournalViewer } from "./journalViewer";
 import { useLedger } from "@/store/ledgerStore";
-import { fiscalYearFor, fiscalYearsView, NEXT_YEAR_LEAD_DAYS, yearEndPreview, type FiscalYearView } from "@/lib/fiscalYears";
+import { fiscalYearFor, NEXT_YEAR_LEAD_DAYS, type FiscalYearView, type YearEndPreview } from "@/lib/fiscalYears";
+import { useReport } from "@/services/useApiQuery";
+import { QueryState, Skeleton } from "@/components/queryState";
+import type { ListData } from "@/core/apiClient";
 import { classNames, fmtAccounting, fmtCurrency, fmtDate, fmtDateTime } from "@/utils/format";
 import { addDays, todayIso } from "@/utils/dates";
 
@@ -20,7 +23,8 @@ const FiscalYearsPanel = () => {
   const [busy, setBusy] = useState(false);
   const today = todayIso();
 
-  const years = useMemo(() => fiscalYearsView(state), [state]);
+  const yearsQuery = useReport<ListData<FiscalYearView>>("/fiscal-years/list", {});
+  const years = yearsQuery.data?.items ?? [];
   const last = years[years.length - 1];
   const next = last ? fiscalYearFor(state.org, addDays(last.end_date, 1)) : null;
   const nextOpensFrom = next ? addDays(next.start_date, -NEXT_YEAR_LEAD_DAYS) : null;
@@ -58,6 +62,8 @@ const FiscalYearsPanel = () => {
           </Button>
         )}
       </div>
+      <QueryState query={yearsQuery} skeleton={<Skeleton rows={3} />}>
+        {() => (
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         {years.map((y, i) => {
           const current = today >= y.start_date && today <= y.end_date;
@@ -133,6 +139,8 @@ const FiscalYearsPanel = () => {
           );
         })}
       </div>
+        )}
+      </QueryState>
 
       <CloseYearModal fiscalYearId={closing} onClose={() => setClosing(null)} />
       <ReasonModal
@@ -152,7 +160,8 @@ const FiscalYearsPanel = () => {
 const CloseYearModal = ({ fiscalYearId, onClose }: { fiscalYearId: string | null; onClose: () => void }) => {
   const { state, actions } = useLedger();
   const [busy, setBusy] = useState(false);
-  const preview = useMemo(() => (fiscalYearId ? yearEndPreview(state, fiscalYearId) : null), [state, fiscalYearId]);
+  const previewQuery = useReport<YearEndPreview>(fiscalYearId ? "/fiscal-years/close-preview" : null, { fiscal_year_id: fiscalYearId ?? "" });
+  const preview = fiscalYearId && previewQuery.data?.fiscal_year.id === fiscalYearId ? previewQuery.data : null;
   const accounts = new Map(state.accounts.map((a) => [a.id, a]));
   const totals = preview?.lines.reduce((t, l) => ({ debit: t.debit + l.debit, credit: t.credit + l.credit }), { debit: 0, credit: 0 });
 

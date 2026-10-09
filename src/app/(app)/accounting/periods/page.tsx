@@ -5,13 +5,15 @@ import toast from "react-hot-toast";
 import { FiLock, FiUnlock, FiArchive, FiInfo } from "react-icons/fi";
 import { Callout, PageHeader, Toggle, compactInputClass } from "@/components/ui";
 import FiscalYearsPanel from "@/components/accounting/fiscalYearsPanel";
-import { fiscalYearFor, fiscalYearsView } from "@/lib/fiscalYears";
+import { fiscalYearFor, type FiscalYearView } from "@/lib/fiscalYears";
 import StatusBadge from "@/components/statusBadge";
 import StatCard from "@/components/statCard";
 import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { useLedger } from "@/store/ledgerStore";
-import { affectsLedger, lineTotals } from "@/lib/ledger";
+import { useReport } from "@/services/useApiQuery";
+import type { ListData } from "@/core/apiClient";
 import type { FiscalPeriod, PeriodStatus } from "@/models/accounting";
+import type { PeriodStatistics } from "@/models/reports";
 import { fmtCurrency, fmtDate, fmtDateTime } from "@/utils/format";
 import { todayIso } from "@/utils/dates";
 
@@ -33,21 +35,17 @@ export default function PeriodsPage() {
   const [busy, setBusy] = useState(false);
   const today = todayIso();
 
-  const years = fiscalYearsView(state);
+  const years = useReport<ListData<FiscalYearView>>("/fiscal-years/list", {}).data?.items ?? [];
   const currentYear = fiscalYearFor(state.org, today).id;
   const [yearId, setYearId] = useState(currentYear);
   const year = years.find((y) => y.id === yearId) ?? years[years.length - 1];
   const yearPeriods = year ? state.periods.filter((p) => p.start_date >= year.start_date && p.end_date <= year.end_date) : state.periods;
 
+  const periodStats = useReport<ListData<PeriodStatistics>>("/fiscal-periods/statistics", {});
+  const byPeriod = new Map((periodStats.data?.items ?? []).map((s) => [s.period_id, s]));
   const stats = yearPeriods.map((p) => {
-    const js = state.journals.filter((j) => j.date >= p.start_date && j.date <= p.end_date);
-    const posted = js.filter(affectsLedger);
-    return {
-      period: p,
-      posted: posted.length,
-      volume: posted.reduce((s, j) => s + lineTotals(j.lines).debit, 0),
-      open: js.filter((j) => j.status === "DRAFT" || j.status === "PENDING_APPROVAL").length,
-    };
+    const s = byPeriod.get(p.id);
+    return { period: p, posted: s ? s.posted_count : "—", volume: s?.posted_total ?? 0, open: s?.open_count ?? 0 };
   });
 
   const confirm = async () => {
@@ -140,7 +138,7 @@ export default function PeriodsPage() {
                     {posted}
                     {open > 0 && <span className="ml-1 text-xs text-amber-600">+{open} open</span>}
                   </td>
-                  <td className="px-6 py-3 text-right tabular-nums">{volume ? fmtCurrency(volume) : "—"}</td>
+                  <td className="whitespace-nowrap px-6 py-3 text-right tabular-nums">{volume ? fmtCurrency(volume) : "—"}</td>
                   <td className="px-6 py-3">
                     <StatusBadge status={p.status} />
                   </td>

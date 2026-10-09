@@ -10,8 +10,10 @@ import { Tabs } from "@/components/tabs";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import ActionsDropdown from "@/components/actionsDropdown";
 import { useLedger } from "@/store/ledgerStore";
-import { ACCOUNT_TYPE_LABEL, ACCOUNT_TYPE_ORDER, balancesByAccount } from "@/lib/ledger";
+import { ACCOUNT_TYPE_LABEL, ACCOUNT_TYPE_ORDER } from "@/lib/ledger";
 import type { Account, AccountType } from "@/models/accounting";
+import type { AccountBalances } from "@/models/reports";
+import { useReport } from "@/services/useApiQuery";
 import { matchesSearch, useGlobalState } from "@/utils/globalStateContext";
 import { fmtAccounting, humanize } from "@/utils/format";
 import { todayIso } from "@/utils/dates";
@@ -222,12 +224,9 @@ export default function ChartOfAccountsPage() {
   const fields = useEntityFields("Account");
   const listFields = fields.filter((f) => f.show_in_list);
 
-  const balances = useMemo(() => balancesByAccount(state.accounts, state.journals, { to: todayIso() }), [state]);
-  const postedTo = useMemo(() => {
-    const s = new Set<string>();
-    state.journals.forEach((j) => j.lines.forEach((l) => s.add(l.account_id)));
-    return s;
-  }, [state.journals]);
+  const balanceQuery = useReport<AccountBalances>("/accounts/balances", { as_at: todayIso() });
+  const balances = useMemo(() => new Map((balanceQuery.data?.items ?? []).map((b) => [b.account_id, b.balance])), [balanceQuery.data]);
+  const postedCount = balanceQuery.data?.items.filter((b) => b.has_postings).length ?? 0;
 
   const visible = state.accounts
     .filter((a) => tab === "ALL" || a.type === tab)
@@ -400,7 +399,8 @@ export default function ChartOfAccountsPage() {
       </div>
       <p className="mt-3 text-xs text-neutral-500 dark:text-neutral-400">
         Balances are shown in each account&apos;s normal direction; bracketed figures run against it (for example,
-        accumulated depreciation). {postedTo.size} accounts have postings.
+        accumulated depreciation).{balanceQuery.data && ` ${postedCount} accounts have postings.`}
+        {balanceQuery.error && <span className="ml-1 text-red-600">Balances could not be loaded: {balanceQuery.error}</span>}
       </p>
 
       <NewAccountModal open={newOpen} onClose={() => setNewOpen(false)} />

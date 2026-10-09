@@ -7,7 +7,10 @@ import { usePathname } from "next/navigation";
 import { navigation, NavigationItem } from "@/data/sidebarData";
 import { useSidebar } from "@/utils/useSidebar";
 import { useLedger } from "@/store/ledgerStore";
+import { useReport } from "@/services/useApiQuery";
+import type { DashboardStatistics } from "@/models/reports";
 import { classNames } from "@/utils/format";
+import { todayIso } from "@/utils/dates";
 import Brand from "./brand";
 
 const isActive = (pathname: string, href: string) =>
@@ -23,12 +26,13 @@ const Sidebar = ({
   const pathname = usePathname();
   const { mode } = useSidebar();
   const { state } = useLedger();
+  const stats = useReport<DashboardStatistics>("/dashboard/statistics", { as_at: todayIso() }).data;
 
   const badges: Record<string, number> = {
-    Journals: state.journals.filter((j) => j.status === "PENDING_APPROVAL").length,
-    Reconciliation: state.statementLines.filter((l) => l.status !== "MATCHED").length,
+    Journals: stats?.journals_pending_approval ?? 0,
+    Reconciliation: stats?.unmatched_statement_lines ?? 0,
     "Data Sources": state.dataSources.filter((d) => d.status === "ERROR" || d.status === "WARNING").length,
-    Imports: state.importBatches.filter((b) => b.status === "NEEDS_REVIEW").length,
+    Imports: stats?.imports_needing_review ?? 0,
   };
 
   const initialOpen = navigation.find((item) => item.subItems?.some((sub) => pathname === sub.href))?.name ?? null;

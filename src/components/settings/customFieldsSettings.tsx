@@ -14,7 +14,10 @@ import {
   type CustomFieldEntity,
   type CustomFieldType,
 } from "@/models/accounting";
-import { CUSTOM_FIELD_TYPE_LABEL, customFieldUsage, fieldsFor, formatCustomValue } from "@/lib/customFields";
+import { CUSTOM_FIELD_TYPE_LABEL, fieldsFor, formatCustomValue } from "@/lib/customFields";
+import type { CustomFieldUsage } from "@/models/reports";
+import type { ListData } from "@/core/apiClient";
+import { useReport } from "@/services/useApiQuery";
 import { classNames } from "@/utils/format";
 import { usePending } from "@/services/usePending";
 
@@ -62,6 +65,12 @@ const blank = (entity: CustomFieldEntity): FormState => ({
   show_in_list: false,
 });
 
+/** Records holding a value, per custom field id; empty until loaded. */
+const useCustomFieldUsage = () => {
+  const { data } = useReport<ListData<CustomFieldUsage>>("/custom-fields/usage", {});
+  return useMemo(() => new Map((data?.items ?? []).map((u) => [u.custom_field_id, u.record_count])), [data]);
+};
+
 const CustomFieldModal = ({
   open,
   field,
@@ -73,11 +82,12 @@ const CustomFieldModal = ({
   entity: CustomFieldEntity;
   onClose: () => void;
 }) => {
-  const { state, actions } = useLedger();
+  const { actions } = useLedger();
   const [form, setForm] = useState<FormState>(blank(entity));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const used = field ? customFieldUsage(state, field) : 0;
+  const usage = useCustomFieldUsage();
+  const used = field ? (usage.get(field.id) ?? 0) : 0;
 
   useEffect(() => {
     if (!open) return;
@@ -324,10 +334,7 @@ export const CustomFieldsSettings = () => {
   const [deleting, setDeleting] = useState<CustomField | null>(null);
 
   const fields = fieldsFor(state.customFields, entity, { includeInactive: true });
-  const usage = useMemo(
-    () => new Map(state.customFields.map((f) => [f.id, customFieldUsage(state, f)])),
-    [state],
-  );
+  const usage = useCustomFieldUsage();
   const mappedKeys = new Set(state.fieldMappings.map((m) => m.target_field));
   const { pending, track } = usePending();
 

@@ -177,4 +177,47 @@ export interface DashboardStatistics {
   journals_pending_approval: number;
   draft_journals: number;
   unmatched_statement_lines: number;
+  /** Import batches that are NEEDS_REVIEW or FAILED. */
+  imports_needing_review: number;
+}
+
+/** Headline figures for the reports landing page; year to date runs from the start of the fiscal year. */
+export interface ReportsSummary {
+  as_at: string;
+  from_date: string;
+  total_assets: number;
+  net_income: number;
+  cash_net_change: number;
+  receivables: number;
+  payables: number;
+  /** Total of either side of the trial balance. */
+  trial_balance_total: number;
+}
+
+export interface AccountBalance {
+  account_id: string;
+  /** Signed balance (positive is the normal side); group accounts carry the sum of their posting accounts. */
+  balance: number;
+  /** Appears on at least one POSTED or REVERSED journal line (posting accounts only). */
+  has_postings: boolean;
+}
+
+export interface AccountBalances {
+  as_at: string;
+  items: AccountBalance[];
+}
+
+export interface PeriodStatistics {
+  period_id: string;
+  posted_count: number;
+  /** Sum of debits of the period's POSTED and REVERSED journals. */
+  posted_total: number;
+  /** DRAFT and PENDING_APPROVAL journals dated in the period. */
+  open_count: number;
+}
+
+export interface CustomFieldUsage {
+  custom_field_id: string;
+  /** Records of the field's entity holding a non-empty value. */
+  record_count: number;
 }
