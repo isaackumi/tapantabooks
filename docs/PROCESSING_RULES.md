@@ -925,6 +925,10 @@ Audit `FX.REVALUED` (entity type `Journal`, entity id = revaluation journal), su
 
 Response: 201 with the `FxRevaluation`. Detail: `{period name} revalued · {journal number} posted, reversed on {next day}`.
 
+### 10.3 `GET /revaluations/list`
+
+Standard list (section 1.1), newest `as_at` first. Each `FxRevaluation` is returned with `period_name` (the period's name) and `journal_number` / `reversal_journal_number` (the numbers of `journal_id` and `reversal_journal_id`), so the history needs no journal lookups.
+
 ---
 
 ## 11. Banking
@@ -932,6 +936,44 @@ Response: 201 with the `FxRevaluation`. Detail: `{period name} revalued · {jour
 ### 11.1 Bank accounts
 
 Bank accounts (`GET /bank-accounts/list`) link a bank or cash account to a GL account and a currency. There are no endpoints to create or edit them; they come from provisioning. `statement_balance` and `statement_date` describe the latest bank statement and are in the bank account's currency. A foreign bank account's ledger balance is shown in its own currency (the FC balance of its GL account); base-currency accounts show the base balance.
+
+### 11.1a `GET /bank-accounts/balances`
+
+Query `as_at` (default today). One item per bank account, from ledger-affecting journals dated on or before `as_at`:
+
+- `ledger_balance`: in the account's currency. For a foreign account, the sum of `amount_fc` on its GL lines (positive on debits, negative on credits); otherwise debits − credits.
+- `ledger_balance_base`: debits − credits on the GL account (base, at booked rates).
+- `statement_balance`, `statement_date`: copied from the bank account.
+- `statement_difference` = round2(`statement_balance` − `ledger_balance`). It compares the latest statement with the ledger at `as_at`, so payments after the statement date show here until the next statement arrives.
+- `statement_lines`, `unmatched_lines`: the account's statement lines, and those not `MATCHED`.
+
+Totals: `total_base` = sum of `ledger_balance_base`; `unmatched_lines` = sum over accounts; `out_of_agreement` = accounts with a non-zero `statement_difference`.
+
+### 11.1b `GET /bank-accounts/activity`
+
+Standard list (section 1.1) of ledger-affecting journals with at least one line on a bank GL account, newest `date` first and, within a date, highest journal number first. Filters: `bank_account_id` (only journals touching that account), `statement_status`, `from_date` / `to_date` on the journal date, `search` (memo, number).
+
+Per journal:
+
+- Scope lines are the lines on the bank accounts in scope (the filtered account, or every bank account). `bank_account_id` is the account of the first scope line.
+- `is_transfer`: the journal's bank lines (all bank accounts, regardless of filter) include both a debit and a credit.
+- `amount_base` = round2(sum of debit − credit on scope lines); positive is money in. Unfiltered, a transfer nets to about zero.
+- `amount` / `currency`: when the account is foreign and either the list is filtered or the journal is not a transfer, the FC movement on scope lines in the account's currency; otherwise `amount_base` in the base currency.
+- `statement_status`: `MATCHED` when a statement line is matched to the journal, else `SUGGESTED` when one suggests it, else null.
+
+### 11.1c `GET /reconciliation/get`
+
+Query `bank_account_id` (required; 400 when missing, 404 when unknown). Amounts are in the account's currency (see 11.1a for foreign accounts).
+
+- `lines`: the account's statement lines, oldest first, each with `matched_journal_number` / `matched_journal_memo` and `suggested_journal_number` / `suggested_journal_memo` (null when there is no such journal).
+- Window: from the first day of the month of the earliest statement line (or of `statement_date` when there are none) to `statement_date`.
+- `candidates`: ledger-affecting journals in the window that touch the bank GL, are not matched to any of the account's lines, and have a non-zero net on the bank GL (`amount`). `in_transit` is true when no line suggests the journal either; these are listed as "not yet on statement".
+- `ledger_balance`: ledger balance at `statement_date`.
+- `ledger_only_total` = sum of candidate amounts; `statement_only` = sum of amounts of lines not `MATCHED`.
+- `adjusted_balance` = round2(`ledger_balance` − `ledger_only_total` + `statement_only`); `difference` = round2(`statement_balance` − `adjusted_balance`). Zero means everything on the statement is explained by the ledger.
+- `counts`: lines by status.
+
+The ranking of candidates for a line (closest amount, then closest date) is presentation and stays in the client.
 
 ### 11.2 `POST /bank-accounts/transfer`
 
@@ -985,6 +1027,12 @@ Processing:
 - Audit `BANK_STATEMENT.IMPORTED` on the bank account.
 
 Response: 201 with `StatementImportResult` `{ import_id, imported, duplicates, suggested, expected_closing_balance, balance_difference, lines }`. Detail: `{n} lines imported, {d} already held, {s} matched suggested` (zero parts omitted).
+
+### 11.3b `POST /bank-statement-lines/preview`
+
+Read-only; nothing is stored or audited. Body `{ bank_account_id, lines: [{ date, description, amount }] }` (400 when `bank_account_id` is missing or `lines` is not an array, 404 for an unknown account). Applies the import's normalisation (amount rounded to 2 dp, description trimmed with whitespace collapsed) and duplicate rule (section 11.3a) against the account's held lines, without the import's other validation, so the user can see the split while still mapping columns.
+
+Returns `held` (one flag per incoming line, in order; true when it is already held), `new_count`, `duplicate_count`, `brought_forward` / `statement_date` (the account's current statement), and `expected_closing` = round2(`brought_forward` + the new lines dated after `statement_date`), the same figure the import reports as `expected_closing_balance`.
 
 ### 11.4 `POST /reconciliation/match`
 

@@ -11,9 +11,12 @@ import StatusBadge from "@/components/statusBadge";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
 import { useLedger } from "@/store/ledgerStore";
-import { useApiQuery } from "@/services/useApiQuery";
+import { QueryError, Skeleton } from "@/components/queryState";
+import { useReport } from "@/services/useApiQuery";
 import { revaluationJournalLines } from "@/lib/fx";
+import type { ListData } from "@/core/apiClient";
 import type { FxRevaluationLine } from "@/models/accounting";
+import type { RevaluationListItem } from "@/models/banking";
 import { addDays, todayIso } from "@/utils/dates";
 import { CURRENCY_SYMBOL, classNames, fmtAccounting, fmtCurrency, fmtDate, fmtDateTime, fmtMoney, fmtRate } from "@/utils/format";
 
@@ -34,7 +37,7 @@ const KIND_LABEL: Record<FxRevaluationLine["kind"], string> = {
 const Difference = ({ value }: { value: number }) => (
   <span
     className={classNames(
-      "font-medium tabular-nums",
+      "whitespace-nowrap font-medium tabular-nums",
       value > 0 ? "text-emerald-600 dark:text-emerald-400" : value < 0 ? "text-red-600 dark:text-red-400" : "text-neutral-400",
     )}
   >
@@ -75,10 +78,10 @@ const LinesTable = ({ lines }: { lines: FxRevaluationLine[] }) => (
                   <p className="font-medium">{l.label}</p>
                   <p className="text-xs text-neutral-500">{l.currency}</p>
                 </td>
-                <td className="px-4 py-2.5 text-right tabular-nums">{fmtMoney(l.amount_fc, l.currency)}</td>
-                <td className="px-4 py-2.5 text-right tabular-nums">{fmtCurrency(l.carrying_base)}</td>
-                <td className="px-4 py-2.5 text-right tabular-nums">{fmtRate(l.rate)}</td>
-                <td className="px-4 py-2.5 text-right tabular-nums">{fmtCurrency(l.revalued_base)}</td>
+                <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums">{fmtMoney(l.amount_fc, l.currency)}</td>
+                <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums">{fmtCurrency(l.carrying_base)}</td>
+                <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums">{fmtRate(l.rate)}</td>
+                <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums">{fmtCurrency(l.revalued_base)}</td>
                 <td className="px-6 py-2.5 text-right">
                   <Difference value={l.difference} />
                 </td>
@@ -97,16 +100,17 @@ export default function RevaluationPage() {
   const router = useRouter();
   const today = todayIso();
   const ended = useMemo(() => state.periods.filter((p) => p.end_date < today).sort((a, b) => b.end_date.localeCompare(a.end_date)), [state.periods, today]);
-  const revaluedIds = new Set(state.fxRevaluations.map((r) => r.period_id));
-  const [periodId, setPeriodId] = useState(() => ended.find((p) => !revaluedIds.has(p.id))?.id ?? ended[0]?.id ?? "");
+  const historyQuery = useReport<ListData<RevaluationListItem>>("/revaluations/list", { size: 100 });
+  const history = historyQuery.data?.items ?? null;
+  const revaluedIds = new Set(history?.map((r) => r.period_id));
+  const [picked, setPeriodId] = useState<string | null>(null);
+  const periodId = picked ?? (history ? (ended.find((p) => !revaluedIds.has(p.id))?.id ?? ended[0]?.id ?? "") : "");
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const period = state.periods.find((p) => p.id === periodId);
   const asAt = period?.end_date ?? today;
-  const preview =
-    useApiQuery<RevaluationPreview>("/revaluations/preview", { as_at: asAt }, [state.journals, state.exchangeRates]).data ??
-    EMPTY_PREVIEW;
-  const done = state.fxRevaluations.find((r) => r.period_id === periodId);
+  const preview = useReport<RevaluationPreview>(period ? "/revaluations/preview" : null, { as_at: asAt }).data ?? EMPTY_PREVIEW;
+  const done = history?.find((r) => r.period_id === periodId);
   const changed = preview.lines.filter((l) => l.difference !== 0);
   const net = Math.round(preview.lines.reduce((t, l) => t + l.difference, 0) * 100) / 100;
   const journalLines = useMemo(
@@ -157,7 +161,7 @@ export default function RevaluationPage() {
           <Panel tour="reval-periods" title="Month end" bodyClassName="px-3 pb-3">
             <ul className="space-y-1">
               {ended.map((p) => {
-                const r = state.fxRevaluations.find((x) => x.period_id === p.id);
+                const r = revaluedIds.has(p.id);
                 return (
                   <li key={p.id}>
                     <button
@@ -206,11 +210,11 @@ export default function RevaluationPage() {
             <Callout tone="success" icon={FiCheckCircle} title={`${period?.name} has been revalued`}>
               Posted by {done.created_by} on {fmtDateTime(done.created_at)} as{" "}
               <button className="font-mono underline" onClick={() => openJournal(done.journal_id)}>
-                {state.journals.find((j) => j.id === done.journal_id)?.number}
+                {done.journal_number}
               </button>{" "}
               and reversed on {fmtDate(addDays(done.as_at, 1))} by{" "}
               <button className="font-mono underline" onClick={() => openJournal(done.reversal_journal_id)}>
-                {state.journals.find((j) => j.id === done.reversal_journal_id)?.number}
+                {done.reversal_journal_number}
               </button>
               .
             </Callout>
@@ -293,7 +297,13 @@ export default function RevaluationPage() {
           )}
 
           <Panel tour="reval-history" title="History" subtitle="Every revaluation and its automatic reversal" bodyClassName="px-0 pb-2">
-            {state.fxRevaluations.length === 0 ? (
+            {!history ? (
+              historyQuery.error ? (
+                <QueryError message={historyQuery.error} onRetry={historyQuery.refetch} className="mx-6" />
+              ) : (
+                <Skeleton rows={3} className="px-6" />
+              )
+            ) : history.length === 0 ? (
               <p className="px-6 py-4 text-sm text-neutral-500">No revaluations posted yet.</p>
             ) : (
               <table className="min-w-full text-sm">
@@ -307,17 +317,17 @@ export default function RevaluationPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
-                  {state.fxRevaluations.map((r) => (
+                  {history.map((r) => (
                     <tr key={r.id}>
-                      <td className="px-6 py-2.5">{state.periods.find((p) => p.id === r.period_id)?.name}</td>
+                      <td className="px-6 py-2.5">{r.period_name}</td>
                       <td className="px-4 py-2.5">
                         <button className="font-mono text-xs text-brand-700 hover:underline dark:text-brand-300" onClick={() => openJournal(r.journal_id)}>
-                          {state.journals.find((j) => j.id === r.journal_id)?.number}
+                          {r.journal_number}
                         </button>
                       </td>
                       <td className="px-4 py-2.5">
                         <button className="font-mono text-xs text-brand-700 hover:underline dark:text-brand-300" onClick={() => openJournal(r.reversal_journal_id)}>
-                          {state.journals.find((j) => j.id === r.reversal_journal_id)?.number}
+                          {r.reversal_journal_number}
                         </button>
                       </td>
                       <td className="px-4 py-2.5 text-right">

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import toast from "react-hot-toast";
@@ -9,21 +9,29 @@ import { Button, Field, FormError, PageHeader, Panel, inputClass } from "@/compo
 import StatCard from "@/components/statCard";
 import SourceBadge from "@/components/sourceBadge";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
+import { QueryError, QueryState, Skeleton } from "@/components/queryState";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
 import { useLedger } from "@/store/ledgerStore";
-import { bankBaseBalances, bankLedgerBalances } from "@/store/selectors";
+import { useReport } from "@/services/useApiQuery";
+import type { ListData } from "@/core/apiClient";
+import type { BankAccountBalances, BankActivityItem } from "@/models/banking";
 import { FxRateField, useFxRate } from "@/components/fxRateField";
 import { isForeign, toBase } from "@/lib/fx";
-import { affectsLedger, balancesByAccount } from "@/lib/ledger";
 import { BASE_CURRENCY, fmtCurrency, fmtDate, fmtMoney, fmtRelative, round2 } from "@/utils/format";
 import { todayIso } from "@/utils/dates";
+
+const useBankBalances = () => useReport<BankAccountBalances>("/bank-accounts/balances", {});
 
 const TransferModal = ({ open, onClose }: { open: boolean; onClose: () => void }) => {
   const { state, actions } = useLedger();
   const [form, setForm] = useState({ from: "ba_gcb", to: "ba_eco", amount: "", date: todayIso(), memo: "" });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const balances = bankLedgerBalances(state);
+  const balanceQuery = useBankBalances();
+  const balanceHint = (id: string, currency: string | undefined) => {
+    const b = balanceQuery.data?.items.find((i) => i.bank_account_id === id);
+    return b ? `Balance ${fmtMoney(b.ledger_balance, currency)}` : undefined;
+  };
   const from = state.bankAccounts.find((b) => b.id === form.from);
   const to = state.bankAccounts.find((b) => b.id === form.to);
   const fc = [from?.currency, to?.currency].find(isForeign) ?? BASE_CURRENCY;
@@ -69,7 +77,7 @@ const TransferModal = ({ open, onClose }: { open: boolean; onClose: () => void }
     >
       <FormError message={error} />
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <Field label="From" required hint={`Balance ${fmtMoney(balances.get(form.from) ?? 0, from?.currency)}`}>
+        <Field label="From" required hint={balanceHint(form.from, from?.currency)}>
           <select value={form.from} onChange={(e) => setForm((f) => ({ ...f, from: e.target.value }))} className={inputClass}>
             {state.bankAccounts.map((b) => (
               <option key={b.id} value={b.id}>
@@ -78,7 +86,7 @@ const TransferModal = ({ open, onClose }: { open: boolean; onClose: () => void }
             ))}
           </select>
         </Field>
-        <Field label="To" required hint={`Balance ${fmtMoney(balances.get(form.to) ?? 0, to?.currency)}`}>
+        <Field label="To" required hint={balanceHint(form.to, to?.currency)}>
           <select value={form.to} onChange={(e) => setForm((f) => ({ ...f, to: e.target.value }))} className={inputClass}>
             {state.bankAccounts.map((b) => (
               <option key={b.id} value={b.id}>
@@ -129,33 +137,13 @@ export default function BankAccountsPage() {
   const { openJournal } = useJournalViewer();
   const router = useRouter();
   const [transferOpen, setTransferOpen] = useState(false);
-  const balances = useMemo(() => bankLedgerBalances(state), [state]);
-  const baseBalances = useMemo(() => bankBaseBalances(state), [state]);
-  const glBalances = useMemo(() => balancesByAccount(state.accounts, state.journals), [state]);
-  const total = round2([...baseBalances.values()].reduce((s, v) => s + v, 0));
+  const balanceQuery = useBankBalances();
+  const activityQuery = useReport<ListData<BankActivityItem>>("/bank-accounts/activity", { size: 14 });
+  const summary = balanceQuery.data;
+  const balanceOf = new Map(summary?.items.map((i) => [i.bank_account_id, i]));
+  const bankName = new Map(state.bankAccounts.map((b) => [b.id, b.name]));
   const foreignBanks = state.bankAccounts.filter((b) => isForeign(b.currency));
-  const bankGl = new Set(state.bankAccounts.map((b) => b.gl_account_id));
-
-  const recent = useMemo(
-    () =>
-      state.journals
-        .filter((j) => affectsLedger(j) && j.lines.some((l) => bankGl.has(l.account_id)))
-        .sort((a, b) => b.date.localeCompare(a.date) || b.number.localeCompare(a.number))
-        .slice(0, 14)
-        .map((j) => {
-          const bankLines = j.lines.filter((l) => bankGl.has(l.account_id));
-          const net = round2(bankLines.reduce((s, l) => s + l.debit - l.credit, 0));
-          const account = state.bankAccounts.find((b) => b.gl_account_id === bankLines[0].account_id);
-          const transfer = bankLines.some((l) => l.debit > 0) && bankLines.some((l) => l.credit > 0);
-          const fcNet =
-            account && isForeign(account.currency) && !transfer
-              ? round2(bankLines.reduce((s, l) => s + (l.debit > 0 ? 1 : -1) * (l.amount_fc ?? 0), 0))
-              : null;
-          return { journal: j, net, fcNet, account, transfer };
-        }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [state],
-  );
+  const pending = <span className="text-neutral-300 dark:text-neutral-600">—</span>;
 
   return (
     <div>
@@ -174,10 +162,12 @@ export default function BankAccountsPage() {
         }
       />
 
+      {balanceQuery.error && !summary && <QueryError message={balanceQuery.error} onRetry={balanceQuery.refetch} className="mb-6" />}
+
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
         <StatCard
           label="Total cash position"
-          value={fmtCurrency(total)}
+          value={summary ? fmtCurrency(summary.total_base) : pending}
           sub={`${state.bankAccounts.length} accounts${foreignBanks.length ? ` · foreign at booked rates` : ""}`}
           info={
             foreignBanks.length
@@ -187,22 +177,23 @@ export default function BankAccountsPage() {
         />
         <StatCard
           label="Unreconciled statement lines"
-          value={state.statementLines.filter((l) => l.status !== "MATCHED").length}
+          value={summary ? summary.unmatched_lines : pending}
           tone="warning"
           sub="Across all bank feeds"
         />
         <StatCard
-          label="Payroll account"
-          value={fmtCurrency(glBalances.get("acc_1030") ?? 0)}
-          sub="Ecobank, funds ZelosHR payroll"
+          label="Out of agreement"
+          value={summary ? `${summary.out_of_agreement} of ${summary.items.length}` : pending}
+          tone={summary?.out_of_agreement ? "warning" : "default"}
+          sub="Accounts whose ledger differs from the latest statement"
         />
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         {state.bankAccounts.map((b) => {
-          const ledger = balances.get(b.id) ?? 0;
-          const open = state.statementLines.filter((l) => l.bank_account_id === b.id && l.status !== "MATCHED").length;
-          const diff = round2(b.statement_balance - ledger);
+          const bal = balanceOf.get(b.id);
+          const open = bal?.unmatched_lines ?? 0;
+          const diff = bal?.statement_difference ?? 0;
           const foreign = isForeign(b.currency);
           return (
             <div key={b.id} className="flex flex-col rounded-xl border border-neutral-200 bg-white p-5 dark:border-neutral-700 dark:bg-neutral-800">
@@ -221,18 +212,20 @@ export default function BankAccountsPage() {
                 )}
               </p>
               <p className="text-xs text-neutral-500 dark:text-neutral-400">{b.bank}</p>
-              <p className="mt-3 text-2xl font-bold tabular-nums">{fmtMoney(ledger, b.currency)}</p>
+              <p className="mt-3 text-2xl font-bold tabular-nums">{bal ? fmtMoney(bal.ledger_balance, b.currency) : pending}</p>
               <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                Ledger balance{foreign && <> · {fmtCurrency(baseBalances.get(b.id) ?? 0)} booked</>}
+                Ledger balance{foreign && bal && <> · {fmtCurrency(bal.ledger_balance_base)} booked</>}
               </p>
               <dl className="mt-4 space-y-1 border-t border-neutral-100 pt-3 text-xs dark:border-neutral-700">
                 <div className="flex justify-between">
                   <dt className="text-neutral-500">Statement {fmtDate(b.statement_date)}</dt>
-                  <dd className="tabular-nums">{fmtMoney(b.statement_balance, b.currency)}</dd>
+                  <dd className="whitespace-nowrap tabular-nums">{fmtMoney(b.statement_balance, b.currency)}</dd>
                 </div>
                 <div className="flex justify-between">
                   <dt className="text-neutral-500">Difference</dt>
-                  <dd className={`tabular-nums ${diff ? "text-amber-600" : "text-emerald-600"}`}>{diff ? fmtMoney(diff, b.currency) : "None"}</dd>
+                  <dd className={`whitespace-nowrap tabular-nums ${diff ? "text-amber-600" : "text-emerald-600"}`}>
+                    {!bal ? pending : diff ? fmtMoney(diff, b.currency) : "None"}
+                  </dd>
                 </div>
                 <div className="flex justify-between">
                   <dt className="text-neutral-500">Last reconciled</dt>
@@ -261,45 +254,58 @@ export default function BankAccountsPage() {
       </div>
 
       <Panel title="Recent bank activity" subtitle="Latest posted entries touching bank, MoMo or cash" className="mt-6" bodyClassName="p-0 pt-2">
-        <table className="min-w-full text-sm">
-          <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
-            {recent.map(({ journal: j, net, fcNet, account, transfer }) => (
-              <tr key={j.id} onClick={() => openJournal(j.id)} className="cursor-pointer hover:bg-neutral-50 dark:hover:bg-neutral-700/40">
-                <td className="w-12 py-3 pl-6">
-                  <span
-                    className={`flex h-8 w-8 items-center justify-center rounded-full ${
-                      transfer
-                        ? "bg-neutral-100 text-neutral-500 dark:bg-neutral-700"
-                        : net > 0
-                          ? "bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30"
-                          : "bg-red-50 text-red-600 dark:bg-red-900/30"
-                    }`}
-                  >
-                    {transfer ? <FiRepeat /> : net > 0 ? <FiArrowDownLeft /> : <FiArrowUpRight />}
-                  </span>
-                </td>
-                <td className="px-4 py-3">
-                  <p className="max-w-lg truncate font-medium">{j.memo}</p>
-                  <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                    {fmtDate(j.date)} · {transfer ? "Internal transfer" : account?.name}
-                  </p>
-                </td>
-                <td className="px-4 py-3">
-                  <SourceBadge type={j.source.type} />
-                </td>
-                <td className={`px-6 py-3 text-right font-medium tabular-nums ${net > 0 ? "text-emerald-600 dark:text-emerald-400" : ""}`}>
-                  {transfer ? "—" : `${net > 0 ? "+" : ""}${fmtCurrency(net)}`}
-                  {fcNet ? (
-                    <p className="text-xs font-normal text-neutral-500">
-                      {fcNet > 0 ? "+" : ""}
-                      {fmtMoney(fcNet, account!.currency)}
-                    </p>
-                  ) : null}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <QueryState
+          query={activityQuery}
+          className="pb-2"
+          skeleton={<Skeleton className="px-6" />}
+          isEmpty={(d) => d.items.length === 0}
+          empty={<p className="px-6 py-6 text-center text-sm text-neutral-500">Nothing posted to a bank, MoMo or cash account yet.</p>}
+        >
+          {(data) => (
+            <table className="min-w-full text-sm">
+              <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
+                {data.items.map((a) => {
+                  const net = a.amount_base;
+                  return (
+                    <tr key={a.journal_id} onClick={() => openJournal(a.journal_id)} className="cursor-pointer hover:bg-neutral-50 dark:hover:bg-neutral-700/40">
+                      <td className="w-12 py-3 pl-6">
+                        <span
+                          className={`flex h-8 w-8 items-center justify-center rounded-full ${
+                            a.is_transfer
+                              ? "bg-neutral-100 text-neutral-500 dark:bg-neutral-700"
+                              : net > 0
+                                ? "bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30"
+                                : "bg-red-50 text-red-600 dark:bg-red-900/30"
+                          }`}
+                        >
+                          {a.is_transfer ? <FiRepeat /> : net > 0 ? <FiArrowDownLeft /> : <FiArrowUpRight />}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <p className="max-w-lg truncate font-medium">{a.memo}</p>
+                        <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                          {fmtDate(a.date)} · {a.is_transfer ? "Internal transfer" : bankName.get(a.bank_account_id)}
+                        </p>
+                      </td>
+                      <td className="px-4 py-3">
+                        <SourceBadge type={a.source_type} />
+                      </td>
+                      <td className={`px-6 py-3 text-right font-medium tabular-nums ${!a.is_transfer && net > 0 ? "text-emerald-600 dark:text-emerald-400" : ""}`}>
+                        {a.is_transfer ? "—" : `${net > 0 ? "+" : ""}${fmtCurrency(net)}`}
+                        {!a.is_transfer && isForeign(a.currency) ? (
+                          <p className="text-xs font-normal text-neutral-500">
+                            {a.amount > 0 ? "+" : ""}
+                            {fmtMoney(a.amount, a.currency)}
+                          </p>
+                        ) : null}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </QueryState>
       </Panel>
 
       <TransferModal open={transferOpen} onClose={() => setTransferOpen(false)} />

@@ -50,6 +50,7 @@ import { bankBaseBalances, billRows, invoiceRows, type DocumentRow } from "@/sto
 import { round2 } from "@/utils/format";
 import { addDays, addMonths, daysBetween, endOfMonth, todayIso } from "@/utils/dates";
 import { openingBalancesView, revaluationPreview, type LedgerEngine, type LedgerState } from "./engine";
+import { bankActivity, bankBalances, reconciliationView, revaluationItems, statementImportPreview } from "./banking";
 import { ApiFault, found, fromResult, listResult, need, type HandlerResult, type ListOptions } from "./http";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- request bodies are untyped JSON */
@@ -526,7 +527,7 @@ const HANDLERS: Record<string, Handler> = {
   "POST /fiscal-years/add": ({ engine }) => fromResult(engine.addFiscalYear(), 201),
 
   // ---- FX revaluation -------------------------------------------------------------------------
-  "GET /revaluations/list": ({ state, q }) => listResult(state.fxRevaluations, q, { defaultSort: { field: "as_at", order: "desc" } }),
+  "GET /revaluations/list": ({ state, q }) => listResult(revaluationItems(state), q, { defaultSort: { field: "as_at", order: "desc" } }),
   "GET /revaluations/preview": ({ state, q }) => ({ data: revaluationPreview(state, need(q.get("as_at"), "as_at")) }),
   "POST /revaluations/run": ({ engine, q }) => fromResult(engine.runRevaluation(need(q.get("period_id"), "period_id")), 201),
 
@@ -608,6 +609,13 @@ const HANDLERS: Record<string, Handler> = {
 
   // ---- Banking -----------------------------------------------------------------------------------------------------
   "GET /bank-accounts/list": ({ state, q }) => listResult(state.bankAccounts, q, { search: ["name", "bank", "account_number"] }),
+  "GET /bank-accounts/balances": ({ state, q }) => ({ data: bankBalances(state, q.get("as_at") || undefined) }),
+  "GET /bank-accounts/activity": ({ state, q }) =>
+    listResult(bankActivity(state, q.get("bank_account_id") || null), q, {
+      search: ["memo", "number"],
+      filters: { statement_status: "statement_status" },
+      dateField: "date",
+    }),
   "POST /bank-accounts/transfer": ({ engine, body }) =>
     fromResult(
       engine.transferFunds({
@@ -640,6 +648,8 @@ const HANDLERS: Record<string, Handler> = {
       }),
       201,
     ),
+  "POST /bank-statement-lines/preview": ({ state, body }) => ({ data: statementImportPreview(state, body ?? {}) }),
+  "GET /reconciliation/get": ({ state, q }) => ({ data: reconciliationView(state, need(q.get("bank_account_id"), "bank_account_id")) }),
   "POST /reconciliation/match": ({ engine, body }) =>
     fromResult(engine.matchStatementLine(need(body.statement_line_id, "statement_line_id"), need(body.journal_id, "journal_id"))),
   "POST /reconciliation/unmatch": ({ engine, q }) =>

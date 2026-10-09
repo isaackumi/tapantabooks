@@ -522,7 +522,7 @@ export const ENDPOINTS: EndpointDef[] = [
   },
 
   // ---- FX revaluation ----------------------------------------------------
-  list("FX revaluation", "/revaluations/list", "revaluation", "FxRevaluation"),
+  list("FX revaluation", "/revaluations/list", "revaluation", "RevaluationListItem (FxRevaluation + period_name, journal_number, reversal_journal_number)"),
   {
     method: "GET",
     path: "/revaluations/preview",
@@ -791,6 +791,24 @@ export const ENDPOINTS: EndpointDef[] = [
   // ---- Banking -------------------------------------------------------------
   list("Banking", "/bank-accounts/list", "bank-account", "BankAccount"),
   {
+    method: "GET",
+    path: "/bank-accounts/balances",
+    module: "Banking",
+    summary: "Ledger balance of every bank account in its own currency and in base, its difference from the latest statement and unmatched statement lines",
+    query: { as_at: "YYYY-MM-DD (default today)" },
+    returns: "BankAccountBalances",
+    permission: perm("bank-account", "list"),
+  },
+  {
+    ...list("Banking", "/bank-accounts/activity", "bank-account", "BankActivityItem", {
+      bank_account_id: "Only this account; amounts are then its own movement",
+      statement_status: "UNMATCHED | SUGGESTED | MATCHED (status of the statement line referring to the journal)",
+      from_date: "YYYY-MM-DD",
+      to_date: "YYYY-MM-DD",
+    }),
+    summary: "Posted journals touching bank, MoMo or cash accounts, newest first (paginated)",
+  },
+  {
     method: "POST",
     path: "/bank-accounts/transfer",
     module: "Banking",
@@ -815,6 +833,24 @@ export const ENDPOINTS: EndpointDef[] = [
     returns: "StatementImportResult",
     permission: perm("bank-statement", "import"),
     invalidates: ["statementLines", "bankAccounts", ...AUDIT],
+  },
+  {
+    method: "POST",
+    path: "/bank-statement-lines/preview",
+    module: "Banking",
+    summary: "Read-only: which lines of a statement file the account already holds and the closing balance the new lines imply",
+    body: "StatementImportPreviewInput",
+    returns: "StatementImportPreview",
+    permission: perm("bank-statement", "import"),
+  },
+  {
+    method: "GET",
+    path: "/reconciliation/get",
+    module: "Banking",
+    summary: "Reconciliation of one account to its latest statement: summary, statement lines with their matches, and unmatched ledger entries",
+    query: { bank_account_id: "Bank account id (required)" },
+    returns: "BankReconciliation",
+    permission: perm("reconciliation", "get"),
   },
   {
     method: "POST",

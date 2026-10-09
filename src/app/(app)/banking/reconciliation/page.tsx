@@ -1,21 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
 import { FiCheck, FiCheckCircle, FiLink, FiPlus, FiSearch, FiUpload, FiX, FiZap } from "react-icons/fi";
 import { Button, Callout, Field, FormError, PageHeader, Panel, compactInputClass, inputClass } from "@/components/ui";
 import { Tabs } from "@/components/tabs";
 import StatusBadge from "@/components/statusBadge";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
+import { QueryError, Skeleton } from "@/components/queryState";
 import AccountSelect from "@/components/accounting/accountSelect";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
 import StatementImportModal from "@/components/banking/statementImportModal";
 import { useLedger } from "@/store/ledgerStore";
-import { affectsLedger, balancesByAccount } from "@/lib/ledger";
-import type { BankStatementLine, JournalEntry } from "@/models/accounting";
+import { useReport } from "@/services/useApiQuery";
+import type { BankAccountBalances, BankReconciliation, ReconciliationCandidate, ReconciliationLine } from "@/models/banking";
 import { useQueryParam } from "@/utils/useQueryParam";
 import { usePending } from "@/services/usePending";
-import { fmtCurrency, fmtDate, fmtDateTime, round2 } from "@/utils/format";
+import { fmtDate, fmtDateTime, fmtMoney } from "@/utils/format";
 import { daysBetween } from "@/utils/dates";
 
 const notCash = (a: { is_bank: boolean }) => !a.is_bank;
@@ -23,57 +24,27 @@ const notCash = (a: { is_bank: boolean }) => !a.is_bank;
 export default function ReconciliationPage() {
   const { state, actions } = useLedger();
   const { openJournal } = useJournalViewer();
-  const banksWithFeed = state.bankAccounts.filter((b) => state.statementLines.some((l) => l.bank_account_id === b.id));
-  const [bankId, setBankId] = useState(banksWithFeed[0]?.id ?? state.bankAccounts[0].id);
+  const balances = useReport<BankAccountBalances>("/bank-accounts/balances", {});
+  const [picked, setBankId] = useState<string | null>(null);
   const [tab, setTab] = useState("REVIEW");
-  const [matching, setMatching] = useState<BankStatementLine | null>(null);
-  const [creating, setCreating] = useState<BankStatementLine | null>(null);
+  const [matching, setMatching] = useState<ReconciliationLine | null>(null);
+  const [creating, setCreating] = useState<ReconciliationLine | null>(null);
   const [importing, setImporting] = useState(false);
   useQueryParam("account", setBankId);
 
-  const bank = state.bankAccounts.find((b) => b.id === bankId)!;
-  const lines = state.statementLines.filter((l) => l.bank_account_id === bankId).sort((a, b) => a.date.localeCompare(b.date));
+  const firstWithFeed = balances.data?.items.find((i) => i.statement_lines > 0)?.bank_account_id;
+  const bankId = picked ?? (balances.data ? (firstWithFeed ?? state.bankAccounts[0]?.id ?? null) : null);
+  const bank = state.bankAccounts.find((b) => b.id === bankId);
+  const recQuery = useReport<BankReconciliation>(bankId ? "/reconciliation/get" : null, { bank_account_id: bankId ?? "" });
+  const rec = recQuery.data?.bank_account_id === bankId ? recQuery.data : null;
+  const money = (v: number) => fmtMoney(v, rec?.currency);
 
-  const rec = useMemo(() => {
-    const netOnBank = (j: JournalEntry) =>
-      round2(j.lines.filter((l) => l.account_id === bank.gl_account_id).reduce((s, l) => s + l.debit - l.credit, 0));
-    const firstLine = lines[0]?.date ?? bank.statement_date;
-    const windowStart = `${firstLine.slice(0, 7)}-01`;
-    const matched = new Set(lines.map((l) => l.matched_journal_id).filter(Boolean));
-    const ledgerBalance =
-      balancesByAccount(state.accounts, state.journals, { to: bank.statement_date }).get(bank.gl_account_id) ?? 0;
-    const ledgerOnly = state.journals
-      .filter(
-        (j) =>
-          affectsLedger(j) &&
-          j.date >= windowStart &&
-          j.date <= bank.statement_date &&
-          !matched.has(j.id) &&
-          j.lines.some((l) => l.account_id === bank.gl_account_id),
-      )
-      .map((j) => ({ journal: j, net: netOnBank(j) }))
-      .filter((x) => x.net !== 0);
-    const suggestedIds = new Set(lines.map((l) => l.suggested_journal_id).filter(Boolean));
-    const inTransit = ledgerOnly.filter((x) => !suggestedIds.has(x.journal.id));
-    const statementOnly = round2(lines.filter((l) => l.status !== "MATCHED").reduce((s, l) => s + l.amount, 0));
-    const ledgerOnlyTotal = round2(ledgerOnly.reduce((s, x) => s + x.net, 0));
-    const adjusted = round2(ledgerBalance - ledgerOnlyTotal + statementOnly);
-    return {
-      ledgerBalance,
-      ledgerOnly,
-      inTransit,
-      statementOnly,
-      ledgerOnlyTotal,
-      adjusted,
-      difference: round2(bank.statement_balance - adjusted),
-    };
-  }, [state, bank, lines]);
-
-  const matchedCount = lines.filter((l) => l.status === "MATCHED").length;
+  const lines = rec?.lines ?? [];
+  const matchedCount = rec?.counts.MATCHED ?? 0;
   const review = lines.filter((l) => l.status !== "MATCHED");
   const shown = tab === "REVIEW" ? review : lines.filter((l) => l.status === "MATCHED");
   const progress = lines.length ? Math.round((matchedCount / lines.length) * 100) : 100;
-  const journalById = new Map(state.journals.map((j) => [j.id, j]));
+  const inTransit = rec?.candidates.filter((c) => c.in_transit) ?? [];
 
   const { pending, track, anyPending } = usePending();
   const run = (res: { ok: boolean; message?: string; error?: string }) => {
@@ -91,6 +62,9 @@ export default function ReconciliationPage() {
     });
   const lineBusy = (id: string) => pending(id) || pending("all");
 
+  const loadError = balances.data ? (rec ? null : recQuery.error) : balances.error;
+  const retry = balances.data ? recQuery.refetch : balances.refetch;
+
   return (
     <div>
       <PageHeader
@@ -98,22 +72,28 @@ export default function ReconciliationPage() {
         description="Match each statement line to the ledger. Lines with no ledger entry (bank charges, interest, unknown deposits) can be posted from here."
         actions={
           <>
-            <select value={bankId} onChange={(e) => setBankId(e.target.value)} className={`${compactInputClass} w-60`} data-tour="rec-bank">
+            <select
+              value={bankId ?? ""}
+              onChange={(e) => setBankId(e.target.value)}
+              disabled={!bankId}
+              className={`${compactInputClass} w-60`}
+              data-tour="rec-bank"
+            >
               {state.bankAccounts.map((b) => (
                 <option key={b.id} value={b.id}>
                   {b.name}
                 </option>
               ))}
             </select>
-            <Button variant="secondary" icon={FiUpload} onClick={() => setImporting(true)} data-tour="rec-import">
+            <Button variant="secondary" icon={FiUpload} disabled={!bank} onClick={() => setImporting(true)} data-tour="rec-import">
               Import statement
             </Button>
             <Button
               icon={FiCheckCircle}
               data-tour="rec-complete"
-              disabled={review.length > 0 || lines.length === 0 || anyPending}
+              disabled={!rec || review.length > 0 || lines.length === 0 || anyPending}
               title={review.length ? "Match every line first" : undefined}
-              onClick={() => track("complete", async () => run(await actions.completeReconciliation(bank.id)))}
+              onClick={() => track("complete", async () => bank && run(await actions.completeReconciliation(bank.id)))}
             >
               {pending("complete") ? "Completing…" : "Complete reconciliation"}
             </Button>
@@ -121,9 +101,17 @@ export default function ReconciliationPage() {
         }
       />
 
-      {lines.length === 0 ? (
+      {!rec || !bank ? (
+        loadError ? (
+          <QueryError message={loadError} onRetry={retry} />
+        ) : (
+          <Panel title="Reconciliation summary">
+            <Skeleton rows={7} />
+          </Panel>
+        )
+      ) : lines.length === 0 ? (
         <Callout tone="info" title="No statement lines for this account yet">
-          {bank.name} was last reconciled {fmtDateTime(bank.last_reconciled_at)}. Import the bank&apos;s CSV statement to reconcile it
+          {bank.name} was last reconciled {fmtDateTime(rec.last_reconciled_at)}. Import the bank&apos;s CSV statement to reconcile it
           here.
           <div className="mt-3">
             <Button size="sm" icon={FiUpload} onClick={() => setImporting(true)}>
@@ -132,30 +120,31 @@ export default function ReconciliationPage() {
           </div>
         </Callout>
       ) : (
-        <>
+        <div aria-busy={recQuery.loading}>
+          {recQuery.error && <QueryError message={`Showing the last figures loaded. ${recQuery.error}`} onRetry={recQuery.refetch} className="mb-4" />}
           <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
-            <Panel tour="rec-summary" title="Reconciliation summary" subtitle={`Statement to ${fmtDate(bank.statement_date)}`} className="xl:col-span-2">
+            <Panel tour="rec-summary" title="Reconciliation summary" subtitle={`Statement to ${fmtDate(rec.statement_date)}`} className="xl:col-span-2">
               <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
                 <dl className="space-y-2 text-sm">
                   <div className="flex justify-between">
                     <dt className="text-neutral-500 dark:text-neutral-400">Balance per ledger</dt>
-                    <dd className="tabular-nums font-medium">{fmtCurrency(rec.ledgerBalance)}</dd>
+                    <dd className="whitespace-nowrap tabular-nums font-medium">{money(rec.ledger_balance)}</dd>
                   </div>
                   <div className="flex justify-between">
                     <dt className="text-neutral-500 dark:text-neutral-400">Less: in ledger, not yet on statement</dt>
-                    <dd className="tabular-nums">{fmtCurrency(-rec.ledgerOnlyTotal)}</dd>
+                    <dd className="whitespace-nowrap tabular-nums">{money(-rec.ledger_only_total)}</dd>
                   </div>
                   <div className="flex justify-between">
                     <dt className="text-neutral-500 dark:text-neutral-400">Add: on statement, not yet matched</dt>
-                    <dd className="tabular-nums">{fmtCurrency(rec.statementOnly)}</dd>
+                    <dd className="whitespace-nowrap tabular-nums">{money(rec.statement_only)}</dd>
                   </div>
                   <div className="flex justify-between border-t border-neutral-200 pt-2 font-semibold dark:border-neutral-700">
                     <dt>Expected statement balance</dt>
-                    <dd className="tabular-nums">{fmtCurrency(rec.adjusted)}</dd>
+                    <dd className="whitespace-nowrap tabular-nums">{money(rec.adjusted_balance)}</dd>
                   </div>
                   <div className="flex justify-between">
                     <dt className="text-neutral-500 dark:text-neutral-400">Balance per bank statement</dt>
-                    <dd className="tabular-nums font-medium">{fmtCurrency(bank.statement_balance)}</dd>
+                    <dd className="whitespace-nowrap tabular-nums font-medium">{money(rec.statement_balance)}</dd>
                   </div>
                   <div
                     className={`flex justify-between rounded-lg px-2 py-1.5 font-semibold ${
@@ -163,7 +152,7 @@ export default function ReconciliationPage() {
                     }`}
                   >
                     <dt>Unexplained difference</dt>
-                    <dd className="tabular-nums">{fmtCurrency(rec.difference)}</dd>
+                    <dd className="whitespace-nowrap tabular-nums">{money(rec.difference)}</dd>
                   </div>
                 </dl>
                 <div>
@@ -179,33 +168,31 @@ export default function ReconciliationPage() {
                   <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
                     {(["MATCHED", "SUGGESTED", "UNMATCHED"] as const).map((s) => (
                       <div key={s} className="rounded-lg bg-neutral-50 p-2 dark:bg-neutral-900/40">
-                        <p className="text-lg font-bold tabular-nums">{lines.filter((l) => l.status === s).length}</p>
+                        <p className="text-lg font-bold tabular-nums">{rec.counts[s]}</p>
                         <StatusBadge status={s} />
                       </div>
                     ))}
                   </div>
-                  <p className="mt-4 text-xs text-neutral-500 dark:text-neutral-400">
-                    Last completed {fmtDateTime(bank.last_reconciled_at)}.
-                  </p>
+                  <p className="mt-4 text-xs text-neutral-500 dark:text-neutral-400">Last completed {fmtDateTime(rec.last_reconciled_at)}.</p>
                 </div>
               </div>
             </Panel>
 
             <Panel tour="rec-transit" title="Not yet on statement" subtitle="Posted in the ledger, waiting to clear">
-              {rec.inTransit.length === 0 ? (
+              {inTransit.length === 0 ? (
                 <p className="text-sm text-neutral-500">Nothing outstanding.</p>
               ) : (
                 <ul className="divide-y divide-neutral-100 dark:divide-neutral-700">
-                  {rec.inTransit.map(({ journal: j, net }) => (
-                    <li key={j.id}>
-                      <button onClick={() => openJournal(j.id)} className="flex w-full items-center justify-between py-2 text-left text-sm">
+                  {inTransit.map((c) => (
+                    <li key={c.journal_id}>
+                      <button onClick={() => openJournal(c.journal_id)} className="flex w-full items-center justify-between py-2 text-left text-sm">
                         <span className="min-w-0">
-                          <span className="block truncate">{j.memo}</span>
+                          <span className="block truncate">{c.memo}</span>
                           <span className="text-xs text-neutral-500">
-                            {j.number} · {fmtDate(j.date)} · {daysBetween(j.date, bank.statement_date)}d
+                            {c.number} · {fmtDate(c.date)} · {daysBetween(c.date, rec.statement_date)}d
                           </span>
                         </span>
-                        <span className={`ml-3 shrink-0 tabular-nums ${net > 0 ? "text-emerald-600" : ""}`}>{fmtCurrency(net)}</span>
+                        <span className={`ml-3 shrink-0 tabular-nums ${c.amount > 0 ? "text-emerald-600" : ""}`}>{money(c.amount)}</span>
                       </button>
                     </li>
                   ))}
@@ -222,7 +209,7 @@ export default function ReconciliationPage() {
             value={tab}
             onChange={setTab}
             actions={
-              lines.some((l) => l.status === "SUGGESTED") && (
+              rec.counts.SUGGESTED > 0 && (
                 <Button variant="secondary" icon={FiZap} disabled={anyPending} onClick={acceptAllSuggestions}>
                   {pending("all") ? "Accepting…" : "Accept all suggestions"}
                 </Button>
@@ -250,107 +237,104 @@ export default function ReconciliationPage() {
                     </td>
                   </tr>
                 )}
-                {shown.map((l) => {
-                  const suggestion = l.suggested_journal_id ? journalById.get(l.suggested_journal_id) : undefined;
-                  const match = l.matched_journal_id ? journalById.get(l.matched_journal_id) : undefined;
-                  return (
-                    <tr key={l.id}>
-                      <td className="whitespace-nowrap px-4 py-3">{fmtDate(l.date)}</td>
-                      <td className="px-4 py-3 font-mono text-xs">{l.description}</td>
-                      <td className="px-4 py-3 text-right tabular-nums text-emerald-600 dark:text-emerald-400">
-                        {l.amount > 0 ? fmtCurrency(l.amount) : ""}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums">{l.amount < 0 ? fmtCurrency(-l.amount) : ""}</td>
-                      <td className="px-4 py-3">
-                        {match ? (
-                          <button onClick={() => openJournal(match.id)} className="text-left">
-                            <span className="font-mono text-xs text-brand-700 dark:text-brand-300">{match.number}</span>
-                            <span className="block max-w-xs truncate text-xs text-neutral-500">{match.memo}</span>
-                          </button>
-                        ) : suggestion ? (
-                          <button onClick={() => openJournal(suggestion.id)} className="text-left">
-                            <span className="inline-flex items-center gap-1 text-xs text-blue-700 dark:text-blue-300">
-                              <FiZap className="h-3 w-3" /> Suggested: <span className="font-mono">{suggestion.number}</span>
-                            </span>
-                            <span className="block max-w-xs truncate text-xs text-neutral-500">{suggestion.memo}</span>
-                          </button>
+                {shown.map((l) => (
+                  <tr key={l.id}>
+                    <td className="whitespace-nowrap px-4 py-3">{fmtDate(l.date)}</td>
+                    <td className="px-4 py-3 font-mono text-xs">{l.description}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums text-emerald-600 dark:text-emerald-400">{l.amount > 0 ? money(l.amount) : ""}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums">{l.amount < 0 ? money(-l.amount) : ""}</td>
+                    <td className="px-4 py-3">
+                      {l.matched_journal_id ? (
+                        <button onClick={() => openJournal(l.matched_journal_id!)} className="text-left">
+                          <span className="font-mono text-xs text-brand-700 dark:text-brand-300">{l.matched_journal_number}</span>
+                          <span className="block max-w-xs truncate text-xs text-neutral-500">{l.matched_journal_memo}</span>
+                        </button>
+                      ) : l.suggested_journal_id ? (
+                        <button onClick={() => openJournal(l.suggested_journal_id!)} className="text-left">
+                          <span className="inline-flex items-center gap-1 text-xs text-blue-700 dark:text-blue-300">
+                            <FiZap className="h-3 w-3" /> Suggested: <span className="font-mono">{l.suggested_journal_number}</span>
+                          </span>
+                          <span className="block max-w-xs truncate text-xs text-neutral-500">{l.suggested_journal_memo}</span>
+                        </button>
+                      ) : (
+                        <StatusBadge status="UNMATCHED" label="No ledger entry found" />
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex justify-end gap-1.5">
+                        {l.status === "MATCHED" ? (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            icon={FiX}
+                            disabled={lineBusy(l.id)}
+                            onClick={() => track(l.id, async () => run(await actions.unmatchStatementLine(l.id)))}
+                          >
+                            Unmatch
+                          </Button>
                         ) : (
-                          <StatusBadge status="UNMATCHED" label="No ledger entry found" />
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex justify-end gap-1.5">
-                          {l.status === "MATCHED" ? (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              icon={FiX}
-                              disabled={lineBusy(l.id)}
-                              onClick={() => track(l.id, async () => run(await actions.unmatchStatementLine(l.id)))}
-                            >
-                              Unmatch
+                          <>
+                            {l.suggested_journal_id && (
+                              <Button
+                                size="sm"
+                                icon={FiCheck}
+                                disabled={lineBusy(l.id)}
+                                onClick={() => track(l.id, async () => run(await actions.matchStatementLine(l.id, l.suggested_journal_id!)))}
+                              >
+                                Accept
+                              </Button>
+                            )}
+                            <Button size="sm" variant="secondary" icon={FiSearch} onClick={() => setMatching(l)}>
+                              Find
                             </Button>
-                          ) : (
-                            <>
-                              {suggestion && (
-                                <Button
-                                  size="sm"
-                                  icon={FiCheck}
-                                  disabled={lineBusy(l.id)}
-                                  onClick={() => track(l.id, async () => run(await actions.matchStatementLine(l.id, suggestion.id)))}
-                                >
-                                  Accept
-                                </Button>
-                              )}
-                              <Button size="sm" variant="secondary" icon={FiSearch} onClick={() => setMatching(l)}>
-                                Find
-                              </Button>
-                              <Button size="sm" variant="secondary" icon={FiPlus} onClick={() => setCreating(l)}>
-                                Create
-                              </Button>
-                            </>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
+                            <Button size="sm" variant="secondary" icon={FiPlus} onClick={() => setCreating(l)}>
+                              Create
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
-        </>
+        </div>
       )}
 
       <FindMatchModal
         line={matching}
-        candidates={rec.ledgerOnly}
+        currency={rec?.currency}
+        candidates={rec?.candidates ?? []}
         onClose={() => setMatching(null)}
         onMatch={async (journalId) => {
           if (matching && run(await actions.matchStatementLine(matching.id, journalId))) setMatching(null);
         }}
       />
-      <CreateEntryModal line={creating} onClose={() => setCreating(null)} />
-      <StatementImportModal bankId={bankId} open={importing} onClose={() => setImporting(false)} />
+      <CreateEntryModal line={creating} currency={rec?.currency} onClose={() => setCreating(null)} />
+      {bank && <StatementImportModal bankId={bank.id} open={importing} onClose={() => setImporting(false)} />}
     </div>
   );
 }
 
 const FindMatchModal = ({
   line,
+  currency,
   candidates,
   onClose,
   onMatch,
 }: {
-  line: BankStatementLine | null;
-  candidates: { journal: JournalEntry; net: number }[];
+  line: ReconciliationLine | null;
+  currency: string | undefined;
+  candidates: ReconciliationCandidate[];
   onClose: () => void;
   onMatch: (journalId: string) => void;
 }) => {
   const ranked = line
     ? [...candidates].sort(
         (a, b) =>
-          Math.abs(a.net - line.amount) - Math.abs(b.net - line.amount) ||
-          Math.abs(daysBetween(a.journal.date, line.date)) - Math.abs(daysBetween(b.journal.date, line.date)),
+          Math.abs(a.amount - line.amount) - Math.abs(b.amount - line.amount) ||
+          Math.abs(daysBetween(a.date, line.date)) - Math.abs(daysBetween(b.date, line.date)),
       )
     : [];
   return (
@@ -359,27 +343,27 @@ const FindMatchModal = ({
       onClose={onClose}
       size="3xl"
       title="Match to a ledger entry"
-      description={line ? `${line.description} · ${fmtCurrency(line.amount)} on ${fmtDate(line.date)}` : ""}
+      description={line ? `${line.description} · ${fmtMoney(line.amount, currency)} on ${fmtDate(line.date)}` : ""}
       buttons={[{ label: "Close", onClick: onClose, className: BTN_SECONDARY }]}
     >
       {ranked.length === 0 ? (
         <p className="text-sm text-neutral-500">No unmatched ledger entries in this statement period. Create an entry instead.</p>
       ) : (
         <ul className="divide-y divide-neutral-100 rounded-xl border border-neutral-200 dark:divide-neutral-700 dark:border-neutral-700">
-          {ranked.slice(0, 12).map(({ journal: j, net }) => {
-            const exact = line && Math.abs(net - line.amount) < 0.005;
+          {ranked.slice(0, 12).map((c) => {
+            const exact = line && Math.abs(c.amount - line.amount) < 0.005;
             return (
-              <li key={j.id} className="flex items-center justify-between gap-4 px-4 py-3">
+              <li key={c.journal_id} className="flex items-center justify-between gap-4 px-4 py-3">
                 <div className="min-w-0 text-sm">
-                  <p className="truncate font-medium">{j.memo}</p>
+                  <p className="truncate font-medium">{c.memo}</p>
                   <p className="text-xs text-neutral-500">
-                    {j.number} · {fmtDate(j.date)}
+                    {c.number} · {fmtDate(c.date)}
                     {exact && <span className="ml-2 font-medium text-emerald-600">exact amount</span>}
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-3">
-                  <span className="tabular-nums text-sm">{fmtCurrency(net)}</span>
-                  <Button size="sm" icon={FiLink} variant={exact ? "primary" : "secondary"} onClick={() => onMatch(j.id)}>
+                  <span className="tabular-nums text-sm">{fmtMoney(c.amount, currency)}</span>
+                  <Button size="sm" icon={FiLink} variant={exact ? "primary" : "secondary"} onClick={() => onMatch(c.journal_id)}>
                     Match
                   </Button>
                 </div>
@@ -392,7 +376,7 @@ const FindMatchModal = ({
   );
 };
 
-const CreateEntryModal = ({ line, onClose }: { line: BankStatementLine | null; onClose: () => void }) => {
+const CreateEntryModal = ({ line, currency, onClose }: { line: ReconciliationLine | null; currency: string | undefined; onClose: () => void }) => {
   const { actions } = useLedger();
   const [accountId, setAccountId] = useState("");
   const [memo, setMemo] = useState("");
@@ -428,7 +412,7 @@ const CreateEntryModal = ({ line, onClose }: { line: BankStatementLine | null; o
       onClose={onClose}
       size="lg"
       title="Create entry from statement line"
-      description={line ? `${fmtCurrency(line.amount)} on ${fmtDate(line.date)}. The bank side is filled in for you.` : ""}
+      description={line ? `${fmtMoney(line.amount, currency)} on ${fmtDate(line.date)}. The bank side is filled in for you.` : ""}
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
         { label: "Post & match", onClick: submit, className: BTN_PRIMARY, disabled: busy },

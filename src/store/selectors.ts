@@ -7,7 +7,7 @@ import type {
 } from "@/models/accounting";
 import { documentTotals, displayStatus, type DocumentTotals } from "@/lib/documents";
 import { balancesByAccount } from "@/lib/ledger";
-import { accountBalances, isForeign, toBase } from "@/lib/fx";
+import { toBase } from "@/lib/fx";
 import { round2 } from "@/utils/format";
 import { todayIso } from "@/utils/dates";
 import type { LedgerState } from "./ledgerStore";
@@ -96,15 +96,6 @@ export const postableAccounts = (s: LedgerState, opts: { includeControl?: boolea
     .sort((a, b) => a.code.localeCompare(b.code));
 
 export const accountLabel = (a: Account | undefined) => (a ? `${a.code} · ${a.name}` : "—");
-
-/** Ledger balance of each bank account in its own currency. */
-export const bankLedgerBalances = (s: LedgerState, asAt?: string) =>
-  new Map(
-    s.bankAccounts.map((b) => {
-      const bal = accountBalances(s.journals, b.gl_account_id, asAt);
-      return [b.id, isForeign(b.currency) ? bal.fc : bal.base];
-    }),
-  );
 
 /** Ledger balance of each bank account in base currency. */
 export const bankBaseBalances = (s: LedgerState) => {

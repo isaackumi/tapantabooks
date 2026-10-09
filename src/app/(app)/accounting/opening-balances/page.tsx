@@ -9,7 +9,8 @@ import StatCard from "@/components/statCard";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
 import { useLedger } from "@/store/ledgerStore";
-import { useApiQuery } from "@/services/useApiQuery";
+import { useReport } from "@/services/useApiQuery";
+import { QueryState } from "@/components/queryState";
 import { ACCOUNT_TYPE_LABEL, ACCOUNT_TYPE_ORDER } from "@/lib/ledger";
 import { documentTotals } from "@/lib/documents";
 import { isForeign } from "@/lib/fx";
@@ -46,19 +47,14 @@ const toInput = (rows: ItemRow[]): OpeningItemInput[] =>
   }));
 
 export default function OpeningBalancesPage() {
-  const { state } = useLedger();
-  const { data, error, loading } = useApiQuery<OpeningBalancesView>("/opening-balances/get", {}, [
-    state.journals,
-    state.invoices,
-    state.bills,
-    state.org,
-  ]);
+  const query = useReport<OpeningBalancesView>("/opening-balances/get", {});
+  const { data } = query;
 
   if (!data) {
     return (
       <div>
         <PageHeader title="Opening balances" description="Balances brought forward from your previous system." />
-        <p className="text-sm text-neutral-500">{loading ? "Loading opening balances…" : error}</p>
+        <QueryState query={query}>{() => null}</QueryState>
       </div>
     );
   }

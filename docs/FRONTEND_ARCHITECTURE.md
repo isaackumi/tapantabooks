@@ -350,9 +350,16 @@ added `GET /journals/statistics`, `/invoices/statistics`, `/bills/statistics`, `
 filters; payment list totals; and a 100-row page cap; see `PROCESSING_RULES.md` sections 1.1, 4.11, 7.8 and 8.5.
 `DataTable` takes a `server` prop for server-side sorting and paging; its column ids are the API's `sort_by` names.
 
-Next increment: remove the transaction collections from the store. The document drawer, payment and credit note
-modals, party pages and the reports landing page read them today; each moves to `/get` endpoints, filtered lists
-(for example `GET /invoices/list?customer_id=`) or statistics, so the store keeps only reference data.
+In progress: remove the transaction collections from the store so it keeps only reference data.
+
+- Done: the shell, dashboard, journal drawer, periods, fiscal years, chart of accounts, reports landing page and
+  custom-field usage (`/reports/summary`, `/accounts/balances`, `/fiscal-periods/statistics`, `/custom-fields/usage`).
+- Done: bank accounts, reconciliation, statement import, revaluation and opening balances (`/bank-accounts/balances`,
+  `/bank-accounts/activity`, `/reconciliation/get`, `/bank-statement-lines/preview`; journal numbers on
+  `/revaluations/list`).
+- Next: the document drawer, payment and credit note modals, party pages, currency settings, audit trail and
+  integrations move to `/get` endpoints, filtered lists (for example `GET /invoices/list?customer_id=`) or statistics.
+  Then the transaction keys leave `COLLECTIONS` and the login download.
 
 Backend dependency: each phase's endpoints are added to the catalogue first and handed to `tvs-accounting-bk` through
 `API_ENDPOINTS.md` and `PROCESSING_RULES.md`, so the API and the frontend converge on one contract.
