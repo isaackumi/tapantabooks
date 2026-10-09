@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import Link from "next/link";
-import { FiDownload, FiEdit2, FiPlus, FiUsers } from "react-icons/fi";
+import { FiDownload, FiEdit2, FiFileText, FiPlus, FiUsers } from "react-icons/fi";
 import { Button, DetailRow, PageHeader } from "@/components/ui";
 import { Tabs } from "@/components/tabs";
 import StatCard from "@/components/statCard";
@@ -238,6 +238,13 @@ const PartiesPage = ({ kind }: { kind: "customer" | "supplier" }) => {
         footer={
           viewing && (
             <div className="flex justify-end gap-2">
+              <Link
+                href={`/reports/statements?kind=${kind}&party=${viewing.id}`}
+                className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-700"
+              >
+                <FiFileText className="h-4 w-4" />
+                Statement
+              </Link>
               <Button
                 variant="secondary"
                 icon={FiEdit2}

@@ -9,6 +9,7 @@ import {
   FiBookOpen,
   FiClock,
   FiDroplet,
+  FiFileText,
   FiLayers,
   FiPercent,
   FiTrendingUp,
@@ -55,6 +56,7 @@ export default function ReportsPage() {
         cards: [
           { href: "/reports/ar-ageing", title: "Receivables ageing", description: "What customers owe, by days past due.", icon: FiClock, figure: fmtCurrency(ar), figureLabel: "Outstanding" },
           { href: "/reports/ap-ageing", title: "Payables ageing", description: "What you owe suppliers, by days past due.", icon: FiClock, figure: fmtCurrency(ap), figureLabel: "Outstanding" },
+          { href: "/reports/statements", title: "Statements", description: "Printable statement of account for any customer or supplier, with ageing.", icon: FiFileText },
         ] as ReportCard[],
       },
       {

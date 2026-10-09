@@ -944,6 +944,34 @@ export const ENDPOINTS: EndpointDef[] = [
     returns: "{ buckets: string[], rows: { party_id, party_name, buckets, total }[], totals }",
     permission: perm("report", "get"),
   },
+  {
+    method: "GET",
+    path: "/reports/customer-statement",
+    module: "Reports",
+    summary: "Statement of account for one customer in one currency",
+    query: {
+      customer_id: "Customer id (required)",
+      from_date: "YYYY-MM-DD (default: start of the year)",
+      to_date: "YYYY-MM-DD (default: today)",
+      currency: "ISO code (default: the customer's currency)",
+    },
+    returns: "PartyStatement",
+    permission: perm("report", "get"),
+  },
+  {
+    method: "GET",
+    path: "/reports/supplier-statement",
+    module: "Reports",
+    summary: "Statement of account for one supplier in one currency",
+    query: {
+      supplier_id: "Supplier id (required)",
+      from_date: "YYYY-MM-DD (default: start of the year)",
+      to_date: "YYYY-MM-DD (default: today)",
+      currency: "ISO code (default: the supplier's currency)",
+    },
+    returns: "PartyStatement",
+    permission: perm("report", "get"),
+  },
 ];
 
 export const endpointKey = (method: string, path: string) => `${method.toUpperCase()} ${path}`;

@@ -80,6 +80,7 @@ export const navigation: NavigationItem[] = [
       { name: "Cash Flow", href: "/reports/cash-flow", icon: FiActivity },
       { name: "AR Ageing", href: "/reports/ar-ageing", icon: FiClock },
       { name: "AP Ageing", href: "/reports/ap-ageing", icon: FiPieChart },
+      { name: "Statements", href: "/reports/statements", icon: FiFileText },
     ],
   },
 

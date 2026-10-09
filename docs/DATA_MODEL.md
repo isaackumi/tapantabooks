@@ -795,12 +795,13 @@ These shapes are computed, not stored.
 | `GET /reports/balance-sheet` | `{ current_assets, fixed_assets, current_liabilities, long_term_liabilities, equity, current_earnings, total_assets, total_liabilities, total_equity, difference }`; sections are `[{ account, amount }]` |
 | `GET /reports/cash-flow` | `{ operating, investing, financing, total_operating, total_investing, total_financing, opening, net_change, closing }`; sections are `[{ label, amount }]` |
 | `GET /reports/ar-ageing`, `GET /reports/ap-ageing` | `{ buckets: string[], rows: [{ party_id, party_name, buckets: { "<bucket label>": number }, total }], totals: { "<bucket label>": number, total } }` |
+| `GET /reports/customer-statement`, `GET /reports/supplier-statement` | `PartyStatement`: `{ kind, party_id, party_name, party_code, currency, currencies, from_date, to_date, opening_balance, entries: [{ date, type, number, document_id, description, charge, credit, balance }], total_charges, total_credits, closing_balance, ageing: { "<bucket label>": number, total }, open_documents: [{ document_id, number, issue_date, due_date, total, outstanding, bucket }] }`; amounts in the statement `currency` |
 | `GET /dashboard/statistics` | `{ as_at, revenue_mtd, expenses_mtd, net_income_mtd, net_income_ytd, cash_balance, receivables, overdue_receivables, payables, overdue_payables, journals_pending_approval, unmatched_statement_lines }` |
 | `GET /opening-balances/get`, `PUT /opening-balances/update` | `OpeningBalancesView`: `{ conversion_date, journal_id, journal_number, lines: [{ account_id, debit, credit }], receivables: SalesInvoice[], payables: PurchaseBill[], opening_equity_balance, first_transaction_date, locked_reason }` |
 | `GET /revaluations/preview` | `{ rates: { "<currency>": number }, lines: FxRevaluationLine[], missing: string[] }` |
 | `GET /navigation` | `{ items: [{ method, path, module, summary }] }` |
 
-All report amounts are base.
+All report amounts are base, except statements, which are in the document currency.
 
 ---
 

@@ -1332,6 +1332,41 @@ Response: `{ buckets: ["Current", "1–30 days", "31–60 days", "61–90 days",
 
 Only the income-statement figures respect `as_at`; cash, receivables, payables and the overdue figures use all data and today's date (open question).
 
+### 17.8 Customer and supplier statements (`GET /reports/customer-statement`, `GET /reports/supplier-statement`)
+
+Query: `customer_id` or `supplier_id` (required; 400 when missing, 404 `Customer not found.` / `Supplier not found.` when unknown), `from_date`, `to_date` (defaults as above; 400 when `from_date` > `to_date`), `currency`.
+
+Unlike the other reports, a statement is in the **document currency**, not base, because that is what the party is billed and pays in. One statement covers one currency:
+
+- `currencies` lists every currency the party has approved documents in, sorted.
+- When `currency` is omitted: the party's default currency if it has documents in it, otherwise the first entry of `currencies`, otherwise the party's default currency (an empty statement).
+
+Entries, all limited to documents in that currency:
+
+| Entry | From | Date | `charge` | `credit` |
+|---|---|---|---|---|
+| `INVOICE` / `BILL` | `APPROVED` documents for the party | `issue_date` | document total | 0 |
+| `RECEIPT` / `PAYMENT` | payments against those documents | payment `date` | 0 | payment `amount` |
+| `CREDIT_NOTE` / `SUPPLIER_CREDIT` | `APPROVED` credits against those documents (section 19) | credit `date` | 0 | credit total |
+
+Drafts, voided documents and voided credits are left out entirely (a void cancels the original, so including both would only add noise).
+
+- Entries are sorted by date, then documents before credits before payments, then number.
+- `opening_balance` = sum of (`charge` − `credit`) for entries dated before `from_date`.
+- `entries` are those dated from `from_date` to `to_date` inclusive, each with a running `balance` starting at `opening_balance`.
+- `total_charges`, `total_credits` are sums over `entries`; `closing_balance` = `opening_balance` + `total_charges` − `total_credits`.
+- The balance is always "amount owed": by the customer on a customer statement, to the supplier on a supplier statement. Positive means owed.
+
+Ageing is a true historical view at `to_date` (unlike section 17.6):
+
+- For each document issued on or before `to_date`: outstanding = total − payments and credits dated on or before `to_date`.
+- Documents with outstanding > 0.005 are listed in `open_documents` (sorted by due date) and bucketed by days past due at `to_date` with the buckets of section 17.6.
+- `ageing.total` equals `closing_balance` whenever no payment or credit is dated before its document.
+
+Response: `{ kind: "CUSTOMER" | "SUPPLIER", party_id, party_name, party_code, currency, currencies, from_date, to_date, opening_balance, entries: [{ date, type, number, document_id, description, charge, credit, balance }], total_charges, total_credits, closing_balance, ageing: { "<bucket label>": number, total }, open_documents: [{ document_id, number, issue_date, due_date, total, outstanding, bucket }] }`.
+
+The statement page (`/reports/statements`) prints this with the organisation letterhead; customer and supplier drawers link to it.
+
 ---
 
 ## 18. Opening balances

@@ -2,6 +2,7 @@ import type { CreditNote, CustomFieldEntity, PeriodStatus } from "@/models/accou
 import { ENDPOINTS, endpointKey } from "@/services/catalogue";
 import { balanceSheet, cashFlow, generalLedger, incomeStatement, trialBalance } from "@/lib/ledger";
 import { AGEING_BUCKETS, ageingBucket, emptyAgeing } from "@/lib/documents";
+import { partyStatement } from "@/lib/statements";
 import { bankBaseBalances, billRows, invoiceRows, type DocumentRow } from "@/store/selectors";
 import { round2 } from "@/utils/format";
 import { todayIso } from "@/utils/dates";
@@ -44,6 +45,15 @@ const creditList = (rows: CreditNote[], q: URLSearchParams) =>
 
 const monthStart = (date: string) => `${date.slice(0, 7)}-01`;
 const yearStart = (date: string) => `${date.slice(0, 4)}-01-01`;
+
+const statement = (state: LedgerState, q: URLSearchParams, kind: "CUSTOMER" | "SUPPLIER"): HandlerResult => {
+  const idParam = kind === "CUSTOMER" ? "customer_id" : "supplier_id";
+  const to = q.get("to_date") || todayIso();
+  const from = q.get("from_date") || yearStart(to);
+  if (from > to) throw new ApiFault(400, "from_date must be on or before to_date.", { from_date: "Must be on or before to_date" });
+  const data = partyStatement(state, kind, need(q.get(idParam), idParam), from, to, q.get("currency") || undefined);
+  return { data: found(data ?? undefined, kind === "CUSTOMER" ? "Customer" : "Supplier") };
+};
 
 const ageing = <T>(rows: DocumentRow<T>[], partyOf: (doc: T) => string, asAt: string) => {
   const byParty = new Map<string, { party_id: string; party_name: string; buckets: Record<string, number>; total: number }>();
@@ -411,6 +421,8 @@ const HANDLERS: Record<string, Handler> = {
   "GET /reports/ap-ageing": ({ state, q }) => ({
     data: ageing(billRows(state), (d) => d.supplier_id, q.get("as_at") || todayIso()),
   }),
+  "GET /reports/customer-statement": ({ state, q }) => statement(state, q, "CUSTOMER"),
+  "GET /reports/supplier-statement": ({ state, q }) => statement(state, q, "SUPPLIER"),
 };
 
 export const resolveHandler = (method: string, path: string): Handler | undefined => HANDLERS[endpointKey(method, path)];
