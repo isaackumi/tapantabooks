@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import toast from "react-hot-toast";
-import { FiCheck, FiDollarSign, FiPrinter, FiSlash } from "react-icons/fi";
+import { FiCheck, FiCornerUpLeft, FiDollarSign, FiPrinter, FiSlash } from "react-icons/fi";
+import Link from "next/link";
 import RightDrawer from "@/components/rightDrawer";
 import StatusBadge from "@/components/statusBadge";
 import SourceBadge from "@/components/sourceBadge";
@@ -10,9 +11,10 @@ import { Button, DetailRow } from "@/components/ui";
 import ReasonModal from "@/components/accounting/reasonModal";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
 import PaymentModal from "./paymentModal";
+import CreditNoteModal from "./creditNoteModal";
 import { useLedger } from "@/store/ledgerStore";
 import { billRows, dimensionName, invoiceRows } from "@/store/selectors";
-import { lineAmount } from "@/lib/documents";
+import { documentTotals, lineAmount } from "@/lib/documents";
 import type { PurchaseBill, SalesInvoice } from "@/models/accounting";
 import { BASE_CURRENCY, classNames, fmtCurrency, fmtDate, fmtDateTime, fmtMoney, fmtRate, humanize } from "@/utils/format";
 import { CustomFieldDetails, EditCustomFieldsModal } from "@/components/customFields";
@@ -28,6 +30,7 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
   const { openJournal } = useJournalViewer();
   const [payOpen, setPayOpen] = useState(false);
   const [voidOpen, setVoidOpen] = useState(false);
+  const [creditOpen, setCreditOpen] = useState(false);
   const [editCustom, setEditCustom] = useState(false);
   const isInvoice = kind === "invoice";
 
@@ -35,6 +38,8 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
   const row = rows.find((r) => r.doc.id === documentId);
   const doc = row?.doc as (SalesInvoice | PurchaseBill) | undefined;
   const payments = (isInvoice ? state.receipts : state.supplierPayments).filter((p) => p.document_id === documentId);
+  const credits = (isInvoice ? state.creditNotes : state.supplierCredits).filter((c) => c.document_id === documentId);
+  const liveCredits = credits.filter((c) => c.state === "APPROVED");
   const accounts = new Map(state.accounts.map((a) => [a.id, a]));
   const taxCodes = new Map(state.taxCodes.map((t) => [t.id, t]));
   const cur = row?.currency ?? BASE_CURRENCY;
@@ -51,7 +56,7 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
 
   const footer = row && doc && (
     <div className="flex flex-wrap items-center justify-end gap-2">
-      {doc.state !== "VOID" && doc.amount_paid === 0 && (
+      {doc.state !== "VOID" && doc.amount_paid === 0 && doc.source.type !== "OPENING_BALANCE" && (
         <Button variant="ghost" icon={FiSlash} className="mr-auto text-red-600" onClick={() => setVoidOpen(true)}>
           Void
         </Button>
@@ -62,6 +67,11 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
       {doc.state === "DRAFT" && (
         <Button icon={FiCheck} onClick={approve}>
           Approve &amp; post
+        </Button>
+      )}
+      {row.outstanding > 0 && (
+        <Button variant="secondary" icon={FiCornerUpLeft} onClick={() => setCreditOpen(true)}>
+          {isInvoice ? "Credit note" : "Supplier credit"}
         </Button>
       )}
       {row.outstanding > 0 && (
@@ -98,7 +108,7 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
                 {foreign && <p className="text-xs tabular-nums text-neutral-500">{fmtCurrency(row.total_base)}</p>}
               </div>
               <div className="rounded-xl bg-neutral-50 p-3 dark:bg-neutral-900/40">
-                <p className="text-xs text-neutral-500 dark:text-neutral-400">Paid</p>
+                <p className="text-xs text-neutral-500 dark:text-neutral-400">{liveCredits.length ? "Paid & credited" : "Paid"}</p>
                 <p className="mt-0.5 font-semibold tabular-nums">{m(doc.amount_paid)}</p>
                 {foreign && doc.amount_paid > 0 && (
                   <p className="text-xs tabular-nums text-neutral-500">{fmtCurrency(doc.amount_paid_base)} at booking rate</p>
@@ -241,6 +251,32 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
               )}
             </div>
 
+            {credits.length > 0 && (
+              <div>
+                <h4 className="mb-2 text-sm font-semibold">{isInvoice ? "Credit notes" : "Supplier credits"}</h4>
+                <ul className="divide-y divide-neutral-100 rounded-xl border border-neutral-200 dark:divide-neutral-700 dark:border-neutral-700">
+                  {credits.map((c) => (
+                    <li key={c.id} className={classNames("flex items-center justify-between px-4 py-2.5 text-sm", c.state === "VOID" && "opacity-50")}>
+                      <div>
+                        <Link
+                          href={`${isInvoice ? "/sales/credit-notes" : "/purchases/supplier-credits"}?open=${c.id}`}
+                          onClick={onClose}
+                          className="font-mono text-brand-700 hover:underline dark:text-brand-300"
+                        >
+                          {c.number}
+                        </Link>
+                        {c.state === "VOID" && <span className="ml-2 text-xs font-medium text-red-600">Void</span>}
+                        <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                          {fmtDate(c.date)} · {c.reason}
+                        </p>
+                      </div>
+                      <span className="font-medium tabular-nums">{fmtMoney(documentTotals(c.lines, state.taxCodes).total, c.currency)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             <CustomFieldDetails entity={isInvoice ? "Invoice" : "Bill"} values={doc.custom_fields} onEdit={doc.state === "VOID" ? undefined : () => setEditCustom(true)} />
 
             {doc.notes && (
@@ -263,6 +299,7 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
         onClose={() => setPayOpen(false)}
         documentId={documentId}
       />
+      <CreditNoteModal kind={isInvoice ? "customer" : "supplier"} open={creditOpen} onClose={() => setCreditOpen(false)} documentId={documentId} />
       {doc && (
         <EditCustomFieldsModal
           entity={isInvoice ? "Invoice" : "Bill"}

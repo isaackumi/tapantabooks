@@ -6,6 +6,7 @@ import type {
   AuditFields,
   BankAccount,
   BankStatementLine,
+  CreditNote,
   CurrentUser,
   Currency,
   CustomField,
@@ -560,6 +561,8 @@ interface SeedState {
   bills: PurchaseBill[];
   receipts: Payment[];
   supplierPayments: Payment[];
+  creditNotes: CreditNote[];
+  supplierCredits: CreditNote[];
 }
 
 const GOODS = [
@@ -1434,6 +1437,74 @@ const buildLedger = (
     });
   }
 
+  // ---- Credit notes: goods returned against unpaid September documents ------
+  const creditNotes: CreditNote[] = [];
+  const supplierCredits: CreditNote[] = [];
+  const credit = (kind: "SALE" | "PURCHASE", doc: SalesInvoice | PurchaseBill, reason: string, supplierRef?: string) => {
+    const isSale = kind === "SALE";
+    const list = isSale ? creditNotes : supplierCredits;
+    const source = doc.lines[0];
+    const qty = Math.max(1, Math.floor(source.quantity / 4));
+    const lines: DocumentLine[] = [{ ...source, id: `${isSale ? "cl" : "scl"}_${list.length + 1}_0`, description: `Returned – ${source.description}`, quantity: qty }];
+    const total = documentTotals(lines, taxCodes).total;
+    const date = addDays(doc.issue_date, 4) > DEMO_TODAY ? DEMO_TODAY : addDays(doc.issue_date, 4);
+    const number = `${isSale ? "CN" : "SCN"}-2026-${String(list.length + 1).padStart(4, "0")}`;
+    const partyId = isSale ? (doc as SalesInvoice).customer_id : (doc as PurchaseBill).supplier_id;
+    const partyName = (isSale ? customers : suppliers).find((x) => x.id === partyId)!.name;
+    const posting = documentJournalLines({
+      lines,
+      taxCodes,
+      currency: doc.currency,
+      rate: doc.exchange_rate,
+      partyAccount: isSale ? ACC.ar : ACC.ap,
+      partyName,
+      kind,
+      fallbackTaxAccount: isSale ? ACC.vatOut : ACC.vatIn,
+    }).map((l) => ({ ...l, debit: l.credit, credit: l.debit }));
+    const journal = J({
+      date,
+      memo: `${isSale ? "Credit note" : "Supplier credit"} ${number} – ${partyName} against ${doc.number}`,
+      source: { type: isSale ? "SALES" : "PURCHASES", reference: number, document_id: doc.id },
+      branch: doc.branch_id ?? BR.adum,
+      lines: posting,
+    });
+    const base = toBase(total, doc.exchange_rate);
+    doc.amount_paid = round2(doc.amount_paid + total);
+    doc.amount_paid_base = round2(doc.amount_paid_base + base);
+    list.push({
+      id: `${isSale ? "cn" : "scn"}_${list.length + 1}`,
+      number,
+      party_id: partyId,
+      document_id: doc.id,
+      date,
+      state: "APPROVED",
+      reason,
+      supplier_reference: supplierRef,
+      lines,
+      currency: doc.currency,
+      exchange_rate: doc.exchange_rate,
+      base_amount: base,
+      journal_id: journal.id,
+      branch_id: doc.branch_id,
+      ...stamp(journal.created_at, isSale ? USERS.efua : USERS.kofi),
+    });
+  };
+  const unpaidSeptember = <T extends SalesInvoice | PurchaseBill>(docs: T[]) =>
+    docs.filter(
+      (d) =>
+        d.state === "APPROVED" &&
+        d.currency === "GHS" &&
+        d.amount_paid === 0 &&
+        d.issue_date.startsWith("2026-09") &&
+        d.source.type === "MANUAL" &&
+        d.lines[0].quantity >= 4,
+    );
+  const [cnA, cnB] = unpaidSeptember(invoices);
+  if (cnA) credit("SALE", cnA, "Damaged on delivery – customer returned part of the consignment");
+  if (cnB) credit("SALE", cnB, "Short shipment agreed with the customer");
+  const [scnA] = unpaidSeptember(bills);
+  if (scnA) credit("PURCHASE", scnA, "Goods returned to supplier – failed quality check", "CR-88214");
+
   // ---- VAT returns: settle each month's net VAT on the 15th of the next ----
   for (let m = 1; m <= 9; m++) {
     const key = `2026-${pad(m)}`;
@@ -1471,7 +1542,7 @@ const buildLedger = (
     j.number = `JE-2026-${String(i + 1).padStart(4, "0")}`;
   });
 
-  return { journals, invoices, bills, receipts, supplierPayments };
+  return { journals, invoices, bills, receipts, supplierPayments, creditNotes, supplierCredits };
 };
 
 // ---------------------------------------------------------------------------

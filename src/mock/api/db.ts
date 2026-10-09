@@ -28,7 +28,10 @@ const read = (tenantId: string): LedgerState | null => {
     const raw = window.localStorage.getItem(storageKey(tenantId));
     if (!raw) return null;
     const saved = JSON.parse(raw) as { version: number; state: LedgerState };
-    return saved.version === SCHEMA_VERSION && saved.state?.journals ? saved.state : null;
+    if (saved.version !== SCHEMA_VERSION || !saved.state?.journals) return null;
+    // Collections added after a tenant was provisioned start empty.
+    const state = saved.state as Partial<LedgerState>;
+    return { ...saved.state, creditNotes: state.creditNotes ?? [], supplierCredits: state.supplierCredits ?? [] };
   } catch {
     return null;
   }

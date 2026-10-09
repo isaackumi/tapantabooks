@@ -168,6 +168,30 @@ export interface PurchaseBill extends AuditFields {
   custom_fields?: Record<string, string>;
 }
 
+/**
+ * Customer credit note (against an invoice) or supplier credit (against a bill).
+ * It reduces what is owed on that document, like a payment that moves no cash.
+ */
+export interface CreditNote extends AuditFields {
+  id: string;
+  number: string;
+  party_id: string;
+  document_id: string;
+  date: string;
+  state: "APPROVED" | "VOID";
+  reason: string;
+  /** Supplier credits: the supplier's own credit note number. */
+  supplier_reference?: string;
+  lines: DocumentLine[];
+  /** The document's currency and rate, so crediting never creates an exchange difference. */
+  currency: string;
+  exchange_rate: number;
+  /** Base-currency carrying value released from the receivable or payable. */
+  base_amount: number;
+  journal_id: string | null;
+  branch_id: string | null;
+}
+
 export type PaymentMethod = "BANK_TRANSFER" | "MOBILE_MONEY" | "CASH" | "CHEQUE";
 
 export interface Payment extends AuditFields {

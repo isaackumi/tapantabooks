@@ -23,6 +23,7 @@ import {
   FiClock,
   FiGlobe,
   FiFlag,
+  FiCornerUpLeft,
 } from "react-icons/fi";
 import { TbScale, TbFileImport } from "react-icons/tb";
 
@@ -56,10 +57,12 @@ export const navigation: NavigationItem[] = [
   { name: "Customers", href: "/sales/customers", icon: FiUsers, group: "Sales" },
   { name: "Invoices", href: "/sales/invoices", icon: FiFileText, group: "Sales" },
   { name: "Receipts", href: "/sales/receipts", icon: FiDownload, group: "Sales" },
+  { name: "Credit Notes", href: "/sales/credit-notes", icon: FiCornerUpLeft, group: "Sales" },
 
   { name: "Suppliers", href: "/purchases/suppliers", icon: FiTruck, group: "Purchases" },
   { name: "Bills", href: "/purchases/bills", icon: FiFile, group: "Purchases" },
   { name: "Payments", href: "/purchases/payments", icon: FiUpload, group: "Purchases" },
+  { name: "Supplier Credits", href: "/purchases/supplier-credits", icon: FiCornerUpLeft, group: "Purchases" },
 
   { name: "Bank Accounts", href: "/banking/accounts", icon: FiCreditCard, group: "Cash & Tax" },
   { name: "Reconciliation", href: "/banking/reconciliation", icon: FiRepeat, group: "Cash & Tax" },

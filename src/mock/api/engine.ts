@@ -6,6 +6,7 @@ import type {
   AccountType,
   AuditEvent,
   AuditFields,
+  CreditNote,
   Customer,
   Currency,
   CurrentUser,
@@ -107,6 +108,15 @@ export interface PaymentInput {
   method: PaymentMethod;
   bank_account_id: string;
   reference?: string;
+}
+
+export interface CreditNoteInput {
+  document_id: string;
+  date: string;
+  reason: string;
+  /** Supplier credits only: the supplier's credit note number. */
+  supplier_reference?: string;
+  lines: Omit<DocumentLine, "id">[];
 }
 
 export interface ImportInput {
@@ -481,6 +491,8 @@ export const createTenantState = (owner: CurrentUser, orgName: string): LedgerSt
     bills: [],
     receipts: [],
     supplierPayments: [],
+    creditNotes: [],
+    supplierCredits: [],
     statementLines: [],
     importBatches: [],
     exchangeRates: [],
@@ -1002,7 +1014,7 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
           if (!doc) return fail("Document not found.");
           if (doc.state === "VOID") return fail("Already void.");
           if (doc.source.type === "OPENING_BALANCE") return fail("Brought-forward items are removed from Accounting → Opening balances.");
-          if (doc.amount_paid > 0) return fail("Payments have been recorded against it. Reverse those first.");
+          if (doc.amount_paid > 0) return fail("Payments or credit notes have been recorded against it. Reverse those first.");
           if (!reason.trim()) return fail("Give a reason for voiding.");
           if (doc.journal_id) {
             const j = s.journals.find((x) => x.id === doc.journal_id);
@@ -1120,6 +1132,143 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
             summary: `${fmtMoney(amount, doc.currency)} ${isReceipt ? "from" : "to"} ${party.name} against ${doc.number}.${fxNote}`,
           });
           return ok(payment, `${number} recorded · ${fmtMoney(amount, doc.currency)}${fxNote}`);
+        }),
+
+      // ---- Credit notes -----------------------------------------------------
+      createCreditNote: (kind: "customer" | "supplier", input: CreditNoteInput) =>
+        commit((s) => {
+          const isCustomer = kind === "customer";
+          const doc = isCustomer
+            ? s.invoices.find((i) => i.id === input.document_id)
+            : s.bills.find((b) => b.id === input.document_id);
+          if (!doc) return fail(`Choose the ${isCustomer ? "invoice" : "bill"} being credited.`);
+          if (doc.state !== "APPROVED") return fail(`Only approved ${isCustomer ? "invoices" : "bills"} can be credited.`);
+          if (!input.reason?.trim()) return fail("Give a reason. It prints on the credit note and stays on the audit trail.");
+          if (!input.date) return fail("Choose a date.");
+          if (input.date < doc.issue_date) return fail(`The credit cannot be dated before ${doc.number} (${fmtDate(doc.issue_date)}).`);
+          if (!input.lines?.length) return fail("Add at least one line.");
+          for (const [i, l] of input.lines.entries()) {
+            const n = i + 1;
+            if (!l.description?.trim()) return fail(`Line ${n}: add a description.`);
+            if (!(l.quantity > 0)) return fail(`Line ${n}: quantity must be greater than zero.`);
+            if (!(l.unit_price > 0)) return fail(`Line ${n}: unit price must be greater than zero.`);
+            const account = s.accounts.find((a) => a.id === l.account_id);
+            if (!account || account.is_group || account.is_control || !account.is_active) {
+              return fail(`Line ${n}: choose an active, postable account.`);
+            }
+            if (!s.taxCodes.some((t) => t.id === l.tax_code_id)) return fail(`Line ${n}: choose a tax code.`);
+          }
+          const reference = input.supplier_reference?.trim();
+          if (!isCustomer && !reference) return fail("Enter the supplier's credit note number.");
+          const docTotal = documentTotals(doc.lines, s.taxCodes).total;
+          const outstanding = round2(docTotal - doc.amount_paid);
+          const lines = input.lines.map((l) => ({ ...l, description: l.description.trim(), id: newId(isCustomer ? "cl" : "scl") }));
+          const total = documentTotals(lines, s.taxCodes).total;
+          if (total > outstanding + 0.005) {
+            return fail(`The credit (${fmtMoney(total, doc.currency)}) is more than the ${fmtMoney(outstanding, doc.currency)} still owed on ${doc.number}.`);
+          }
+          const periodError = checkPeriod(s, input.date);
+          if (periodError) return fail(periodError);
+
+          const partyId = isCustomer ? (doc as SalesInvoice).customer_id : (doc as PurchaseBill).supplier_id;
+          const party = (isCustomer ? s.customers : s.suppliers).find((p) => p.id === partyId)!;
+          if (!isCustomer && s.supplierCredits.some((c) => c.party_id === partyId && c.state !== "VOID" && c.supplier_reference?.toLowerCase() === reference!.toLowerCase())) {
+            return fail(`${party.name} credit note ${reference} is already recorded.`);
+          }
+          const list = isCustomer ? s.creditNotes : s.supplierCredits;
+          const number = nextNumber(
+            list.map((c) => c.number),
+            isCustomer ? "CN-2026-" : "SCN-2026-",
+          );
+          const partyAccount = isCustomer ? ACC.ar : ACC.ap;
+          const posting = docJournalLines(s, { lines, currency: doc.currency, exchange_rate: doc.exchange_rate }, partyAccount, party.name, isCustomer ? "SALE" : "PURCHASE").map(
+            (l) => ({ ...l, debit: l.credit, credit: l.debit }),
+          );
+          // Crediting the full balance releases exactly what is still carried, so no rounding is left on the control account.
+          const carrying = carryingBaseFor(doc, docTotal, total);
+          const partyLine = posting.find((l) => l.account_id === partyAccount)!;
+          const partyBase = partyLine.debit + partyLine.credit;
+          const drift = round2(carrying - partyBase);
+          if (drift !== 0) {
+            const others = posting.filter((l) => l !== partyLine);
+            const largest = others.reduce((a, b) => (b.debit + b.credit > a.debit + a.credit ? b : a));
+            if (partyLine.debit) partyLine.debit = carrying;
+            else partyLine.credit = carrying;
+            if (largest.debit) largest.debit = round2(largest.debit + drift);
+            else largest.credit = round2(largest.credit + drift);
+          }
+          const j = writeJournal(
+            s,
+            {
+              date: input.date,
+              memo: `${isCustomer ? "Credit note" : "Supplier credit"} ${number} – ${party.name} against ${doc.number}`,
+              reference,
+              branch_id: doc.branch_id,
+              lines: posting,
+            },
+            "POSTED",
+            { type: isCustomer ? "SALES" : "PURCHASES", reference: number, document_id: doc.id },
+          );
+          const note: CreditNote = {
+            id: newId(isCustomer ? "cn" : "scn"),
+            number,
+            party_id: partyId,
+            document_id: doc.id,
+            date: input.date,
+            state: "APPROVED",
+            reason: input.reason.trim(),
+            supplier_reference: reference || undefined,
+            lines,
+            currency: doc.currency,
+            exchange_rate: doc.exchange_rate,
+            base_amount: carrying,
+            journal_id: j.id,
+            branch_id: doc.branch_id,
+            ...stamp(nowIso(), actorOf(s)),
+          };
+          list.push(note);
+          doc.amount_paid = round2(doc.amount_paid + total);
+          doc.amount_paid_base = round2(doc.amount_paid_base + carrying);
+          touch(s, doc);
+          audit(s, {
+            action: isCustomer ? "CREDIT_NOTE.ISSUED" : "SUPPLIER_CREDIT.RECORDED",
+            entity_type: isCustomer ? "Credit note" : "Supplier credit",
+            entity_id: note.id,
+            entity_label: number,
+            summary: `${fmtMoney(total, doc.currency)} ${isCustomer ? "to" : "from"} ${party.name} against ${doc.number}: ${note.reason}`,
+          });
+          return ok(note, `${number} ${isCustomer ? "issued" : "recorded"} · ${fmtMoney(total, doc.currency)} off ${doc.number}`);
+        }),
+
+      voidCreditNote: (kind: "customer" | "supplier", id: string, reason: string) =>
+        commit((s) => {
+          const isCustomer = kind === "customer";
+          const note = (isCustomer ? s.creditNotes : s.supplierCredits).find((c) => c.id === id);
+          if (!note) return fail("Credit note not found.");
+          if (note.state === "VOID") return fail("Already void.");
+          if (!reason?.trim()) return fail("Give a reason for voiding.");
+          const doc = isCustomer ? s.invoices.find((i) => i.id === note.document_id) : s.bills.find((b) => b.id === note.document_id);
+          const periodError = checkPeriod(s, todayIso());
+          if (periodError) return fail(periodError);
+          const j = s.journals.find((x) => x.id === note.journal_id);
+          if (j && j.status === "POSTED") reverseInto(s, j, todayIso(), `void ${note.number}: ${reason.trim()}`);
+          const total = documentTotals(note.lines, s.taxCodes).total;
+          if (doc) {
+            doc.amount_paid = round2(Math.max(0, doc.amount_paid - total));
+            doc.amount_paid_base = round2(Math.max(0, doc.amount_paid_base - note.base_amount));
+            touch(s, doc);
+          }
+          note.state = "VOID";
+          touch(s, note);
+          audit(s, {
+            action: isCustomer ? "CREDIT_NOTE.VOIDED" : "SUPPLIER_CREDIT.VOIDED",
+            entity_type: isCustomer ? "Credit note" : "Supplier credit",
+            entity_id: note.id,
+            entity_label: note.number,
+            summary: `Voided: ${reason.trim()}. ${doc?.number ?? "The document"} is owed again.`,
+            changes: [{ field: "state", from: "APPROVED", to: "VOID" }],
+          });
+          return ok(note, `${note.number} voided`);
         }),
 
       // ---- Purchase bills ---------------------------------------------------

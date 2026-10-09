@@ -75,6 +75,10 @@ erDiagram
     SalesInvoice ||--o{ Payment : "receipts"
     PurchaseBill ||--o{ Payment : "supplier payments"
     Payment ||--|| JournalEntry : "journal_id"
+    SalesInvoice ||--o{ CreditNote : "credit notes"
+    PurchaseBill ||--o{ CreditNote : "supplier credits"
+    CreditNote ||--|| JournalEntry : "journal_id"
+    OrgSettings |o--o| JournalEntry : "opening_balance_journal_id"
     Payment }o--|| BankAccount : "bank_account_id"
     BankAccount }o--|| Account : "gl_account_id"
     BankAccount }o--|| Currency : "currency"
@@ -328,7 +332,7 @@ Table: `acc_sales_invoices` (unique on `number`; index on `customer_id`, `issue_
 | `lines` | DocumentLine[] | yes | at least one |
 | `currency` | string | yes | document currency |
 | `exchange_rate` | number | yes | base per one unit of `currency`, fixed when the document is created; `1` for base-currency documents |
-| `amount_paid` | number | yes | document currency; sum of receipts |
+| `amount_paid` | number | yes | document currency; sum of receipts and approved credit notes |
 | `amount_paid_base` | number | yes | base; carrying value already settled, at the document rate |
 | `journal_id` | string or null | yes | the posted journal; null while `DRAFT` |
 | `branch_id` | string or null | yes | `BRANCH` dimension id |
@@ -349,7 +353,7 @@ Same fields as `SalesInvoice`, with these differences:
 | `number` | string | yes | `{bill_prefix}{0001}` |
 | `supplier_id` | string | yes | replaces `customer_id` |
 | `supplier_reference` | string | yes | the supplier's own invoice number; unique per supplier among non-void bills |
-| `amount_paid` | number | yes | document currency; sum of supplier payments |
+| `amount_paid` | number | yes | document currency; sum of supplier payments and approved supplier credits |
 | `custom_fields` | object | no | custom values for entity `Bill` |
 
 ### 5.4 DocumentLine
@@ -365,7 +369,32 @@ Embedded in invoices and bills. Tables: `acc_sales_invoice_lines` and `acc_purch
 | `tax_code_id` | string | yes | |
 | `account_id` | string | yes | revenue account on invoices; expense or asset account on bills |
 
-### 5.5 Payment
+### 5.5 CreditNote
+
+A customer credit note against an invoice or a supplier credit against a bill. Returned by `/credit-notes/*` and `/supplier-credits/*`.
+
+Tables: `acc_credit_notes`, `acc_supplier_credits` (or one table with a `kind` column), plus line tables shaped like `DocumentLine`. Audit fields: yes.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `id` | string | yes | |
+| `number` | string | yes | `CN-{year}-####` / `SCN-{year}-####`; unique per organisation |
+| `party_id` | string | yes | customer or supplier of the document |
+| `document_id` | string | yes | invoice or bill id |
+| `date` | date | yes | |
+| `state` | enum | yes | `APPROVED`, `VOID` |
+| `reason` | string | yes | |
+| `supplier_reference` | string | no | supplier credits only |
+| `lines` | DocumentLine[] | yes | |
+| `currency` | string | yes | the document's currency |
+| `exchange_rate` | number | yes | the document's rate |
+| `base_amount` | number | yes | base carrying value released from AR/AP |
+| `journal_id` | string or null | yes | |
+| `branch_id` | string or null | yes | the document's branch |
+
+The document's `amount_paid` / `amount_paid_base` include approved credits: they mean "settled by payments and credits".
+
+### 5.6 Payment
 
 Customer receipts and supplier payments share one shape. Table: `acc_payments` with a backend-only `direction` column (`RECEIPT` or `PAYMENT`), unique on (`direction`, `number`). Separate `acc_receipts` and `acc_supplier_payments` tables are an equally valid choice. Audit fields: yes.
 
@@ -690,7 +719,19 @@ Used by `POST /organisation/setup`.
 | `email` | string | no | |
 | `phone` | string | no | |
 
-### 9.6 OpeningBalancesInput
+### 9.6 CreditNoteInput
+
+Used by `POST /credit-notes/add` and `POST /supplier-credits/add`. Rules in `docs/PROCESSING_RULES.md` section 19.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `document_id` | string | yes | approved invoice (credit notes) or bill (supplier credits) |
+| `date` | date | yes | not before the document's issue date |
+| `reason` | string | yes | |
+| `supplier_reference` | string | supplier credits | the supplier's credit note number; unique per supplier among non-void credits |
+| `lines` | object[] | yes | `DocumentLine` without `id`; total with tax ≤ the document's outstanding amount |
+
+### 9.7 OpeningBalancesInput
 
 Used by `PUT /opening-balances/update`. Rules in `docs/PROCESSING_RULES.md` section 18.
 
@@ -702,7 +743,7 @@ Used by `PUT /opening-balances/update`. Rules in `docs/PROCESSING_RULES.md` sect
 | `payables` | object[] | yes | new unpaid supplier bills, same shape |
 | `removed_item_ids` | string[] | no | existing opening invoices / bills to void; must be unpaid |
 
-### 9.7 Inline request bodies
+### 9.8 Inline request bodies
 
 These bodies have no named type in the engine.
 
@@ -716,6 +757,7 @@ These bodies have no named type in the engine.
 | `POST /journals/reject` | `{ reason }` |
 | `POST /journals/reverse` | `{ date, reason }` |
 | `POST /invoices/void`, `POST /bills/void` | `{ reason }` |
+| `POST /credit-notes/void`, `POST /supplier-credits/void` | `{ reason }` |
 | `PUT /fiscal-periods/update-status` | `{ status: "OPEN" \| "LOCKED" \| "CLOSED" }` |
 | `POST /bank-accounts/transfer` | `{ from, to, amount, date, memo, rate? }`: `from` and `to` are bank account ids; `amount` is in the source account's currency; `rate` is base per unit of the foreign side |
 | `POST /reconciliation/match` | `{ statement_line_id, journal_id }` |
@@ -815,6 +857,7 @@ All tables carry the backend-only `tenant_id` and `org_id` columns (section 1.2)
 | PurchaseBill | `acc_purchase_bills` | unique `number`; unique (`supplier_id`, lower(`supplier_reference`)) where `state` <> `VOID` |
 | DocumentLine | `acc_sales_invoice_lines`, `acc_purchase_bill_lines` | foreign key to the document |
 | Payment | `acc_payments` | backend-only `direction`; unique (`direction`, `number`) |
+| CreditNote | `acc_credit_notes`, `acc_credit_note_lines` | backend-only `direction` (customer / supplier); unique (`direction`, `number`) |
 | BankAccount | `acc_bank_accounts` | unique `gl_account_id` |
 | BankStatementLine | `acc_bank_statement_lines` | unique `matched_journal_id` where not null |
 | FxRevaluation | `acc_fx_revaluations` | unique `period_id` |

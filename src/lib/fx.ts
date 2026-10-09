@@ -1,5 +1,6 @@
 import type {
   BankAccount,
+  CreditNote,
   DocumentLine,
   ExchangeRate,
   FxRevaluationLine,
@@ -174,6 +175,8 @@ interface RevaluationInput {
   bills: PurchaseBill[];
   receipts: Payment[];
   supplierPayments: Payment[];
+  creditNotes: CreditNote[];
+  supplierCredits: CreditNote[];
   taxCodes: TaxCode[];
   bankAccounts: BankAccount[];
   journals: JournalEntry[];
@@ -197,6 +200,7 @@ export const revaluationLines = (
     const isAr = kind === "RECEIVABLE";
     const docs: (SalesInvoice | PurchaseBill)[] = isAr ? s.invoices : s.bills;
     const payments = isAr ? s.receipts : s.supplierPayments;
+    const credits = isAr ? s.creditNotes : s.supplierCredits;
     const parties = new Map((isAr ? s.customers : s.suppliers).map((p) => [p.id, p.name]));
     for (const doc of docs) {
       if (!isForeign(doc.currency) || doc.state !== "APPROVED" || doc.issue_date > asAt) continue;
@@ -204,11 +208,16 @@ export const revaluationLines = (
       if (!rate) continue;
       const total = documentTotals(doc.lines, s.taxCodes).total;
       const paid = payments.filter((p) => p.document_id === doc.id && p.date <= asAt);
-      const paidFc = round2(paid.reduce((t, p) => t + p.amount, 0));
+      const credited = credits.filter((c) => c.document_id === doc.id && c.state === "APPROVED" && c.date <= asAt);
+      const paidFc = round2(
+        paid.reduce((t, p) => t + p.amount, 0) + credited.reduce((t, c) => t + documentTotals(c.lines, s.taxCodes).total, 0),
+      );
       const openFc = round2(total - paidFc);
       if (openFc <= 0.005) continue;
       const carrying = round2(
-        toBase(total, doc.exchange_rate) - paid.reduce((t, p) => t + paymentCarrying(p, isAr ? "RECEIPT" : "PAYMENT"), 0),
+        toBase(total, doc.exchange_rate) -
+          paid.reduce((t, p) => t + paymentCarrying(p, isAr ? "RECEIPT" : "PAYMENT"), 0) -
+          credited.reduce((t, c) => t + c.base_amount, 0),
       );
       const revalued = toBase(openFc, rate);
       const partyId = isAr ? (doc as SalesInvoice).customer_id : (doc as PurchaseBill).supplier_id;

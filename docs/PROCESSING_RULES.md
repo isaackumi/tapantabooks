@@ -26,8 +26,9 @@ This document specifies the business rules that tvs-accounting-bk must enforce s
 16. Audit trail
 17. Reports
 18. Opening balances
-19. Open questions for backend
-20. Mock simplifications the API must not copy
+19. Credit notes and supplier credits
+20. Open questions for backend
+21. Mock simplifications the API must not copy
 
 ---
 
@@ -77,7 +78,7 @@ Notes:
 - "Today" means the current date of the organisation. The mock pins it to `2026-10-05` so that the demo data stays stable; the API must use the real date (see open questions on time zone).
 - "The actor" is the user identified by the JWT `user_id`. The actor is stamped into `created_by_id` / `updated_by_id`, into `posted_by`, `approved_by`, `locked_by`, and into the audit event.
 - "Base" means the organisation's base currency (`OrgSettings.base_currency`, default `GHS`). "FC" means the foreign (document or bank) currency amount.
-- `round2` means rounding to two decimals. The mock uses `Math.round(x * 100) / 100` on floating-point numbers; the API must use decimals (see section 20).
+- `round2` means rounding to two decimals. The mock uses `Math.round(x * 100) / 100` on floating-point numbers; the API must use decimals (see section 21).
 - "Ledger-affecting" journals are those with status `POSTED` or `REVERSED`. A reversed journal stays in the ledger and is cancelled by its own reversal entry, which is itself `POSTED`.
 
 ### 1.5 Standard accounts (account roles)
@@ -670,7 +671,7 @@ Payment journals carry `source.document_id`, so they cannot be reversed through 
 
 - The base currency is `OrgSettings.base_currency` (ISO 4217, default `GHS`). Every journal debit and credit is in base currency.
 - An exchange rate is **base currency per one unit of the foreign currency** (for example 1 USD = 12.86 GHS is stored as `12.86`). Converting: base = round2(FC × rate).
-- Rates are stored with four decimals (manual rates and payment rates are rounded to four decimals; the mock does not round document and transfer rates, see section 20).
+- Rates are stored with four decimals (manual rates and payment rates are rounded to four decimals; the mock does not round document and transfer rates, see section 21).
 - The rate "on" a date is the latest rate for that currency dated on or before the date; ties on the same date are broken by the latest `created_at`, whatever the source.
 - Documents fix their rate at creation (`exchange_rate`). Later rate changes never alter posted documents.
 - Foreign amounts are carried on journal lines in `currency` and `amount_fc` (same side as the debit or credit) for foreign AR/AP lines and foreign bank lines.
@@ -1385,7 +1386,51 @@ Response: 200 with the updated `OpeningBalancesView`. Detail: `Opening balances 
 
 ---
 
-## 19. Open questions for backend
+## 19. Credit notes and supplier credits
+
+A customer credit note (`/credit-notes/*`) is raised against an approved invoice; a supplier credit (`/supplier-credits/*`) against an approved bill. Either reduces what is owed on that document the way a payment does, without moving cash, and reverses the revenue (or cost) and VAT on the lines credited. Credits are always at the document's currency and rate, so they never create an exchange difference.
+
+### 19.1 `POST /credit-notes/add`, `POST /supplier-credits/add`
+
+Body `CreditNoteInput { document_id, date, reason, supplier_reference?, lines[] }`; lines have the `DocumentLine` shape without `id`.
+
+Validation, in order:
+
+- The document exists and is `APPROVED`.
+- `reason` is required.
+- `date` is set and not before the document's `issue_date`.
+- At least one line; each line has a description, quantity > 0, unit price > 0, an active non-group non-control account, and an existing tax code.
+- Supplier credits: `supplier_reference` is required.
+- `The credit ({total}) is more than the {outstanding} still owed on {number}.` when the credit total (with tax, document currency) exceeds `total − amount_paid` by more than 0.005.
+- Posting-date check on `date`.
+- Supplier credits: `supplier_reference` must not match another non-void credit from the same supplier (case-insensitive).
+
+Numbering: `CN-2026-####` for customer credit notes and `SCN-2026-####` for supplier credits (hard-coded like receipt prefixes; see section 20).
+
+Journal (`POSTED`, `date`, memo `Credit note {number} – {party} against {document number}` or `Supplier credit …`, `reference` = supplier reference or the number, `source` `{ SALES | PURCHASES, reference: number, document_id: document id }`, branch = the document's branch): the document posting (section 7) for the credit's lines at the document rate, with debit and credit swapped. A customer credit note therefore debits revenue and output VAT and credits AR control; a supplier credit debits AP control and credits the expense and input VAT. The control line carries `currency` / `amount_fc` for foreign documents.
+
+Carrying value: the AR/AP amount released is `carryingBaseFor` (section 8.2): when the credit clears the document, exactly the base value still carried; otherwise `round2(total × document rate)`. If that differs from the control line, the control line is set to it and the difference goes on the largest other line.
+
+A `CreditNote` is stored with `state = APPROVED`, `base_amount` = the carrying value released, the document's `currency` and `exchange_rate`. The document's `amount_paid` increases by the credit total and `amount_paid_base` by `base_amount`, so display status, outstanding amounts, ageing and later payments treat it like a payment.
+
+Audit `CREDIT_NOTE.ISSUED` / `SUPPLIER_CREDIT.RECORDED` (entity type `Credit note` / `Supplier credit`), summary `{amount} to|from {party} against {document number}: {reason}`.
+
+Response: 201 with the `CreditNote`. Detail: `{number} issued|recorded · {amount} off {document number}`.
+
+### 19.2 `POST /credit-notes/void`, `POST /supplier-credits/void`
+
+Query `credit_note_id` / `supplier_credit_id`; body `{ reason }`. Fails when the credit is already `VOID`, when `reason` is blank, or when today fails the posting-date check. The credit's journal is reversed dated today; the document's `amount_paid` and `amount_paid_base` are reduced by the credit total and `base_amount` (not below zero); the credit becomes `VOID`. Audit `CREDIT_NOTE.VOIDED` / `SUPPLIER_CREDIT.VOIDED`. Response: 200 with the credit.
+
+### 19.3 Effects elsewhere
+
+- `POST /invoices/void` and `POST /bills/void` refuse documents with any `amount_paid`, which now includes credits: `Payments or credit notes have been recorded against it. Reverse those first.`
+- FX revaluation (section 10.1) counts approved credits dated on or before `as_at` like payments: their totals reduce `amount_fc` and their `base_amount` reduces `carrying_base`.
+- The VAT figures are read from the ledger, so credited VAT drops out of the return for the credit's month.
+- `POST /journals/reverse` refuses credit journals because they carry a `document_id`.
+
+---
+
+## 20. Open questions for backend
 
 These are behaviours that are ambiguous, missing or probably wrong in the mock. Each needs a decision before or during implementation.
 
@@ -1447,7 +1492,7 @@ These are behaviours that are ambiguous, missing or probably wrong in the mock. 
 
 ---
 
-## 20. Mock simplifications the API must not copy
+## 21. Mock simplifications the API must not copy
 
 The mock runs in one browser tab against one in-memory copy of the books. These shortcuts are acceptable there and wrong for a multi-user API.
 

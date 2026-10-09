@@ -46,6 +46,10 @@ const entityHref = (e: AuditEvent): string | null => {
       return "/settings?tab=currencies";
     case "FX revaluation":
       return "/accounting/revaluation";
+    case "Credit note":
+      return `/sales/credit-notes?open=${e.entity_id}`;
+    case "Supplier credit":
+      return `/purchases/supplier-credits?open=${e.entity_id}`;
     case "Opening balances":
       return "/accounting/opening-balances";
     case "Customer":

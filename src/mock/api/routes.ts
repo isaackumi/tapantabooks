@@ -1,4 +1,4 @@
-import type { CustomFieldEntity, PeriodStatus } from "@/models/accounting";
+import type { CreditNote, CustomFieldEntity, PeriodStatus } from "@/models/accounting";
 import { ENDPOINTS, endpointKey } from "@/services/catalogue";
 import { balanceSheet, cashFlow, generalLedger, incomeStatement, trialBalance } from "@/lib/ledger";
 import { AGEING_BUCKETS, ageingBucket, emptyAgeing } from "@/lib/documents";
@@ -33,6 +33,14 @@ const snakeKeys = (value: unknown): unknown => {
   return value;
 };
 const report = (data: unknown): HandlerResult => ({ data: snakeKeys(data) });
+
+const creditList = (rows: CreditNote[], q: URLSearchParams) =>
+  listResult(rows, q, {
+    search: ["number", "reason", "supplier_reference"],
+    filters: { party_id: "party_id", document_id: "document_id", state: "state" },
+    dateField: "date",
+    defaultSort: { field: "date", order: "desc" },
+  });
 
 const monthStart = (date: string) => `${date.slice(0, 7)}-01`;
 const yearStart = (date: string) => `${date.slice(0, 4)}-01-01`;
@@ -223,6 +231,13 @@ const HANDLERS: Record<string, Handler> = {
       defaultSort: { field: "date", order: "desc" },
     }),
   "POST /receipts/add": ({ engine, body }) => fromResult(engine.recordPayment("receipt", body), 201),
+  "GET /credit-notes/list": ({ state, q }) => creditList(state.creditNotes, q),
+  "GET /credit-notes/get": ({ state, q }) => ({
+    data: found(state.creditNotes.find((c) => c.id === need(q.get("credit_note_id"), "credit_note_id")), "Credit note"),
+  }),
+  "POST /credit-notes/add": ({ engine, body }) => fromResult(engine.createCreditNote("customer", body), 201),
+  "POST /credit-notes/void": ({ engine, q, body }) =>
+    fromResult(engine.voidCreditNote("customer", need(q.get("credit_note_id"), "credit_note_id"), String(body?.reason ?? ""))),
 
   // ---- Bills & supplier payments -----------------------------------------------------------------------------
   "GET /bills/list": ({ state, q }) =>
@@ -250,6 +265,13 @@ const HANDLERS: Record<string, Handler> = {
       defaultSort: { field: "date", order: "desc" },
     }),
   "POST /supplier-payments/add": ({ engine, body }) => fromResult(engine.recordPayment("payment", body), 201),
+  "GET /supplier-credits/list": ({ state, q }) => creditList(state.supplierCredits, q),
+  "GET /supplier-credits/get": ({ state, q }) => ({
+    data: found(state.supplierCredits.find((c) => c.id === need(q.get("supplier_credit_id"), "supplier_credit_id")), "Supplier credit"),
+  }),
+  "POST /supplier-credits/add": ({ engine, body }) => fromResult(engine.createCreditNote("supplier", body), 201),
+  "POST /supplier-credits/void": ({ engine, q, body }) =>
+    fromResult(engine.voidCreditNote("supplier", need(q.get("supplier_credit_id"), "supplier_credit_id"), String(body?.reason ?? ""))),
 
   // ---- Banking -----------------------------------------------------------------------------------------------------
   "GET /bank-accounts/list": ({ state, q }) => listResult(state.bankAccounts, q, { search: ["name", "bank", "account_number"] }),
