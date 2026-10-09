@@ -11,7 +11,7 @@ import {
 
 const STORAGE_PREFIX = "tvs-mock-db:";
 /** Bump when the seed or model shape changes so stale browser copies are discarded. */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 interface TenantDb {
   ref: StateRef;

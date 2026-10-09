@@ -1015,6 +1015,18 @@ export const ENDPOINTS: EndpointDef[] = [
   },
   {
     method: "GET",
+    path: "/reports/tax-summary",
+    module: "Reports",
+    summary: "VAT output, input and net payable plus withholding tax by month, with each month's return status and the tax account balances",
+    query: {
+      from_date: "YYYY-MM-DD (default: start of the financial year containing to_date)",
+      to_date: "YYYY-MM-DD (default: today). The range covers at most 24 calendar months",
+    },
+    returns: "TaxSummaryReport",
+    permission: perm("report", "get"),
+  },
+  {
+    method: "GET",
     path: "/reports/customer-statement",
     module: "Reports",
     summary: "Statement of account for one customer in one currency",

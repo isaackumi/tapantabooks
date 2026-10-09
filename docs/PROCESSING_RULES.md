@@ -988,7 +988,7 @@ Rules:
 - Document tax is computed as in section 7.3 and posted per code to the code's output account (invoices) or input account (bills), falling back to VAT output or VAT input when the code has none.
 - `WITHHOLDING` codes compute no tax on documents and nothing posts to the WHT payable account from documents or payments. How withholding should be applied is an open question.
 - `is_active` on tax codes is not checked when documents are validated (open question).
-- The Tax page computes the monthly VAT summary on the client from posted journals: output = sum of credits on the VAT output account, input = sum of debits on the VAT input account, withholding = sum of credits on the WHT payable account, net = output − input; the return is due on the 15th of the next month and is treated as filed when a ledger-affecting journal has `source.reference` `GRA-VAT-{MM}`. There is no tax report endpoint.
+- The monthly VAT summary, return status and tax account balances come from `GET /reports/tax-summary` (section 17.10). A VAT return is settled by a journal with `source.reference` `VAT-{YYYY-MM}` for the month it settles; a withholding remittance uses `WHT-{YYYY-MM}`. There is no endpoint that files a return; the settlement is posted as an ordinary journal.
 
 ---
 
@@ -1216,6 +1216,10 @@ Validation, in order:
 - When `base_currency` changes: `The base currency cannot change once entries have been posted.` when any journal is `POSTED` or `REVERSED`; otherwise the base-currency adoption in section 15.2 runs (with its validation message).
 - `Approval threshold cannot be negative.`
 - `Choose an active, postable account for exchange differences.` when `fx_realised_account_id` or `fx_unrealised_account_id` is supplied and is not an existing, active, non-group, non-control account.
+- `Choose an active, postable revenue account as the default for sales.` when `default_sales_account_id` is supplied and is not an existing, active, non-group, non-control, non-bank `REVENUE` account.
+- `Choose an active, postable expense or asset account as the default for purchases.` for `default_purchase_account_id` on the same rules with `EXPENSE` or `ASSET`.
+- `Choose an active VAT or exempt tax code as the default.` when `default_sales_tax_code_id` or `default_purchase_tax_code_id` is supplied and is not an existing, active, non-`WITHHOLDING` tax code.
+- An empty string for any of the four defaults is stored as `null` (no default).
 - `Rate tolerance cannot be negative.`
 
 Side effects: the patch is merged into the settings. When no supplied value differs from the current one, the response detail is `Nothing changed` and no audit is recorded. Otherwise audit `SETTINGS.UPDATED` (entity type `Organisation`, entity id null, label `Settings`), summary `Updated {changed fields}.` with one change per field.
@@ -1465,6 +1469,30 @@ One row per calendar month from the month of `from_date` to the month of `to_dat
 - Journals dated after `to_date` are left out, so the last month runs to `to_date` rather than the month end.
 
 Response: `{ from_date, to_date, months: [{ month: "YYYY-MM", revenue, expenses, net_income, closing_cash }] }`. The dashboard and the income statement chart use it; it does not change any other report.
+
+### 17.10 Tax summary (`GET /reports/tax-summary?from_date=&to_date=`)
+
+One row per calendar month from the month of `from_date` to the month of `to_date`, both included. Defaults: `to_date` today; `from_date` the start of the financial year containing `to_date`. 400 when `from_date` is after `to_date` or the range spans more than 24 months.
+
+Tax accounts come from the tax codes, not from fixed account ids:
+
+- Output accounts: the `output_account_id` of every non-`WITHHOLDING` code. Input accounts: their `input_account_id`. Withholding accounts: both account ids of `WITHHOLDING` codes.
+- Inactive codes count, so history posted under a retired code is still reported.
+
+For each month, over ledger-affecting journals dated in the month and within the range, excluding `OPENING_BALANCE` journals and tax settlement journals (`source.reference` matching `VAT-YYYY-MM` or `WHT-YYYY-MM`, and reversals of those):
+
+- `output_tax`: credit − debit on output accounts, so credit notes reduce it.
+- `input_tax`: debit − credit on input accounts, so supplier credits reduce it.
+- When one account is both an output and an input account, its credits count as output tax and its debits as input tax.
+- `net_payable` = `output_tax` − `input_tax`; negative is a refund position.
+- `withholding_tax`: credit − debit on withholding accounts.
+- `due_date`: day 15 (`return_due_day`) of the following month.
+- `filing`: the `POSTED` journal (not itself a reversal) with `source.reference` `VAT-{month}`, as `{ journal_id, number, date, amount }`; `amount` is the debit on output accounts less the credit on input accounts in that journal. A reversed settlement is not a filing.
+- `status`, in order: `FILED` when there is a filing; `IN_PROGRESS` while the month has not ended (month end on or after today); `NOTHING_DUE` when `net_payable` ≤ 0; `OVERDUE` when `due_date` is before today; otherwise `DUE`.
+
+`next_return` is the earliest month with status `DUE` or `OVERDUE`, or null. `accounts.output`, `accounts.input` and `accounts.withholding` list each tax account with its balance as at `to_date` in the account's normal direction (from the beginning of the books, settlements included). `totals` sum the monthly columns.
+
+Response: `TaxSummaryReport` (`DATA_MODEL.md` section 10). The Tax page uses it; nothing else changes.
 
 ---
 

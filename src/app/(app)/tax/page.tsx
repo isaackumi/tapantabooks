@@ -1,133 +1,187 @@
 "use client";
 
-import { useMemo } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { FiInfo } from "react-icons/fi";
 import { Callout, PageHeader, Panel } from "@/components/ui";
 import StatCard from "@/components/statCard";
 import StatusBadge from "@/components/statusBadge";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
+import { QueryState, Skeleton } from "@/components/queryState";
+import { ReportToolbar, useReportPresets } from "@/components/reports/reportKit";
 import { useLedger } from "@/store/ledgerStore";
-import { affectsLedger, balancesByAccount } from "@/lib/ledger";
-import { ACC } from "@/mock/seed";
-import { fmtCurrency, fmtDate, humanize, round2 } from "@/utils/format";
-import { addDays, endOfMonth, monthKey, todayIso } from "@/utils/dates";
+import { useReport } from "@/services/useApiQuery";
+import type { TaxAccountBalance, TaxReturnStatus, TaxSummaryMonth, TaxSummaryReport } from "@/models/reports";
+import { fiscalYearFor } from "@/lib/fiscalYears";
+import { downloadCsv } from "@/utils/csv";
+import { fmtCurrency, fmtDate, humanize } from "@/utils/format";
+import { addDays, endOfMonth, isIsoDate, monthName, todayIso } from "@/utils/dates";
+import { useQueryParam } from "@/utils/useQueryParam";
 
-const MONTHS = Array.from({ length: 10 }, (_, i) => `2026-${String(i + 1).padStart(2, "0")}`);
 const pct = (rate: number) => `${Math.round(rate * 1000) / 10}%`;
+
+const STATUS_BADGE: Record<TaxReturnStatus, { status: string; label: string }> = {
+  FILED: { status: "PAID", label: "Filed & paid" },
+  IN_PROGRESS: { status: "DRAFT", label: "Month in progress" },
+  DUE: { status: "OPEN", label: "Ready to file" },
+  OVERDUE: { status: "OVERDUE", label: "Overdue" },
+  NOTHING_DUE: { status: "NEUTRAL", label: "Nothing to pay" },
+};
+
+const sumBalances = (rows: TaxAccountBalance[]) => rows.reduce((t, r) => t + r.balance, 0);
+const accountCodes = (rows: TaxAccountBalance[]) => (rows.length ? `Balance on ${rows.map((r) => r.code).join(", ")}` : "No tax account set up");
 
 export default function TaxPage() {
   const { state } = useLedger();
   const { openJournal } = useJournalViewer();
+  const presets = useReportPresets();
   const today = todayIso();
+  const [from, setFrom] = useState(() => fiscalYearFor(state.org, today).start_date);
+  const [to, setTo] = useState(today);
+  useQueryParam("from", (v) => {
+    if (isIsoDate(v)) setFrom(v);
+  });
+  useQueryParam("to", (v) => {
+    if (isIsoDate(v)) setTo(v);
+  });
+
+  const summary = useReport<TaxSummaryReport>("/reports/tax-summary", { from_date: from, to_date: to });
   const accounts = new Map(state.accounts.map((a) => [a.id, a]));
 
-  const months = useMemo(
-    () =>
-      MONTHS.map((m) => {
-        let output = 0;
-        let input = 0;
-        let wht = 0;
-        for (const j of state.journals) {
-          if (!affectsLedger(j) || monthKey(j.date) !== m) continue;
-          for (const l of j.lines) {
-            if (l.account_id === ACC.vatOut) output += l.credit;
-            if (l.account_id === ACC.vatIn) input += l.debit;
-            if (l.account_id === ACC.wht) wht += l.credit;
-          }
-        }
-        const [y, mo] = m.split("-").map(Number);
-        const due = mo === 12 ? `${y + 1}-01-15` : `${y}-${String(mo + 1).padStart(2, "0")}-15`;
-        const filing = state.journals.find(
-          (j) => affectsLedger(j) && j.source.reference === `GRA-VAT-${String(mo).padStart(2, "0")}`,
-        );
-        const net = round2(output - input);
-        const status = filing ? "FILED" : endOfMonth(m) >= today ? "IN_PROGRESS" : due < today ? "OVERDUE" : "DUE";
-        return { month: m, output: round2(output), input: round2(input), net, wht: round2(wht), due, filing, status };
-      }),
-    [state.journals, today],
-  );
+  /** Drill to the ledger when the figure comes from a single account. */
+  const ledgerLink = (rows: TaxAccountBalance[], month: string, value: string) => {
+    if (rows.length !== 1) return value;
+    const monthFrom = `${month}-01`;
+    const monthTo = endOfMonth(month) < to ? endOfMonth(month) : to;
+    return (
+      <Link
+        href={`/accounting/general-ledger?account=${rows[0].account_id}&from=${monthFrom > from ? monthFrom : from}&to=${monthTo}`}
+        className="hover:text-brand-700 hover:underline dark:hover:text-brand-300"
+      >
+        {value}
+      </Link>
+    );
+  };
 
-  const balances = balancesByAccount(state.accounts, state.journals, { to: today });
-  const nextDue = months.find((m) => m.status === "DUE");
-  const ytdOutput = months.reduce((s, m) => s + m.output, 0);
-  const ytdInput = months.reduce((s, m) => s + m.input, 0);
+  const exportCsv = () => {
+    const s = summary.data;
+    if (!s) return;
+    downloadCsv(`tax-summary-${from}-to-${to}.csv`, [
+      ["Month", "Output tax", "Input tax", "Net payable", "WHT deducted", "Due", "Status", "Filing journal"],
+      ...s.months.map((m) => [m.month, m.output_tax, m.input_tax, m.net_payable, m.withholding_tax, m.due_date, m.status, m.filing?.number ?? ""]),
+      ["Total", s.totals.output_tax, s.totals.input_tax, s.totals.net_payable, s.totals.withholding_tax, "", "", ""],
+    ]);
+  };
+
+  const returnCell = (m: TaxSummaryMonth) =>
+    m.filing ? (
+      <button onClick={() => openJournal(m.filing!.journal_id)} className="flex items-center gap-2" title={`Paid ${fmtCurrency(m.filing.amount)} on ${fmtDate(m.filing.date)}`}>
+        <StatusBadge {...STATUS_BADGE.FILED} />
+        <span className="font-mono text-xs text-brand-700 dark:text-brand-300">{m.filing.number}</span>
+      </button>
+    ) : (
+      <StatusBadge {...STATUS_BADGE[m.status]} />
+    );
 
   return (
     <div>
       <PageHeader
         title="Tax"
-        description="VAT, levies and withholding tax calculated from posted transactions. Each month's return is settled with GRA on the 15th of the next month."
+        description="VAT, levies and withholding tax from posted transactions. Each month's return is settled with the tax authority by the due date shown."
       />
+      <ReportToolbar from={from} to={to} onFrom={setFrom} onTo={setTo} presets={presets.period} onExport={summary.data ? exportCsv : undefined} />
 
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          label="VAT & levies payable"
-          value={fmtCurrency(balances.get(ACC.vatOut) ?? 0)}
-          sub="Balance on 2100"
-          info="Output tax charged on sales that has not yet been paid to GRA."
-        />
-        <StatCard label="Input VAT recoverable" value={fmtCurrency(balances.get(ACC.vatIn) ?? 0)} sub="Balance on 1400" />
-        <StatCard
-          label="Next return"
-          value={nextDue ? fmtCurrency(nextDue.net) : "—"}
-          tone={nextDue ? "warning" : "default"}
-          sub={nextDue ? `${new Date(`${nextDue.month}-01T00:00:00`).toLocaleDateString("en-GB", { month: "long" })} · due ${fmtDate(nextDue.due)}` : "Nothing due"}
-        />
-        <StatCard label="Withholding tax held" value={fmtCurrency(balances.get(ACC.wht) ?? 0)} sub="Balance on 2120" />
-      </div>
+      <QueryState
+        query={summary}
+        skeleton={
+          <div className="space-y-6">
+            <Skeleton rows={2} />
+            <Skeleton rows={8} />
+          </div>
+        }
+      >
+        {(s) => {
+          const next = s.next_return;
+          return (
+            <>
+              <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <StatCard
+                  label="VAT & levies payable"
+                  value={fmtCurrency(sumBalances(s.accounts.output))}
+                  sub={accountCodes(s.accounts.output)}
+                  info={`Output tax charged on sales and not yet paid to the tax authority, as at ${fmtDate(s.to_date)}.`}
+                />
+                <StatCard label="Input VAT recoverable" value={fmtCurrency(sumBalances(s.accounts.input))} sub={accountCodes(s.accounts.input)} />
+                <StatCard
+                  label="Next return"
+                  value={next ? fmtCurrency(next.net_payable) : "—"}
+                  tone={next ? (next.status === "OVERDUE" ? "danger" : "warning") : "default"}
+                  sub={next ? `${monthName(next.month)} · due ${fmtDate(next.due_date)}` : "Nothing due"}
+                />
+                <StatCard label="Withholding tax held" value={fmtCurrency(sumBalances(s.accounts.withholding))} sub={accountCodes(s.accounts.withholding)} />
+              </div>
 
-      {nextDue && nextDue.due <= addDays(today, 14) && (
-        <Callout tone="warning" icon={FiInfo} title={`Return due ${fmtDate(nextDue.due)}`} className="mb-6">
-          Net VAT and levies of {fmtCurrency(nextDue.net)} for {new Date(`${nextDue.month}-01T00:00:00`).toLocaleDateString("en-GB", { month: "long" })}.
-          Review the output and input figures below before filing on the GRA portal.
-        </Callout>
-      )}
+              {next && next.due_date <= addDays(today, 14) && (
+                <Callout
+                  tone={next.status === "OVERDUE" ? "danger" : "warning"}
+                  icon={FiInfo}
+                  title={next.status === "OVERDUE" ? `Return overdue since ${fmtDate(next.due_date)}` : `Return due ${fmtDate(next.due_date)}`}
+                  className="mb-6"
+                >
+                  Net VAT and levies of {fmtCurrency(next.net_payable)} for {monthName(next.month)}. Review the output and input figures below before filing.
+                </Callout>
+              )}
 
-      <Panel title="VAT & levies by month" subtitle={`Year to date: output ${fmtCurrency(ytdOutput)}, input ${fmtCurrency(ytdInput)}`} bodyClassName="p-0 pt-2">
-        <div className="overflow-x-auto">
-          <table className="min-w-full text-sm">
-            <thead className="text-left text-neutral-500 dark:text-neutral-400">
-              <tr className="border-b border-neutral-100 dark:border-neutral-700">
-                <th className="px-6 py-2.5 font-normal">Month</th>
-                <th className="px-6 py-2.5 text-right font-normal">Output tax</th>
-                <th className="px-6 py-2.5 text-right font-normal">Input tax</th>
-                <th className="px-6 py-2.5 text-right font-normal">Net payable</th>
-                <th className="px-6 py-2.5 text-right font-normal">WHT deducted</th>
-                <th className="px-6 py-2.5 font-normal">Due</th>
-                <th className="px-6 py-2.5 font-normal">Return</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
-              {months.map((m) => (
-                <tr key={m.month}>
-                  <td className="px-6 py-3 font-medium">
-                    {new Date(`${m.month}-01T00:00:00`).toLocaleDateString("en-GB", { month: "long", year: "numeric" })}
-                  </td>
-                  <td className="px-6 py-3 text-right tabular-nums">{fmtCurrency(m.output)}</td>
-                  <td className="px-6 py-3 text-right tabular-nums">{fmtCurrency(m.input)}</td>
-                  <td className="px-6 py-3 text-right font-semibold tabular-nums">{fmtCurrency(m.net)}</td>
-                  <td className="px-6 py-3 text-right tabular-nums">{m.wht ? fmtCurrency(m.wht) : "—"}</td>
-                  <td className="px-6 py-3">{fmtDate(m.due)}</td>
-                  <td className="px-6 py-3">
-                    {m.filing ? (
-                      <button onClick={() => openJournal(m.filing!.id)} className="flex items-center gap-2">
-                        <StatusBadge status="PAID" label="Filed & paid" />
-                        <span className="font-mono text-xs text-brand-700 dark:text-brand-300">{m.filing.number}</span>
-                      </button>
-                    ) : (
-                      <StatusBadge
-                        status={m.status === "IN_PROGRESS" ? "DRAFT" : m.status === "DUE" ? "OPEN" : "OVERDUE"}
-                        label={m.status === "IN_PROGRESS" ? "Month in progress" : m.status === "DUE" ? "Ready to file" : "Overdue"}
-                      />
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Panel>
+              <Panel
+                title="VAT & levies by month"
+                subtitle={`${fmtDate(s.from_date)} to ${fmtDate(s.to_date)} · returns due on day ${s.return_due_day} of the following month`}
+                bodyClassName="p-0 pt-2"
+              >
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm [&_td]:whitespace-nowrap">
+                    <thead className="text-left text-neutral-500 dark:text-neutral-400">
+                      <tr className="border-b border-neutral-100 dark:border-neutral-700">
+                        <th className="px-4 py-2.5 font-normal">Month</th>
+                        <th className="px-4 py-2.5 text-right font-normal">Output tax</th>
+                        <th className="px-4 py-2.5 text-right font-normal">Input tax</th>
+                        <th className="px-4 py-2.5 text-right font-normal">Net payable</th>
+                        <th className="px-4 py-2.5 text-right font-normal">WHT deducted</th>
+                        <th className="px-4 py-2.5 font-normal">Due</th>
+                        <th className="px-4 py-2.5 font-normal">Return</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
+                      {s.months.map((m) => (
+                        <tr key={m.month}>
+                          <td className="px-4 py-3 font-medium whitespace-nowrap">{monthName(m.month)}</td>
+                          <td className="px-4 py-3 text-right tabular-nums">{ledgerLink(s.accounts.output, m.month, fmtCurrency(m.output_tax))}</td>
+                          <td className="px-4 py-3 text-right tabular-nums">{ledgerLink(s.accounts.input, m.month, fmtCurrency(m.input_tax))}</td>
+                          <td className="px-4 py-3 text-right font-semibold tabular-nums">{fmtCurrency(m.net_payable)}</td>
+                          <td className="px-4 py-3 text-right tabular-nums">
+                            {m.withholding_tax ? ledgerLink(s.accounts.withholding, m.month, fmtCurrency(m.withholding_tax)) : "—"}
+                          </td>
+                          <td className="px-4 py-3 whitespace-nowrap">{fmtDate(m.due_date)}</td>
+                          <td className="px-4 py-3">{returnCell(m)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="border-t-2 border-neutral-200 font-semibold dark:border-neutral-600">
+                        <td className="px-4 py-3">Total</td>
+                        <td className="px-4 py-3 text-right tabular-nums">{fmtCurrency(s.totals.output_tax)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums">{fmtCurrency(s.totals.input_tax)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums">{fmtCurrency(s.totals.net_payable)}</td>
+                        <td className="px-4 py-3 text-right tabular-nums">{fmtCurrency(s.totals.withholding_tax)}</td>
+                        <td colSpan={2} />
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </Panel>
+            </>
+          );
+        }}
+      </QueryState>
 
       <Panel title="Tax codes" subtitle="Applied to invoice and bill lines; each posts to its own liability or recoverable account" className="mt-6" bodyClassName="p-0 pt-2">
         <div className="overflow-x-auto">

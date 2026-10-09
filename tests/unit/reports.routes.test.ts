@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { ApiFault, resolveHandler } from "@/mock/api/routes";
-import type { AgeingReport, BalanceSheetReport, DashboardStatistics, IncomeStatementReport, MonthlyTrendReport } from "@/models/reports";
+import type {
+  AgeingReport,
+  BalanceSheetReport,
+  DashboardStatistics,
+  IncomeStatementReport,
+  MonthlyTrendReport,
+  TaxSummaryReport,
+} from "@/models/reports";
+import { ACC, TAX } from "@/mock/seed";
 import { DEMO_TODAY, endOfMonth } from "@/utils/dates";
 import { demoBooks } from "./helpers";
 
@@ -72,6 +80,55 @@ describe("GET /dashboard/statistics", () => {
     expect(stats.receivables).toBeCloseTo(ar.totals.total, 2);
     expect(stats.payables_due_7_days).toBeLessThanOrEqual(stats.payables);
     expect(stats.draft_journals).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("GET /reports/tax-summary", () => {
+  it("defaults to the financial year to date and settles each filed month in full", () => {
+    const t = get<TaxSummaryReport>("/reports/tax-summary");
+    expect(t.from_date).toBe("2026-01-01");
+    expect(t.to_date).toBe(DEMO_TODAY);
+    expect(t.months.map((m) => m.month)).toEqual(Array.from({ length: 10 }, (_, i) => `2026-${String(i + 1).padStart(2, "0")}`));
+    const filed = t.months.filter((m) => m.status === "FILED");
+    expect(filed.length).toBeGreaterThan(0);
+    for (const m of filed) expect(m.filing!.amount).toBeCloseTo(m.net_payable, 2);
+    expect(t.months.at(-1)!.status).toBe("IN_PROGRESS");
+    expect(sum(t.months.map((m) => m.net_payable))).toBeCloseTo(t.totals.net_payable, 2);
+  });
+
+  it("points at the earliest unfiled return and reports the tax account balances", () => {
+    const t = get<TaxSummaryReport>("/reports/tax-summary");
+    expect(t.next_return?.month).toBe("2026-09");
+    expect(t.next_return?.due_date).toBe("2026-10-15");
+    expect(t.accounts.output.map((a) => a.code)).toEqual(["2100"]);
+    expect(t.accounts.withholding.map((a) => a.code)).toEqual(["2120"]);
+    // Everything up to August has been settled, so the payable balance is September and October's net output.
+    const unsettled = t.months.filter((m) => m.status !== "FILED");
+    expect(t.accounts.output[0].balance).toBeCloseTo(sum(unsettled.map((m) => m.output_tax)), 2);
+  });
+
+  it("rejects an inverted or over-long range", () => {
+    expect(() => get("/reports/tax-summary", { from_date: "2026-10-01", to_date: "2026-09-30" })).toThrow(ApiFault);
+    expect(() => get("/reports/tax-summary", { from_date: "2024-01-01", to_date: DEMO_TODAY })).toThrow(/at most 24 months/);
+  });
+});
+
+describe("PUT /organisation/update defaults", () => {
+  const update = (body: Record<string, unknown>) => {
+    const books = demoBooks();
+    const handler = resolveHandler("PUT", "/organisation/update")!;
+    return handler({ state: books.state, engine: books.engine, q: new URLSearchParams(), body, userId: books.state.currentUserId });
+  };
+
+  it("accepts a revenue account and clears a default with an empty value", () => {
+    const res = update({ default_sales_account_id: ACC.sales, default_purchase_tax_code_id: "" });
+    expect(res.data).toMatchObject({ default_sales_account_id: ACC.sales, default_purchase_tax_code_id: null });
+  });
+
+  it("rejects accounts of the wrong type and withholding tax codes", () => {
+    expect(() => update({ default_sales_account_id: ACC.gcb })).toThrow(/revenue account/);
+    expect(() => update({ default_purchase_account_id: ACC.sales })).toThrow(/expense or asset account/);
+    expect(() => update({ default_sales_tax_code_id: TAX.wht })).toThrow(/VAT or exempt tax code/);
   });
 });
 

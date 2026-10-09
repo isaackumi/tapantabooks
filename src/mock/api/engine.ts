@@ -2546,6 +2546,30 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
             const a = s.accounts.find((x) => x.id === patch[key]);
             if (!a || a.is_group || a.is_control || !a.is_active) return fail("Choose an active, postable account for exchange differences.");
           }
+          const defaultAccounts = [
+            ["default_sales_account_id", ["REVENUE"], "sales"],
+            ["default_purchase_account_id", ["EXPENSE", "ASSET"], "purchases"],
+          ] as const;
+          for (const [key, types, label] of defaultAccounts) {
+            const id = patch[key];
+            if (id === undefined || id === null || id === "") {
+              if (id === "") patch[key] = null;
+              continue;
+            }
+            const a = s.accounts.find((x) => x.id === id);
+            if (!a || a.is_group || a.is_control || !a.is_active || a.is_bank || !(types as readonly string[]).includes(a.type)) {
+              return fail(`Choose an active, postable ${types.map((t) => t.toLowerCase()).join(" or ")} account as the default for ${label}.`);
+            }
+          }
+          for (const key of ["default_sales_tax_code_id", "default_purchase_tax_code_id"] as const) {
+            const id = patch[key];
+            if (id === undefined || id === null || id === "") {
+              if (id === "") patch[key] = null;
+              continue;
+            }
+            const t = s.taxCodes.find((x) => x.id === id);
+            if (!t || !t.is_active || t.kind === "WITHHOLDING") return fail("Choose an active VAT or exempt tax code as the default.");
+          }
           if (patch.fx_rate_tolerance_pct !== undefined && !(patch.fx_rate_tolerance_pct >= 0)) {
             return fail("Rate tolerance cannot be negative.");
           }

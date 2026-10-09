@@ -460,6 +460,14 @@ export interface OrgSettings {
   fx_unrealised_account_id: string;
   /** Warn when a rate typed on a document differs from the latest reference rate by more than this. */
   fx_rate_tolerance_pct: number;
+  /** Pre-filled on new invoice lines; a postable REVENUE account. */
+  default_sales_account_id: string | null;
+  /** Pre-filled on new bill lines; a postable EXPENSE or ASSET account. */
+  default_purchase_account_id: string | null;
+  /** Pre-filled on new invoice lines; an active, non-withholding tax code. */
+  default_sales_tax_code_id: string | null;
+  /** Pre-filled on new bill lines; an active, non-withholding tax code. */
+  default_purchase_tax_code_id: string | null;
   /** Date the opening balances are posted at; set by PUT /opening-balances/update. */
   conversion_date?: string | null;
   /** The posted account-balances journal; replaced (reversed and re-posted) on every save. */

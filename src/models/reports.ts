@@ -116,6 +116,50 @@ export interface MonthlyTrendReport {
   months: MonthlyTrendPoint[];
 }
 
+export type TaxReturnStatus = "IN_PROGRESS" | "DUE" | "OVERDUE" | "FILED" | "NOTHING_DUE";
+
+export interface TaxReturnFiling {
+  journal_id: string;
+  number: string;
+  date: string;
+  amount: number;
+}
+
+export interface TaxSummaryMonth {
+  /** YYYY-MM */
+  month: string;
+  /** Net output tax charged in the month (credit notes reduce it). */
+  output_tax: number;
+  /** Net input tax recoverable in the month. */
+  input_tax: number;
+  /** output_tax − input_tax; negative is a refund position. */
+  net_payable: number;
+  withholding_tax: number;
+  due_date: string;
+  status: TaxReturnStatus;
+  filing: TaxReturnFiling | null;
+}
+
+export interface TaxAccountBalance {
+  account_id: string;
+  code: string;
+  name: string;
+  /** In the account's normal direction, as at `to_date`. */
+  balance: number;
+}
+
+export interface TaxSummaryReport {
+  from_date: string;
+  to_date: string;
+  /** Day of the following month a VAT return is due. */
+  return_due_day: number;
+  months: TaxSummaryMonth[];
+  totals: { output_tax: number; input_tax: number; net_payable: number; withholding_tax: number };
+  /** Earliest unfiled return that is due or overdue, or null. */
+  next_return: TaxSummaryMonth | null;
+  accounts: { output: TaxAccountBalance[]; input: TaxAccountBalance[]; withholding: TaxAccountBalance[] };
+}
+
 export interface DashboardStatistics {
   as_at: string;
   revenue_mtd: number;

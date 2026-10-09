@@ -17,6 +17,23 @@ const eslintConfig = [
     rules: { "react-hooks/rules-of-hooks": "off" },
   },
   {
+    files: ["src/**"],
+    ignores: ["src/mock/**"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@/mock/seed",
+              message: "Demo ids do not exist in a real tenant. Read defaults from organisation settings or an API response.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     ignores: [
       "node_modules/**",
       ".next/**",

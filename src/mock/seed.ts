@@ -1524,7 +1524,7 @@ const buildLedger = (
     J({
       date,
       memo: `VAT & levies return – ${MONTH_NAMES[m - 1]} 2026 (GRA)`,
-      source: { type: "BANKING", reference: `GRA-VAT-${pad(m)}` },
+      source: { type: "BANKING", reference: `VAT-${key}` },
       by: USERS.ama,
       lines: [
         [ACC.vatOut, output, 0, "Output tax for the month"],
@@ -2450,6 +2450,10 @@ const buildOrg = (): OrgSettings => ({
   fx_realised_account_id: ACC.fxRealised,
   fx_unrealised_account_id: ACC.fxUnrealised,
   fx_rate_tolerance_pct: 2,
+  default_sales_account_id: ACC.sales,
+  default_purchase_account_id: null,
+  default_sales_tax_code_id: TAX.std,
+  default_purchase_tax_code_id: TAX.std,
 });
 
 export const buildSeed = () => {

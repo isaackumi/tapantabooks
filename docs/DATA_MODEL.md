@@ -137,6 +137,10 @@ Table: `acc_org_settings` (unique on `tenant_id`, `org_id`). Audit fields: no.
 | `fx_realised_account_id` | string | yes | account id; active, non-group, non-control; default account 6130 |
 | `fx_unrealised_account_id` | string | yes | account id; same rules; default account 6140 |
 | `fx_rate_tolerance_pct` | number | yes | percentage; ≥ 0; default 2 |
+| `default_sales_account_id` | string or null | yes | pre-filled on new invoice lines; active, postable, non-bank `REVENUE` account; default account 4010 |
+| `default_purchase_account_id` | string or null | yes | pre-filled on new bill lines; active, postable, non-bank `EXPENSE` or `ASSET` account; default null |
+| `default_sales_tax_code_id` | string or null | yes | pre-filled on new invoice lines; active, non-`WITHHOLDING` tax code; default `GH-STD` |
+| `default_purchase_tax_code_id` | string or null | yes | pre-filled on new bill lines; same rules; default `GH-STD` |
 | `conversion_date` | date or null | no | date opening balances are posted at; set only by `PUT /opening-balances/update` |
 | `opening_balance_journal_id` | string or null | no | the current posted opening-balances journal; set only by `PUT /opening-balances/update` |
 
@@ -812,6 +816,7 @@ These shapes are computed, not stored.
 | `GET /reports/cash-flow` | `{ operating, investing, financing, total_operating, total_investing, total_financing, opening, net_change, closing }`; sections are `[{ label, amount }]` |
 | `GET /reports/ar-ageing`, `GET /reports/ap-ageing` | `AgeingReport`: `{ as_at, buckets: string[], rows: [{ party_id, party_code, party_name, buckets: { "<bucket label>": number }, total, documents: [{ document_id, number, issue_date, due_date, days_overdue, bucket, outstanding }] }], totals: { "<bucket label>": number, total } }` |
 | `GET /reports/monthly-trend` | `MonthlyTrendReport`: `{ from_date, to_date, months: [{ month: "YYYY-MM", revenue, expenses, net_income, closing_cash }] }` |
+| `GET /reports/tax-summary` | `TaxSummaryReport`: `{ from_date, to_date, return_due_day, months: TaxSummaryMonth[], totals: { output_tax, input_tax, net_payable, withholding_tax }, next_return: TaxSummaryMonth \| null, accounts: { output, input, withholding: [{ account_id, code, name, balance }] } }`; `TaxSummaryMonth` = `{ month: "YYYY-MM", output_tax, input_tax, net_payable, withholding_tax, due_date, status: "IN_PROGRESS" \| "DUE" \| "OVERDUE" \| "FILED" \| "NOTHING_DUE", filing: { journal_id, number, date, amount } \| null }` |
 | `GET /reports/customer-statement`, `GET /reports/supplier-statement` | `PartyStatement`: `{ kind, party_id, party_name, party_code, currency, currencies, from_date, to_date, opening_balance, entries: [{ date, type, number, document_id, description, charge, credit, balance }], total_charges, total_credits, closing_balance, ageing: { "<bucket label>": number, total }, open_documents: [{ document_id, number, issue_date, due_date, total, outstanding, bucket }] }`; amounts in the statement `currency` |
 | `GET /dashboard/statistics` | `DashboardStatistics`: `{ as_at, revenue_mtd, expenses_mtd, net_income_mtd, revenue_ytd, net_income_ytd, cash_balance, receivables, overdue_receivables, overdue_invoices, payables, overdue_payables, payables_due_7_days, journals_pending_approval, draft_journals, unmatched_statement_lines }` |
 | `GET /opening-balances/get`, `PUT /opening-balances/update` | `OpeningBalancesView`: `{ conversion_date, journal_id, journal_number, lines: [{ account_id, debit, credit }], receivables: SalesInvoice[], payables: PurchaseBill[], opening_equity_balance, first_transaction_date, locked_reason }` |

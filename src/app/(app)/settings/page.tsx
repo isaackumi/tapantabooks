@@ -8,7 +8,8 @@ import { Tabs } from "@/components/tabs";
 import StatusBadge from "@/components/statusBadge";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { useCurrentUser, useLedger } from "@/store/ledgerStore";
-import type { Dimension, OrgSettings } from "@/models/accounting";
+import type { AccountType, Dimension, OrgSettings } from "@/models/accounting";
+import AccountSelect from "@/components/accounting/accountSelect";
 import { useQueryParam } from "@/utils/useQueryParam";
 import { CurrencySettings } from "@/components/settings/currencySettings";
 import { CustomFieldsSettings } from "@/components/settings/customFieldsSettings";
@@ -40,6 +41,26 @@ const ROLE_MATRIX: Record<string, boolean[]> = {
   Accountant: [true, true, false, true, true, false, false, false],
   "Accounts Clerk": [true, true, false, true, false, false, false, false],
   Auditor: [true, false, false, false, false, false, false, false],
+};
+
+const SALES_TYPES: AccountType[] = ["REVENUE"];
+const PURCHASE_TYPES: AccountType[] = ["EXPENSE", "ASSET"];
+const nonBank = (a: { is_bank: boolean }) => !a.is_bank;
+
+const TaxCodeSelect = ({ value, onChange }: { value: string | null; onChange: (id: string | null) => void }) => {
+  const { state } = useLedger();
+  const codes = state.taxCodes.filter((t) => t.kind !== "WITHHOLDING" && (t.is_active || t.id === value));
+  return (
+    <select value={value ?? ""} onChange={(e) => onChange(e.target.value || null)} className={inputClass}>
+      <option value="">No default</option>
+      {codes.map((t) => (
+        <option key={t.id} value={t.id}>
+          {t.code} · {t.name}
+          {t.is_active ? "" : " (inactive)"}
+        </option>
+      ))}
+    </select>
+  );
 };
 
 const OrganisationTab = () => {
@@ -154,6 +175,53 @@ const OrganisationTab = () => {
             label="Block posting to locked periods"
             description="Closed periods are always blocked. Turn this off to let finance managers post late adjustments into locked periods."
           />
+        </div>
+      </Panel>
+
+      <Panel title="Default accounts and tax" subtitle="Pre-filled on new documents and used for exchange differences. Each line can still be changed.">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Field label="Sales account" hint="New invoice lines">
+            <AccountSelect
+              value={form.default_sales_account_id ?? ""}
+              onChange={(v) => set("default_sales_account_id", v || null)}
+              types={SALES_TYPES}
+              filter={nonBank}
+              placeholder="No default"
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Sales tax code" hint="New invoice lines">
+            <TaxCodeSelect value={form.default_sales_tax_code_id} onChange={(v) => set("default_sales_tax_code_id", v)} />
+          </Field>
+          <Field label="Purchases account" hint="New bill lines">
+            <AccountSelect
+              value={form.default_purchase_account_id ?? ""}
+              onChange={(v) => set("default_purchase_account_id", v || null)}
+              types={PURCHASE_TYPES}
+              filter={nonBank}
+              placeholder="No default"
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Purchases tax code" hint="New bill lines">
+            <TaxCodeSelect value={form.default_purchase_tax_code_id} onChange={(v) => set("default_purchase_tax_code_id", v)} />
+          </Field>
+          <Field label="Realised exchange differences" hint="Settlements of foreign-currency documents">
+            <AccountSelect
+              value={form.fx_realised_account_id}
+              onChange={(v) => set("fx_realised_account_id", v)}
+              filter={nonBank}
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Unrealised exchange differences" hint="Month-end revaluation of open balances">
+            <AccountSelect
+              value={form.fx_unrealised_account_id}
+              onChange={(v) => set("fx_unrealised_account_id", v)}
+              filter={nonBank}
+              className={inputClass}
+            />
+          </Field>
         </div>
       </Panel>
 

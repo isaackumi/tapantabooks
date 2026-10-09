@@ -9,8 +9,7 @@ import AccountSelect from "@/components/accounting/accountSelect";
 import { defaultDueDate, useLedger } from "@/store/ledgerStore";
 import { dimensionsOf } from "@/store/selectors";
 import { documentTotals, lineAmount } from "@/lib/documents";
-import type { AccountType, DocumentLine } from "@/models/accounting";
-import { ACC, TAX } from "@/mock/seed";
+import type { AccountType, DocumentLine, OrgSettings } from "@/models/accounting";
 import { todayIso } from "@/utils/dates";
 import { BASE_CURRENCY, fmtCurrency, fmtMoney } from "@/utils/format";
 import { FxRateField, useFxRate } from "@/components/fxRateField";
@@ -30,13 +29,13 @@ interface LineState {
 }
 
 let key = 0;
-const blank = (kind: DocumentKind): LineState => ({
+const blank = (kind: DocumentKind, org: OrgSettings): LineState => ({
   key: key++,
   description: "",
   quantity: "1",
   unit_price: "",
-  tax_code_id: TAX.std,
-  account_id: kind === "invoice" ? ACC.sales : "",
+  tax_code_id: (kind === "invoice" ? org.default_sales_tax_code_id : org.default_purchase_tax_code_id) ?? "",
+  account_id: (kind === "invoice" ? org.default_sales_account_id : org.default_purchase_account_id) ?? "",
 });
 
 const REVENUE: AccountType[] = ["REVENUE"];
@@ -64,7 +63,7 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
   const [supplierRef, setSupplierRef] = useState("");
   const [branchId, setBranchId] = useState("");
   const [notes, setNotes] = useState("");
-  const [lines, setLines] = useState<LineState[]>([blank(kind)]);
+  const [lines, setLines] = useState<LineState[]>([blank(kind, state.org)]);
   const [currency, setCurrency] = useState(BASE_CURRENCY);
   const [custom, setCustom] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -82,7 +81,7 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
     setSupplierRef("");
     setBranchId(branches[0]?.id ?? "");
     setNotes("");
-    setLines([blank(kind)]);
+    setLines([blank(kind, state.org)]);
     setCurrency(party?.currency ?? BASE_CURRENCY);
     setCustom(defaultCustomValues(state.customFields, isInvoice ? "Invoice" : "Bill"));
     setError(null);
@@ -322,7 +321,7 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
         <div className="flex flex-col gap-4 border-t border-neutral-200 bg-neutral-50 px-3 py-3 sm:flex-row sm:items-start sm:justify-between dark:border-neutral-700 dark:bg-neutral-900/40">
           <button
             type="button"
-            onClick={() => setLines((ls) => [...ls, blank(kind)])}
+            onClick={() => setLines((ls) => [...ls, blank(kind, state.org)])}
             className="inline-flex w-fit items-center gap-1.5 rounded-lg px-2 py-1 text-sm font-medium text-brand-700 hover:bg-brand-50 dark:text-brand-300 dark:hover:bg-brand-900/20"
           >
             <FiPlus className="h-4 w-4" /> Add line

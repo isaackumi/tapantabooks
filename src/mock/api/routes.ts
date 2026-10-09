@@ -1,8 +1,18 @@
 import type { CreditNote, CustomFieldEntity, PeriodStatus } from "@/models/accounting";
 import { ENDPOINTS, endpointKey } from "@/services/catalogue";
-import type { AgeingReport, DashboardStatistics, MonthlyTrendReport } from "@/models/reports";
+import type {
+  AgeingReport,
+  DashboardStatistics,
+  MonthlyTrendReport,
+  TaxAccountBalance,
+  TaxReturnStatus,
+  TaxSummaryMonth,
+  TaxSummaryReport,
+} from "@/models/reports";
 import {
+  affectsLedger,
   balanceSheet,
+  balancesByAccount,
   cashBalanceSeries,
   cashFlow,
   generalLedger,
@@ -12,10 +22,10 @@ import {
 } from "@/lib/ledger";
 import { AGEING_BUCKETS, ageingBucket, emptyAgeing } from "@/lib/documents";
 import { partyStatement } from "@/lib/statements";
-import { fiscalYearsView, yearEndPreview } from "@/lib/fiscalYears";
+import { fiscalYearFor, fiscalYearsView, yearEndPreview } from "@/lib/fiscalYears";
 import { bankBaseBalances, billRows, invoiceRows, type DocumentRow } from "@/store/selectors";
 import { round2 } from "@/utils/format";
-import { addDays, addMonths, daysBetween, todayIso } from "@/utils/dates";
+import { addDays, addMonths, daysBetween, endOfMonth, todayIso } from "@/utils/dates";
 import { openingBalancesView, revaluationPreview, type LedgerEngine, type LedgerState } from "./engine";
 import { ApiFault, found, fromResult, listResult, need, type HandlerResult } from "./http";
 
@@ -106,17 +116,25 @@ const ageing = <T extends AgeingDoc>(rows: DocumentRow<T>[], partyOf: (doc: T) =
   return data;
 };
 
-const MAX_TREND_MONTHS = 24;
+const MAX_REPORT_MONTHS = 24;
+
+/** Calendar months from `from` to `to` inclusive; rejects reversed or over-long ranges. */
+const monthRange = (from: string, to: string, report: string) => {
+  if (from > to) throw new ApiFault(400, "from_date must be on or before to_date.", { from_date: "Must be on or before to_date" });
+  const months: string[] = [];
+  for (let m = from.slice(0, 7); m <= to.slice(0, 7); m = addMonths(m, 1)) months.push(m);
+  if (months.length > MAX_REPORT_MONTHS) {
+    throw new ApiFault(400, `The ${report} covers at most ${MAX_REPORT_MONTHS} months.`, {
+      from_date: `At most ${MAX_REPORT_MONTHS} months before to_date`,
+    });
+  }
+  return months;
+};
 
 const monthlyTrend = (state: LedgerState, q: URLSearchParams): MonthlyTrendReport => {
   const to = q.get("to_date") || todayIso();
   const from = q.get("from_date") || `${addMonths(to.slice(0, 7), -11)}-01`;
-  if (from > to) throw new ApiFault(400, "from_date must be on or before to_date.", { from_date: "Must be on or before to_date" });
-  const months: string[] = [];
-  for (let m = from.slice(0, 7); m <= to.slice(0, 7); m = addMonths(m, 1)) months.push(m);
-  if (months.length > MAX_TREND_MONTHS) {
-    throw new ApiFault(400, `The trend covers at most ${MAX_TREND_MONTHS} months.`, { from_date: `At most ${MAX_TREND_MONTHS} months before to_date` });
-  }
+  const months = monthRange(from, to, "trend");
   const upToTo = state.journals.filter((j) => j.date <= to);
   const pnl = monthlyProfitAndLoss(state.accounts, upToTo, months);
   const cash = cashBalanceSeries(state.accounts, upToTo, months);
@@ -130,6 +148,95 @@ const monthlyTrend = (state: LedgerState, q: URLSearchParams): MonthlyTrendRepor
       net_income: p.profit,
       closing_cash: cash[i].balance,
     })),
+  };
+};
+
+const VAT_RETURN_DUE_DAY = 15;
+/** Journals that settle a tax return with the authority; they move tax balances but are not tax charged. */
+const TAX_SETTLEMENT_REF = /^(VAT|WHT)-\d{4}-\d{2}$/;
+
+const taxSummary = (state: LedgerState, q: URLSearchParams): TaxSummaryReport => {
+  const to = q.get("to_date") || todayIso();
+  const from = q.get("from_date") || fiscalYearFor(state.org, to).start_date;
+  const months = monthRange(from, to, "tax summary");
+  const today = todayIso();
+
+  const ids = (values: (string | null)[]) => new Set(values.filter((v): v is string => !!v));
+  const vatCodes = state.taxCodes.filter((t) => t.kind !== "WITHHOLDING");
+  const outputIds = ids(vatCodes.map((t) => t.output_account_id));
+  const inputIds = ids(vatCodes.map((t) => t.input_account_id));
+  const whtIds = ids(state.taxCodes.filter((t) => t.kind === "WITHHOLDING").flatMap((t) => [t.output_account_id, t.input_account_id]));
+
+  const settlementIds = new Set(state.journals.filter((j) => TAX_SETTLEMENT_REF.test(j.source.reference ?? "")).map((j) => j.id));
+  const isSettlement = (j: LedgerState["journals"][number]) =>
+    settlementIds.has(j.id) || (!!j.reversal_of_id && settlementIds.has(j.reversal_of_id));
+
+  const sums = new Map(months.map((m) => [m, { output: 0, input: 0, wht: 0 }]));
+  for (const j of state.journals) {
+    if (!affectsLedger(j) || j.date < from || j.date > to || j.source.type === "OPENING_BALANCE" || isSettlement(j)) continue;
+    const s = sums.get(j.date.slice(0, 7));
+    if (!s) continue;
+    for (const l of j.lines) {
+      const isOutput = outputIds.has(l.account_id);
+      const isInput = inputIds.has(l.account_id);
+      // One account used for both sides: credits are output tax, debits are input tax.
+      if (isOutput && isInput) {
+        s.output += l.credit;
+        s.input += l.debit;
+      } else if (isOutput) s.output += l.credit - l.debit;
+      else if (isInput) s.input += l.debit - l.credit;
+      if (whtIds.has(l.account_id)) s.wht += l.credit - l.debit;
+    }
+  }
+
+  const rows: TaxSummaryMonth[] = months.map((month) => {
+    const s = sums.get(month)!;
+    const output_tax = round2(s.output);
+    const input_tax = round2(s.input);
+    const net_payable = round2(output_tax - input_tax);
+    const due_date = `${addMonths(month, 1)}-${String(VAT_RETURN_DUE_DAY).padStart(2, "0")}`;
+    const journal = state.journals.find((j) => j.status === "POSTED" && !j.reversal_of_id && j.source.reference === `VAT-${month}`);
+    const filing = journal
+      ? {
+          journal_id: journal.id,
+          number: journal.number,
+          date: journal.date,
+          amount: round2(
+            journal.lines.reduce(
+              (t, l) => t + (outputIds.has(l.account_id) ? l.debit - l.credit : 0) - (inputIds.has(l.account_id) ? l.credit - l.debit : 0),
+              0,
+            ),
+          ),
+        }
+      : null;
+    const status: TaxReturnStatus = filing
+      ? "FILED"
+      : endOfMonth(month) >= today
+        ? "IN_PROGRESS"
+        : net_payable <= 0
+          ? "NOTHING_DUE"
+          : due_date < today
+            ? "OVERDUE"
+            : "DUE";
+    return { month, output_tax, input_tax, net_payable, withholding_tax: round2(s.wht), due_date, status, filing };
+  });
+
+  const balances = balancesByAccount(state.accounts, state.journals, { to });
+  const balanceRows = (set: Set<string>): TaxAccountBalance[] =>
+    state.accounts
+      .filter((a) => set.has(a.id))
+      .sort((a, b) => a.code.localeCompare(b.code))
+      .map((a) => ({ account_id: a.id, code: a.code, name: a.name, balance: balances.get(a.id) ?? 0 }));
+  const total = (k: "output_tax" | "input_tax" | "net_payable" | "withholding_tax") => round2(rows.reduce((t, r) => t + r[k], 0));
+
+  return {
+    from_date: from,
+    to_date: to,
+    return_due_day: VAT_RETURN_DUE_DAY,
+    months: rows,
+    totals: { output_tax: total("output_tax"), input_tax: total("input_tax"), net_payable: total("net_payable"), withholding_tax: total("withholding_tax") },
+    next_return: rows.find((r) => r.status === "OVERDUE" || r.status === "DUE") ?? null,
+    accounts: { output: balanceRows(outputIds), input: balanceRows(inputIds), withholding: balanceRows(whtIds) },
   };
 };
 
@@ -478,6 +585,7 @@ const HANDLERS: Record<string, Handler> = {
     return { data };
   },
   "GET /reports/monthly-trend": ({ state, q }) => ({ data: monthlyTrend(state, q) }),
+  "GET /reports/tax-summary": ({ state, q }) => ({ data: taxSummary(state, q) }),
   "GET /reports/trial-balance": ({ state, q }) => report(trialBalance(state.accounts, state.journals, q.get("as_at") || todayIso())),
   "GET /reports/general-ledger": ({ state, q }) => {
     const account = found(state.accounts.find((a) => a.id === need(q.get("account_id"), "account_id")), "Account");

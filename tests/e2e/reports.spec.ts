@@ -16,6 +16,7 @@ test("drills from receivables ageing to the documents and the customer statement
   await firstParty.click();
   await expect(page.getByRole("link", { name: /^INV-/ }).first()).toBeVisible();
   await page.getByRole("link", { name: /^Statement of account for / }).first().click();
-  await expect(page).toHaveURL(/\/reports\/statements\?kind=customer&party=/);
+  // A cold dev server compiles the statements route on first visit.
+  await expect(page).toHaveURL(/\/reports\/statements\?kind=customer&party=/, { timeout: 30_000 });
   await expect(page.getByRole("heading", { name: "Statement of account" })).toBeVisible();
 });

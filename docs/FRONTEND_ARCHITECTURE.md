@@ -51,14 +51,18 @@ Contract mismatches to resolve with backend:
    and recomputes from `state.journals` with `src/lib/ledger.ts`. That breaks the rule that the backend owns balances,
    and it cannot work once a tenant has more journals than fit in one download. **Fixed in phase 1, increment 1:** the
    trial balance, general ledger, income statement, balance sheet, cash flow, AR/AP ageing, statements and dashboard
-   now read their endpoints through `useReport`, which refetches after every successful write. Remaining browser
-   calculations: the tax page (VAT by month) and document totals in forms.
+   now read their endpoints through `useReport`, which refetches after every successful write. The tax page reads the
+   new `GET /reports/tax-summary`. Remaining browser calculations: document totals in forms (a preview; the server
+   recomputes on save).
 2. **Whole-book download.** The store fetches every journal, invoice, bill and payment on login. Lists, search and
    reports must move to server-side paging, filtering and aggregation per screen. Cached collections stay only for
    small reference data (accounts, tax codes, currencies, dimensions, periods, custom fields).
 3. **Hard-coded calendar.** Several screens hard-coded 2026 months and presets (`"2026-10-01"`, `MONTHS` arrays). Report
-   presets now come from `useReportPresets` (today plus `fiscal_year_start`). Still to fix: the tax page and the
-   invoice/bill form import seed account ids from `@/mock/seed`; both need defaults from organisation settings.
+   presets now come from `useReportPresets` (today plus `fiscal_year_start`). **Fixed:** no page imports `@/mock/seed`
+   any more. The tax page takes its range from presets and its tax accounts from the tax codes; invoice and bill lines
+   take their account and tax code from new organisation defaults (`default_sales_account_id`,
+   `default_purchase_account_id`, `default_sales_tax_code_id`, `default_purchase_tax_code_id`), editable under
+   Settings → Organisation with the exchange-difference accounts.
 4. **No permission model in the UI.** Navigation and actions do not check permissions; the catalogue already names one
    permission per endpoint (`permission-accounting-<resource>-<verb>`), so the UI can gate on the same strings.
 5. **Search is page-local.** The header search filters the current page only. There is no global search or command palette.
