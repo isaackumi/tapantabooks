@@ -423,7 +423,7 @@ The carrying value a payment released is `base_amount − fx_gain_loss` for rece
 
 ### 6.1 BankAccount
 
-Table: `acc_bank_accounts` (unique on `gl_account_id`). Audit fields: yes. Read-only through the API apart from `last_reconciled_at`.
+Table: `acc_bank_accounts` (unique on `gl_account_id`). Audit fields: yes. Read-only through the API apart from `last_reconciled_at` (reconciliation) and `statement_balance` / `statement_date` (statement import).
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -450,7 +450,9 @@ Table: `acc_bank_statement_lines` (partial unique index on `matched_journal_id` 
 | `amount` | number | yes | bank currency (assumed); positive is money in, negative money out |
 | `status` | enum | yes | `UNMATCHED`, `SUGGESTED`, `MATCHED` |
 | `matched_journal_id` | string or null | yes | set when `MATCHED`; a journal matches at most one line |
-| `suggested_journal_id` | string or null | yes | bank-feed suggestion when `SUGGESTED` |
+| `suggested_journal_id` | string or null | yes | feed or import suggestion when `SUGGESTED` |
+| `reference` | string or null | no | the bank's transaction reference, when the statement file has one |
+| `import_id` | string or null | no | groups lines added by one `POST /bank-statement-lines/import`; null for feed lines |
 
 ### 6.3 FxRevaluation
 
@@ -743,7 +745,21 @@ Used by `PUT /opening-balances/update`. Rules in `docs/PROCESSING_RULES.md` sect
 | `payables` | object[] | yes | new unpaid supplier bills, same shape |
 | `removed_item_ids` | string[] | no | existing opening invoices / bills to void; must be unpaid |
 
-### 9.8 Inline request bodies
+### 9.8 StatementImportInput
+
+Used by `POST /bank-statement-lines/import`. Rules in `docs/PROCESSING_RULES.md` section 11.3a.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `bank_account_id` | string | yes | |
+| `file_name` | string | no | shown in the audit summary |
+| `statement_date` | date | yes | date of the closing balance; on or after every line and the account's current `statement_date`; not in the future |
+| `closing_balance` | number | yes | bank currency, as printed on the statement |
+| `lines` | object[] | yes | 1–2,000 of `{ date, description, amount, reference? }`; amount signed, positive is money in |
+
+Response `StatementImportResult`: `{ import_id, imported, duplicates, suggested, expected_closing_balance, balance_difference, lines: BankStatementLine[] }`.
+
+### 9.9 Inline request bodies
 
 These bodies have no named type in the engine.
 

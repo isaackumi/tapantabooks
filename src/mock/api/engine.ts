@@ -6,6 +6,7 @@ import type {
   AccountType,
   AuditEvent,
   AuditFields,
+  BankStatementLine,
   CreditNote,
   Customer,
   Currency,
@@ -38,6 +39,7 @@ import type {
 import { buildSeed, CURRENT_USER, USERS, ACC, TAX, openingEquityAccount, stamp, type SeedData } from "@/mock/seed";
 import { affectsLedger, isBalanced, lineTotals } from "@/lib/ledger";
 import { documentTotals } from "@/lib/documents";
+import { partitionNewLines } from "@/lib/bankStatementCsv";
 import {
   carryingBaseFor,
   documentJournalLines,
@@ -50,7 +52,7 @@ import {
 } from "@/lib/fx";
 import { customFieldUsage, normaliseCustomValues, recordsForEntity, validateCustomValues } from "@/lib/customFields";
 import { BASE_CURRENCY, CURRENCY_SYMBOLS, fmtCurrency, fmtDate, fmtMoney, fmtRate, round2 } from "@/utils/format";
-import { addDays, nowIso, todayIso } from "@/utils/dates";
+import { addDays, daysBetween, isIsoDate, nowIso, todayIso } from "@/utils/dates";
 
 /** `users` stands in for the tenant's cp_users rows; `currentUserId` is the JWT `user_id` of the request being served. */
 export type LedgerState = SeedData & { currentUserId: string; users: CurrentUser[] };
@@ -118,6 +120,30 @@ export interface CreditNoteInput {
   supplier_reference?: string;
   lines: Omit<DocumentLine, "id">[];
 }
+
+export interface StatementImportInput {
+  bank_account_id: string;
+  file_name?: string;
+  /** Date of the closing balance on the statement; on or after every line. */
+  statement_date: string;
+  /** Closing balance printed on the statement, in the bank account's currency. */
+  closing_balance: number;
+  lines: { date: string; description: string; amount: number; reference?: string }[];
+}
+
+export interface StatementImportResult {
+  import_id: string;
+  imported: number;
+  duplicates: number;
+  suggested: number;
+  /** Previous statement balance plus the new lines dated after the previous statement date. */
+  expected_closing_balance: number;
+  /** closing_balance − expected_closing_balance; non-zero usually means lines are missing from the file. */
+  balance_difference: number;
+  lines: BankStatementLine[];
+}
+
+export const MAX_STATEMENT_IMPORT_LINES = 2000;
 
 export interface ImportInput {
   source_id: string;
@@ -1500,6 +1526,102 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
             summary: `Created from statement line "${line.description}" and matched.`,
           });
           return ok(j, `${j.number} posted and matched`);
+        }),
+
+      importStatementLines: (input: StatementImportInput) =>
+        commit((s): Result<StatementImportResult> => {
+          const bank = s.bankAccounts.find((b) => b.id === input.bank_account_id);
+          if (!bank) return fail("Bank account not found.");
+          const rows = input.lines ?? [];
+          if (rows.length === 0) return fail("The statement has no lines.");
+          if (rows.length > MAX_STATEMENT_IMPORT_LINES) return fail(`Import at most ${MAX_STATEMENT_IMPORT_LINES} lines at a time.`);
+          const statementDate = input.statement_date;
+          if (!isIsoDate(statementDate)) return fail("Enter the statement date.");
+          if (statementDate > todayIso()) return fail("The statement date cannot be in the future.");
+          if (statementDate < bank.statement_date) {
+            return fail(`${bank.name} already has a statement to ${fmtDate(bank.statement_date)}. Import statements ending on or after that date.`);
+          }
+          if (!Number.isFinite(input.closing_balance)) return fail("Enter the closing balance from the statement.");
+
+          const problems: string[] = [];
+          rows.forEach((r, i) => {
+            const n = i + 1;
+            if (!isIsoDate(r.date)) problems.push(`line ${n}: date is not a valid date`);
+            else if (r.date > statementDate) problems.push(`line ${n}: dated after the statement date`);
+            if (!r.description?.trim()) problems.push(`line ${n}: description is empty`);
+            if (!Number.isFinite(r.amount) || round2(r.amount) === 0) problems.push(`line ${n}: amount must be a non-zero number`);
+          });
+          if (problems.length) {
+            const more = problems.length > 5 ? ` and ${problems.length - 5} more` : "";
+            return fail(`Fix the file and try again: ${problems.slice(0, 5).join("; ")}${more}.`);
+          }
+
+          const { fresh, duplicates } = partitionNewLines(
+            s.statementLines.filter((l) => l.bank_account_id === bank.id),
+            rows.map((r) => ({ ...r, amount: round2(r.amount), description: r.description.trim().replace(/\s+/g, " ") })),
+          );
+
+          const importId = newId("bsi");
+          const reserved = new Set(
+            s.statementLines.flatMap((l) => [l.matched_journal_id, l.suggested_journal_id]).filter((x): x is string => !!x),
+          );
+          const candidates = s.journals
+            .filter((j) => affectsLedger(j) && j.lines.some((l) => l.account_id === bank.gl_account_id))
+            .map((j) => ({
+              j,
+              net: round2(j.lines.filter((l) => l.account_id === bank.gl_account_id).reduce((t, l) => t + l.debit - l.credit, 0)),
+            }));
+
+          const added: BankStatementLine[] = [];
+          for (const r of fresh) {
+            const line = { date: r.date, amount: r.amount, description: r.description };
+            const match = candidates
+              .filter((c) => !reserved.has(c.j.id) && Math.abs(c.net - line.amount) < 0.005 && Math.abs(daysBetween(c.j.date, line.date)) <= 7)
+              .sort((a, b) => Math.abs(daysBetween(a.j.date, line.date)) - Math.abs(daysBetween(b.j.date, line.date)) || a.j.number.localeCompare(b.j.number))[0];
+            if (match) reserved.add(match.j.id);
+            added.push({
+              id: newId("bsl"),
+              bank_account_id: bank.id,
+              ...line,
+              reference: r.reference?.trim() || null,
+              status: match ? "SUGGESTED" : "UNMATCHED",
+              matched_journal_id: null,
+              suggested_journal_id: match?.j.id ?? null,
+              import_id: importId,
+            });
+          }
+
+          const expected = round2(
+            bank.statement_balance + added.filter((l) => l.date > bank.statement_date).reduce((t, l) => t + l.amount, 0),
+          );
+          const closing = round2(input.closing_balance);
+          s.statementLines.push(...added);
+          bank.statement_balance = closing;
+          bank.statement_date = statementDate;
+          touch(s, bank);
+          const suggested = added.filter((l) => l.status === "SUGGESTED").length;
+          audit(s, {
+            action: "BANK_STATEMENT.IMPORTED",
+            entity_type: "Bank account",
+            entity_id: bank.id,
+            entity_label: bank.name,
+            summary: `${input.file_name?.trim() || "Statement"} to ${fmtDate(statementDate)}: ${added.length} line(s) imported, ${duplicates.length} duplicate(s) skipped, closing balance ${fmtMoney(closing, bank.currency)}.`,
+          });
+          const parts = [`${added.length} line${added.length === 1 ? "" : "s"} imported`];
+          if (duplicates.length) parts.push(`${duplicates.length} already held`);
+          if (suggested) parts.push(`${suggested} matched suggested`);
+          return ok(
+            {
+              import_id: importId,
+              imported: added.length,
+              duplicates: duplicates.length,
+              suggested,
+              expected_closing_balance: expected,
+              balance_difference: round2(closing - expected),
+              lines: added,
+            },
+            parts.join(", "),
+          );
         }),
 
       completeReconciliation: (bankId: string) =>

@@ -825,7 +825,30 @@ Response: 201 with the `JournalEntry`. Detail: `Transfer posted as {journal numb
 
 ### 11.3 Statement lines
 
-`BankStatementLine.amount` is positive for money in and negative for money out. Status is `UNMATCHED`, `SUGGESTED` (a bank-feed suggestion with `suggested_journal_id`) or `MATCHED` (`matched_journal_id`). There is no endpoint to import statement lines or create suggestions; they come from the bank feed. Matching compares the statement amount with the journal's base-currency movement on the bank GL; for foreign bank accounts this mixes currencies (open question).
+`BankStatementLine.amount` is positive for money in and negative for money out. Status is `UNMATCHED`, `SUGGESTED` (a suggestion with `suggested_journal_id`) or `MATCHED` (`matched_journal_id`). Lines come from a bank feed or from a statement file (section 11.3a). Matching compares the statement amount with the journal's base-currency movement on the bank GL; for foreign bank accounts this mixes currencies (open question).
+
+### 11.3a `POST /bank-statement-lines/import`
+
+The browser reads the bank's CSV export, the user maps its columns (date and date format, description, one signed amount or separate money in / money out columns, optional reference), and rows that cannot be read (balance rows, headings, bad dates) are skipped on the client with a reason. The API receives structured lines (`StatementImportInput`), not the file.
+
+Validation (400, whole batch rejected, nothing saved):
+
+1. The bank account exists (otherwise `Bank account not found.`).
+2. At least one line and at most 2,000.
+3. `statement_date` is a real date, not after today, and not before the account's current `statement_date` (`{bank} already has a statement to {date}. Import statements ending on or after that date.`).
+4. `closing_balance` is a finite number.
+5. Every line has a real date on or before `statement_date`, a non-empty description and a non-zero amount. Errors name the line numbers (first five, then `and N more`).
+
+Processing:
+
+- **Duplicates.** A line is the same transaction as a held one when date, amount (2 dp) and description (trimmed, whitespace collapsed, case-insensitive) agree. Counts matter: if the account holds the key twice and the file has it three times, one line is new. This lets overlapping exports be re-imported safely while keeping genuine repeats (two identical charges on one day). Reference is stored but not part of the key, because feed lines have none.
+- **Suggestions.** For each new line, in file order: candidate journals affect the ledger, touch the bank's GL account, have a net movement on it equal to the line amount (within 0.005), are within 7 days of the line date, and are not already matched or suggested on any line (including lines earlier in this import). The closest date wins, then the lower journal number. A hit sets `SUGGESTED`; otherwise `UNMATCHED`. Nothing is matched automatically.
+- New lines get `import_id` (one id per call) and `reference` when given.
+- The bank account's `statement_balance` becomes `closing_balance` and `statement_date` becomes `statement_date`.
+- `expected_closing_balance` = previous `statement_balance` + new lines dated after the previous `statement_date`; `balance_difference` = `closing_balance` − expected. A difference does not block the import (the reconciliation summary shows it as unexplained), but usually means the file is missing lines.
+- Audit `BANK_STATEMENT.IMPORTED` on the bank account.
+
+Response: 201 with `StatementImportResult` `{ import_id, imported, duplicates, suggested, expected_closing_balance, balance_difference, lines }`. Detail: `{n} lines imported, {d} already held, {s} matched suggested` (zero parts omitted).
 
 ### 11.4 `POST /reconciliation/match`
 
@@ -1508,7 +1531,7 @@ These are behaviours that are ambiguous, missing or probably wrong in the mock. 
 
 24. Transfers involving a foreign bank account post no realised FX, so the base value of the foreign account drifts until the next revaluation. Should transfers out of a foreign account release carrying value and post realised FX like payments?
 25. Statement amounts are compared with base-currency ledger movements, which is wrong for foreign bank accounts. Should matching use `amount_fc` for foreign accounts?
-26. There is no endpoint to import statement lines or generate match suggestions. Which source creates them?
+26. Statement files are parsed in the browser and posted as structured lines (section 11.3a). Should the API also accept the raw CSV or OFX/MT940 file so other clients and scheduled bank downloads can use the same import?
 27. `POST /reconciliation/complete` does not compare the statement balance with the ledger balance. Should it?
 28. `POST /reconciliation/create-entry` does not check that the line is unmatched, and `POST /reconciliation/match` does not check the journal's status. Both should probably be enforced.
 29. Revaluation exposure includes fully paid documents and zero-balance bank accounts, which can block a run with a spurious missing-rate error. There is also no way to undo a revaluation. Is either needed?

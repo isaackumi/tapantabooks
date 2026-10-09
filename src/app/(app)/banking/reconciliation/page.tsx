@@ -2,13 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import toast from "react-hot-toast";
-import { FiCheck, FiCheckCircle, FiLink, FiPlus, FiSearch, FiX, FiZap } from "react-icons/fi";
+import { FiCheck, FiCheckCircle, FiLink, FiPlus, FiSearch, FiUpload, FiX, FiZap } from "react-icons/fi";
 import { Button, Callout, Field, FormError, PageHeader, Panel, compactInputClass, inputClass } from "@/components/ui";
 import { Tabs } from "@/components/tabs";
 import StatusBadge from "@/components/statusBadge";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import AccountSelect from "@/components/accounting/accountSelect";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
+import StatementImportModal from "@/components/banking/statementImportModal";
 import { useLedger } from "@/store/ledgerStore";
 import { affectsLedger, balancesByAccount } from "@/lib/ledger";
 import type { BankStatementLine, JournalEntry } from "@/models/accounting";
@@ -27,6 +28,7 @@ export default function ReconciliationPage() {
   const [tab, setTab] = useState("REVIEW");
   const [matching, setMatching] = useState<BankStatementLine | null>(null);
   const [creating, setCreating] = useState<BankStatementLine | null>(null);
+  const [importing, setImporting] = useState(false);
   useQueryParam("account", setBankId);
 
   const bank = state.bankAccounts.find((b) => b.id === bankId)!;
@@ -103,6 +105,9 @@ export default function ReconciliationPage() {
                 </option>
               ))}
             </select>
+            <Button variant="secondary" icon={FiUpload} onClick={() => setImporting(true)} data-tour="rec-import">
+              Import statement
+            </Button>
             <Button
               icon={FiCheckCircle}
               data-tour="rec-complete"
@@ -117,9 +122,14 @@ export default function ReconciliationPage() {
       />
 
       {lines.length === 0 ? (
-        <Callout tone="info" title="No statement feed for this account">
-          {bank.name} was last reconciled {fmtDateTime(bank.last_reconciled_at)}. Connect a bank feed or import a statement
-          from Integrations to reconcile it here.
+        <Callout tone="info" title="No statement lines for this account yet">
+          {bank.name} was last reconciled {fmtDateTime(bank.last_reconciled_at)}. Import the bank&apos;s CSV statement to reconcile it
+          here.
+          <div className="mt-3">
+            <Button size="sm" icon={FiUpload} onClick={() => setImporting(true)}>
+              Import statement
+            </Button>
+          </div>
         </Callout>
       ) : (
         <>
@@ -320,6 +330,7 @@ export default function ReconciliationPage() {
         }}
       />
       <CreateEntryModal line={creating} onClose={() => setCreating(null)} />
+      <StatementImportModal bankId={bankId} open={importing} onClose={() => setImporting(false)} />
     </div>
   );
 }

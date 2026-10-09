@@ -705,6 +705,16 @@ export const ENDPOINTS: EndpointDef[] = [
   }),
   {
     method: "POST",
+    path: "/bank-statement-lines/import",
+    module: "Banking",
+    summary: "Add lines from a bank statement file, skip ones already held and suggest ledger matches",
+    body: "StatementImportInput",
+    returns: "StatementImportResult",
+    permission: perm("bank-statement", "import"),
+    invalidates: ["statementLines", "bankAccounts", ...AUDIT],
+  },
+  {
+    method: "POST",
     path: "/reconciliation/match",
     module: "Banking",
     summary: "Match a statement line to a posted journal",

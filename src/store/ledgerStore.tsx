@@ -41,6 +41,8 @@ import type {
   LedgerState,
   OrganisationSetupInput,
   PaymentInput,
+  StatementImportInput,
+  StatementImportResult,
 } from "@/mock/api/engine";
 import { api, ApiError, fetchAll, type HttpMethod, type Query } from "@/core/apiClient";
 import { AppConstants } from "@/core/appConstants";
@@ -236,6 +238,8 @@ const createActions = (
       call<BankStatementLine>("POST", "/reconciliation/create-entry", {
         body: { statement_line_id: lineId, account_id: accountId, memo },
       }),
+    importStatementLines: (input: StatementImportInput) =>
+      call<StatementImportResult>("POST", "/bank-statement-lines/import", { body: input }),
     completeReconciliation: (bankId: string) =>
       call<BankAccount>("POST", "/reconciliation/complete", { query: { bank_account_id: bankId } }),
 

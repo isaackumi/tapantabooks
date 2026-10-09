@@ -238,6 +238,10 @@ export interface BankStatementLine {
   status: StatementLineStatus;
   matched_journal_id: string | null;
   suggested_journal_id: string | null;
+  /** The bank's own transaction reference, when the statement file has one. */
+  reference?: string | null;
+  /** Set on lines that came from POST /bank-statement-lines/import; null for feed lines. */
+  import_id?: string | null;
 }
 
 export interface TaxCode extends AuditFields {

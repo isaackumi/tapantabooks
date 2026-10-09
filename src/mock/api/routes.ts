@@ -304,6 +304,19 @@ const HANDLERS: Record<string, Handler> = {
       dateField: "date",
       defaultSort: { field: "date", order: "desc" },
     }),
+  "POST /bank-statement-lines/import": ({ engine, body }) =>
+    fromResult(
+      engine.importStatementLines({
+        bank_account_id: need(body?.bank_account_id, "bank_account_id"),
+        file_name: body.file_name,
+        statement_date: body.statement_date,
+        closing_balance: Number(body.closing_balance),
+        lines: Array.isArray(body.lines)
+          ? body.lines.map((l: any) => ({ date: l?.date, description: String(l?.description ?? ""), amount: Number(l?.amount), reference: l?.reference }))
+          : [],
+      }),
+      201,
+    ),
   "POST /reconciliation/match": ({ engine, body }) =>
     fromResult(engine.matchStatementLine(need(body.statement_line_id, "statement_line_id"), need(body.journal_id, "journal_id"))),
   "POST /reconciliation/unmatch": ({ engine, q }) =>
