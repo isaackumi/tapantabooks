@@ -11,6 +11,7 @@ over is a configuration change (`NEXT_PUBLIC_USE_MOCK_API=false`).
 | [API_ENDPOINTS.md](./API_ENDPOINTS.md) | Every endpoint: method, path, query parameters, body, response, permission (generated) |
 | [DATA_MODEL.md](./DATA_MODEL.md) | Every entity and request body, field by field, with suggested tables |
 | [PROCESSING_RULES.md](./PROCESSING_RULES.md) | What each write must validate and do: messages, journals posted, audit events, report maths |
+| [FRONTEND_ARCHITECTURE.md](./FRONTEND_ARCHITECTURE.md) | Frontend assessment, feature inventory, information architecture, route map, components and the phased roadmap |
 
 **Suggested reading order:** this page, API_CONVENTIONS, AUTH_AND_ONBOARDING, then API_ENDPOINTS and DATA_MODEL side by side
 while implementing each module, with PROCESSING_RULES for the module's writes.
