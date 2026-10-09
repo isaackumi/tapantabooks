@@ -14,7 +14,7 @@ Trovesuite is a modular business ERP that connects operational systems (store ma
 
 | Part | Repository | State |
 | --- | --- | --- |
-| Frontend | tvs-accounting-ft (\`dev\`, no remote yet) | MVP complete: every first-version module, running on an in-browser mock of the API |
+| Frontend | [deladetech1/tvs-accounting-ft](https://github.com/deladetech1/tvs-accounting-ft) (\`dev\`) | MVP complete: every first-version module, running on an in-browser mock of the API |
 | API contract | tvs-accounting-ft \`docs/\` | 111 endpoints documented with rules, data model and 38 open questions |
 | Backend | tvs-accounting-bk (\`dev\`) | Not started: still the unrenamed ProductTemplate |
 | Schema | tvs-sqlscript (\`dev\`) | Not started |
