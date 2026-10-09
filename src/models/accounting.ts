@@ -39,6 +39,7 @@ export type SourceType =
   | "IMPORT"
   | "FX_REVALUATION"
   | "OPENING_BALANCE"
+  | "YEAR_END"
   | "SYSTEM";
 
 export interface SourceRef {

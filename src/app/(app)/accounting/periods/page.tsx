@@ -3,7 +3,9 @@
 import { useState } from "react";
 import toast from "react-hot-toast";
 import { FiLock, FiUnlock, FiArchive, FiInfo } from "react-icons/fi";
-import { Callout, PageHeader, Toggle } from "@/components/ui";
+import { Callout, PageHeader, Toggle, compactInputClass } from "@/components/ui";
+import FiscalYearsPanel from "@/components/accounting/fiscalYearsPanel";
+import { fiscalYearFor, fiscalYearsView } from "@/lib/fiscalYears";
 import StatusBadge from "@/components/statusBadge";
 import StatCard from "@/components/statCard";
 import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
@@ -31,7 +33,13 @@ export default function PeriodsPage() {
   const [busy, setBusy] = useState(false);
   const today = todayIso();
 
-  const stats = state.periods.map((p) => {
+  const years = fiscalYearsView(state);
+  const currentYear = fiscalYearFor(state.org, today).id;
+  const [yearId, setYearId] = useState(currentYear);
+  const year = years.find((y) => y.id === yearId) ?? years[years.length - 1];
+  const yearPeriods = year ? state.periods.filter((p) => p.start_date >= year.start_date && p.end_date <= year.end_date) : state.periods;
+
+  const stats = yearPeriods.map((p) => {
     const js = state.journals.filter((j) => j.date >= p.start_date && j.date <= p.end_date);
     const posted = js.filter(affectsLedger);
     return {
@@ -56,14 +64,16 @@ export default function PeriodsPage() {
     }
   };
 
-  const count = (s: PeriodStatus) => state.periods.filter((p) => p.status === s).length;
+  const count = (s: PeriodStatus) => yearPeriods.filter((p) => p.status === s).length;
 
   return (
     <div>
       <PageHeader
         title="Fiscal periods"
-        description={`Financial year ${today.slice(0, 4)}. Lock a month while you review it, close it when the numbers are final.`}
+        description="Lock a month while you review it, close it when the numbers are final, and close the year once it has ended."
       />
+
+      <FiscalYearsPanel />
 
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3" data-tour="stats">
         <StatCard label="Open" value={count("OPEN")} sub="Accept postings" tone="success" />
@@ -82,6 +92,19 @@ export default function PeriodsPage() {
           description="When on, nothing (manual entries, documents, integrations or imports) can post into a locked or closed month."
         />
       </div>
+
+      {years.length > 1 && (
+        <div className="mb-3 flex items-center gap-2 text-sm">
+          <span className="text-neutral-500 dark:text-neutral-400">Months of</span>
+          <select value={year?.id} onChange={(e) => setYearId(e.target.value)} className={`${compactInputClass} w-36`}>
+            {years.map((y) => (
+              <option key={y.id} value={y.id}>
+                {y.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       <div className="overflow-x-auto rounded-xl border border-neutral-200 bg-white dark:border-neutral-700 dark:bg-neutral-800" data-tour="periods-table">
         <table className="min-w-full text-sm">

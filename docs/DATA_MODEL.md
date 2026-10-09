@@ -270,7 +270,7 @@ Store as columns on `acc_journal_entries`: `source_type`, `source_reference`, `s
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `type` | enum | yes | `MANUAL`, `SALES`, `PURCHASES`, `BANKING`, `STORE_MANAGEMENT`, `LOANS`, `HR`, `IMPORT`, `FX_REVALUATION`, `OPENING_BALANCE`, `SYSTEM` |
+| `type` | enum | yes | `MANUAL`, `SALES`, `PURCHASES`, `BANKING`, `STORE_MANAGEMENT`, `LOANS`, `HR`, `IMPORT`, `FX_REVALUATION`, `OPENING_BALANCE`, `YEAR_END`, `SYSTEM` |
 | `reference` | string | no | document number, payment number, `TRF-{YYYYMMDD}`, `FX-REVAL-{YYYY-MM}`, batch number, … |
 | `document_id` | string | no | invoice or bill id for document and payment journals; such journals cannot be reversed directly |
 
@@ -815,6 +815,9 @@ These shapes are computed, not stored.
 | `GET /dashboard/statistics` | `{ as_at, revenue_mtd, expenses_mtd, net_income_mtd, net_income_ytd, cash_balance, receivables, overdue_receivables, payables, overdue_payables, journals_pending_approval, unmatched_statement_lines }` |
 | `GET /opening-balances/get`, `PUT /opening-balances/update` | `OpeningBalancesView`: `{ conversion_date, journal_id, journal_number, lines: [{ account_id, debit, credit }], receivables: SalesInvoice[], payables: PurchaseBill[], opening_equity_balance, first_transaction_date, locked_reason }` |
 | `GET /revaluations/preview` | `{ rates: { "<currency>": number }, lines: FxRevaluationLine[], missing: string[] }` |
+| `GET /fiscal-years/list` | `{ items: FiscalYearView[] }`; `FiscalYearView` = `{ id, name, start_date, end_date, status: "OPEN" \| "CLOSED", periods: { total, open, locked, closed }, net_income, closing_journal_id, closing_journal_number, closed_at, closed_by }`. Derived from periods and journals, not stored |
+| `GET /fiscal-years/close-preview` | `YearEndPreview`: `{ fiscal_year: FiscalYearView, retained_earnings_account_id, lines: [{ account_id, debit, credit }], net_income, blockers: string[], warnings: string[] }` |
+| `POST /fiscal-years/close` | `{ fiscal_year: FiscalYearView, journal: JournalEntry \| null }` |
 | `GET /navigation` | `{ items: [{ method, path, module, summary }] }` |
 
 All report amounts are base, except statements, which are in the document currency.
@@ -826,7 +829,7 @@ All report amounts are base, except statements, which are in the document curren
 | Enum | Values | Used by |
 |---|---|---|
 | `AccountType` | `ASSET`, `LIABILITY`, `EQUITY`, `REVENUE`, `EXPENSE` | `Account.type` |
-| `SourceType` | `MANUAL`, `SALES`, `PURCHASES`, `BANKING`, `STORE_MANAGEMENT`, `LOANS`, `HR`, `IMPORT`, `FX_REVALUATION`, `SYSTEM` | `SourceRef.type`, `Party.source` |
+| `SourceType` | `MANUAL`, `SALES`, `PURCHASES`, `BANKING`, `STORE_MANAGEMENT`, `LOANS`, `HR`, `IMPORT`, `FX_REVALUATION`, `OPENING_BALANCE`, `YEAR_END`, `SYSTEM` | `SourceRef.type`, `Party.source` |
 | `JournalStatus` | `DRAFT`, `PENDING_APPROVAL`, `POSTED`, `REVERSED` | `JournalEntry.status` |
 | `PartyStatus` | `ACTIVE`, `INACTIVE` | `Party.status` |
 | `DocumentState` | `DRAFT`, `APPROVED`, `VOID` | `SalesInvoice.state`, `PurchaseBill.state` |

@@ -3,6 +3,7 @@ import { ENDPOINTS, endpointKey } from "@/services/catalogue";
 import { balanceSheet, cashFlow, generalLedger, incomeStatement, trialBalance } from "@/lib/ledger";
 import { AGEING_BUCKETS, ageingBucket, emptyAgeing } from "@/lib/documents";
 import { partyStatement } from "@/lib/statements";
+import { fiscalYearsView, yearEndPreview } from "@/lib/fiscalYears";
 import { bankBaseBalances, billRows, invoiceRows, type DocumentRow } from "@/store/selectors";
 import { round2 } from "@/utils/format";
 import { todayIso } from "@/utils/dates";
@@ -189,6 +190,14 @@ const HANDLERS: Record<string, Handler> = {
     listResult(state.periods, q, { filters: { status: "status" }, defaultSort: { field: "start_date", order: "asc" } }),
   "PUT /fiscal-periods/update-status": ({ engine, q, body }) =>
     fromResult(engine.setPeriodStatus(need(q.get("period_id"), "period_id"), body.status as PeriodStatus)),
+  "GET /fiscal-years/list": ({ state }) => ({ data: { items: fiscalYearsView(state) } }),
+  "GET /fiscal-years/close-preview": ({ state, q }) => ({
+    data: found(yearEndPreview(state, need(q.get("fiscal_year_id"), "fiscal_year_id")) ?? undefined, "Fiscal year"),
+  }),
+  "POST /fiscal-years/close": ({ engine, q }) => fromResult(engine.closeFiscalYear(need(q.get("fiscal_year_id"), "fiscal_year_id"))),
+  "POST /fiscal-years/reopen": ({ engine, q, body }) =>
+    fromResult(engine.reopenFiscalYear(need(q.get("fiscal_year_id"), "fiscal_year_id"), String(body?.reason ?? ""))),
+  "POST /fiscal-years/add": ({ engine }) => fromResult(engine.addFiscalYear(), 201),
 
   // ---- FX revaluation -------------------------------------------------------------------------
   "GET /revaluations/list": ({ state, q }) => listResult(state.fxRevaluations, q, { defaultSort: { field: "as_at", order: "desc" } }),

@@ -49,14 +49,18 @@ const documentLabel = (j: JournalEntry) =>
       ? "Open bill"
       : j.source.type === "OPENING_BALANCE"
         ? "Open opening balances"
-        : "Open revaluation";
+        : j.source.type === "YEAR_END"
+          ? "Open fiscal years"
+          : "Open revaluation";
 
 const revaluationHref = (j: JournalEntry) =>
   j.source.type === "OPENING_BALANCE"
     ? "/accounting/opening-balances"
-    : j.source.type === "FX_REVALUATION" || j.reference?.startsWith("FX-REVAL")
-      ? "/accounting/revaluation"
-      : null;
+    : j.source.type === "YEAR_END"
+      ? "/accounting/periods"
+      : j.source.type === "FX_REVALUATION" || j.reference?.startsWith("FX-REVAL")
+        ? "/accounting/revaluation"
+        : null;
 
 export const JournalViewerProvider = ({ children }: { children: React.ReactNode }) => {
   const { state, actions } = useLedger();
@@ -97,6 +101,7 @@ export const JournalViewerProvider = ({ children }: { children: React.ReactNode 
     !journal.reversal_of_id &&
     !journal.source.document_id &&
     journal.source.type !== "OPENING_BALANCE" &&
+    journal.source.type !== "YEAR_END" &&
     journal.id !== state.org.opening_balance_journal_id;
 
   const footer = journal && (

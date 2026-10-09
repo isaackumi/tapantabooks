@@ -40,6 +40,7 @@ import { buildSeed, CURRENT_USER, USERS, ACC, TAX, openingEquityAccount, stamp, 
 import { affectsLedger, isBalanced, lineTotals } from "@/lib/ledger";
 import { documentTotals } from "@/lib/documents";
 import { partitionNewLines } from "@/lib/bankStatementCsv";
+import { fiscalYearFor, fiscalYearsView, NEXT_YEAR_LEAD_DAYS, yearEndPreview } from "@/lib/fiscalYears";
 import {
   carryingBaseFor,
   documentJournalLines,
@@ -372,6 +373,14 @@ export const fiscalYearPeriods = (start: string, today: string): FiscalPeriod[] 
       locked_at: null,
     };
   });
+};
+
+/** Adds the twelve open periods of the financial year starting on `start`; returns how many were added. */
+const addYearPeriods = (s: LedgerState, start: string) => {
+  const fresh = fiscalYearPeriods(s.org.fiscal_year_start, start).filter((p) => !s.periods.some((x) => x.id === p.id));
+  s.periods.push(...fresh);
+  s.periods.sort((a, b) => a.start_date.localeCompare(b.start_date));
+  return fresh.length;
 };
 
 const validateDocument = (s: LedgerState, input: DocumentInput, partyLabel: string): string | null => {
@@ -818,6 +827,7 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
           if (j.source.type === "OPENING_BALANCE" || j.id === s.org.opening_balance_journal_id) {
             return fail("Opening balances are changed from Accounting → Opening balances, not reversed.");
           }
+          if (j.source.type === "YEAR_END") return fail("Year-end entries are undone by reopening the year in Fiscal periods.");
           if (!reason.trim()) return fail("Give a reason for the reversal. It is kept on the audit trail.");
           if (date < j.date) return fail("The reversal date cannot be before the original entry.");
           const periodError = checkPeriod(s, date);
@@ -840,6 +850,10 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
           const p = s.periods.find((x) => x.id === id);
           if (!p) return fail("Period not found.");
           const from = p.status;
+          const year = fiscalYearsView(s).find((y) => p.start_date >= y.start_date && p.end_date <= y.end_date);
+          if (year?.status === "CLOSED" && status !== "CLOSED") {
+            return fail(`${year.name} is closed. Reopen the year before changing its periods.`);
+          }
           if (status === "OPEN") {
             const later = s.periods.find((x) => x.start_date > p.start_date && x.status === "CLOSED");
             if (later) return fail(`Reopen ${later.name} first. Periods close in order.`);
@@ -865,6 +879,99 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
             changes: [{ field: "status", from, to: status }],
           });
           return ok(p, `${p.name} is now ${status.toLowerCase()}`);
+        }),
+
+      closeFiscalYear: (fiscalYearId: string) =>
+        commit((s) => {
+          const preview = yearEndPreview(s, fiscalYearId);
+          if (!preview) return fail("Fiscal year not found.");
+          if (preview.blockers.length) return fail(preview.blockers[0]);
+          const fy = preview.fiscal_year;
+          const user = actorOf(s);
+          let journal: JournalEntry | null = null;
+          if (preview.lines.length) {
+            journal = writeJournal(
+              s,
+              {
+                date: fy.end_date,
+                memo: `Year-end close ${fy.name}: ${preview.net_income >= 0 ? "profit" : "loss"} of ${fmtCurrency(Math.abs(preview.net_income))} to retained earnings`,
+                reference: fy.name,
+                branch_id: null,
+                lines: preview.lines.map((l) => ({ ...l, description: "Year-end close" })),
+              },
+              "POSTED",
+              { type: "YEAR_END", reference: fy.name },
+            );
+          }
+          const at = nowIso();
+          for (const p of s.periods) {
+            if (p.start_date >= fy.start_date && p.end_date <= fy.end_date && p.status !== "CLOSED") {
+              p.status = "CLOSED";
+              p.locked_by = user.name;
+              p.locked_at = at;
+            }
+          }
+          const next = fiscalYearFor(s.org, addDays(fy.end_date, 1));
+          const created = s.periods.some((p) => p.start_date === next.start_date) ? 0 : addYearPeriods(s, next.start_date);
+          audit(s, {
+            action: "FISCAL_YEAR.CLOSED",
+            entity_type: "Fiscal year",
+            entity_id: fy.id,
+            entity_label: fy.name,
+            summary: `${fy.name} closed${journal ? ` by ${journal.number}: net ${preview.net_income >= 0 ? "profit" : "loss"} ${fmtCurrency(Math.abs(preview.net_income))} to retained earnings` : " with no profit or loss to move"}.${created ? ` ${next.name} periods opened.` : ""}`,
+          });
+          const view = fiscalYearsView(s).find((y) => y.id === fy.id)!;
+          return ok({ fiscal_year: view, journal }, `${fy.name} closed${journal ? `, ${journal.number} posted` : ""}`);
+        }),
+
+      reopenFiscalYear: (fiscalYearId: string, reason: string) =>
+        commit((s) => {
+          const years = fiscalYearsView(s);
+          const index = years.findIndex((y) => y.id === fiscalYearId);
+          if (index < 0) return fail("Fiscal year not found.");
+          const fy = years[index];
+          if (fy.status !== "CLOSED") return fail(`${fy.name} is not closed.`);
+          const later = years.slice(index + 1).find((y) => y.status === "CLOSED");
+          if (later) return fail(`Reopen ${later.name} first. Years reopen in reverse order.`);
+          if (!reason.trim()) return fail("Give a reason for reopening the year. It is kept on the audit trail.");
+          const closing = fy.closing_journal_id ? s.journals.find((j) => j.id === fy.closing_journal_id) : undefined;
+          const reversal = closing ? reverseInto(s, closing, fy.end_date, reason.trim()) : null;
+          const user = actorOf(s);
+          const at = nowIso();
+          for (const p of s.periods) {
+            if (p.start_date >= fy.start_date && p.end_date <= fy.end_date && p.status === "CLOSED") {
+              p.status = "LOCKED";
+              p.locked_by = user.name;
+              p.locked_at = at;
+            }
+          }
+          audit(s, {
+            action: "FISCAL_YEAR.REOPENED",
+            entity_type: "Fiscal year",
+            entity_id: fy.id,
+            entity_label: fy.name,
+            summary: `${fy.name} reopened${reversal ? `; ${closing!.number} reversed by ${reversal.number}` : ""}: ${reason.trim()}. Its periods are locked.`,
+          });
+          return ok(fiscalYearsView(s).find((y) => y.id === fy.id)!, `${fy.name} reopened. Its periods are locked; reopen a month to post to it.`);
+        }),
+
+      addFiscalYear: () =>
+        commit((s) => {
+          const years = fiscalYearsView(s);
+          const last = years[years.length - 1];
+          if (!last) return fail("Complete organisation setup first.");
+          const next = fiscalYearFor(s.org, addDays(last.end_date, 1));
+          const opensFrom = addDays(next.start_date, -NEXT_YEAR_LEAD_DAYS);
+          if (todayIso() < opensFrom) return fail(`${next.name} can be opened from ${fmtDate(opensFrom)}.`);
+          addYearPeriods(s, next.start_date);
+          audit(s, {
+            action: "FISCAL_YEAR.OPENED",
+            entity_type: "Fiscal year",
+            entity_id: next.id,
+            entity_label: next.name,
+            summary: `${next.name} periods opened (${fmtDate(next.start_date)} – ${fmtDate(next.end_date)}).`,
+          });
+          return ok(fiscalYearsView(s).find((y) => y.id === next.id)!, `${next.name} periods opened`);
         }),
 
       // ---- Parties ----------------------------------------------------------

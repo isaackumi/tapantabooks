@@ -14,6 +14,7 @@ const SOURCE_META: Record<SourceType, { label: string; className: string }> = {
   IMPORT: { label: "Import", className: "bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300" },
   FX_REVALUATION: { label: "FX revaluation", className: "bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300" },
   OPENING_BALANCE: { label: "Opening balance", className: "bg-violet-50 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300" },
+  YEAR_END: { label: "Year-end close", className: "bg-slate-100 text-slate-700 dark:bg-slate-700/60 dark:text-slate-200" },
   SYSTEM: { label: "System", className: "bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200" },
 };
 

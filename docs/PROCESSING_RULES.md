@@ -170,6 +170,7 @@ Query `period_id`; body `{ status: "OPEN" | "LOCKED" | "CLOSED" }`.
 Validation, in order:
 
 - `Period not found.` when the id is unknown.
+- Moving a period of a closed financial year (section 3.4) to anything other than `CLOSED`: `{year name} is closed. Reopen the year before changing its periods.`
 - Moving to `OPEN`: `Reopen {later period name} first. Periods close in order.` when any period that starts later is `CLOSED`.
 - Moving to `CLOSED`:
   - `Close {earlier period name} first. Periods close in order.` when any period that starts earlier is not `CLOSED` (a `LOCKED` earlier period also blocks).
@@ -187,7 +188,62 @@ Response: the `FiscalPeriod`. Detail: `{name} is now {open|locked|closed}`.
 
 ### 3.3 Period generation
 
-There is no endpoint to add periods. Periods are generated when the organisation is set up (section 15.2): twelve monthly `OPEN` periods for the financial year that contains today, starting in the month given by `fiscal_year_start`. Period ids in the mock are `per_{YYYY}_{MM}` and names are `{Month} {YYYY}`. How the next financial year's periods are created, and whether a year-end close exists, are open questions.
+Periods are generated when the organisation is set up (section 15.2): twelve monthly `OPEN` periods for the financial year that contains today, starting in the month given by `fiscal_year_start`. Later years are added by `POST /fiscal-years/add` or automatically by a year-end close (section 3.4). Period ids in the mock are `per_{YYYY}_{MM}` and names are `{Month} {YYYY}`.
+
+### 3.4 Financial years and year-end close
+
+A **financial year** is not stored. It is derived from the periods: each period belongs to the year that starts on the most recent `fiscal_year_start` (`MM-01`) on or before its start date.
+
+- `id` = `fy_{start year}`; `name` = `FY {start year}` when the year starts in January, otherwise `FY {start year}/{last two digits of the next year}`.
+- `start_date` = the start month's first day; `end_date` = the day before the next year's start.
+- The **closing entry** of a year is a `POSTED` journal with `source.type` `YEAR_END`, `source.reference` equal to the year name, and no `reversal_of_id`.
+- `status` = `CLOSED` when the year has a closing entry, or when all its periods are `CLOSED` and it has no income or expense balances (nothing to close); otherwise `OPEN`.
+- `net_income` = income statement net income for the year (closing entries excluded, section 17).
+
+**`GET /fiscal-years/list`** returns `{ items: FiscalYearView[] }`, oldest first: `{ id, name, start_date, end_date, status, periods: { total, open, locked, closed }, net_income, closing_journal_id, closing_journal_number, closed_at, closed_by }` (`closed_at` / `closed_by` from the closing journal's `posted_at` / `posted_by`).
+
+**`GET /fiscal-years/close-preview?fiscal_year_id=`** (404 `Fiscal year not found.`) returns `YearEndPreview` `{ fiscal_year, retained_earnings_account_id, lines, net_income, blockers, warnings }`. It can be called at any time; the close only succeeds when `blockers` is empty.
+
+Closing lines:
+
+- For every non-group `REVENUE` and `EXPENSE` account, the signed balance (section 17) over the year, including any closing entries. Accounts at zero are skipped.
+- Revenue with a positive (credit) balance is debited by that amount; expenses with a positive (debit) balance are credited. Negative balances go on the opposite side.
+- `net_income` = sum of revenue balances − sum of expense balances.
+- One more line on the retained earnings account: credit `net_income` when it is a profit, debit its absolute value when it is a loss. The lines always balance.
+- No lines when the year has no income or expense balances.
+- The retained earnings account is the first active, non-group account with subtype `RETAINED_EARNINGS`.
+
+Blockers, in this order:
+
+1. `{name} is already closed.`
+2. `{name} ends on {end date}. It can be closed from {day after}.` while `end_date` ≥ today.
+3. `Close {earlier year} first. Years close in order.` when an earlier year is `OPEN`.
+4. `{n} entr(y is|ies are) still draft or awaiting approval in {name}: {first three numbers}…. Post or delete them first.` for `DRAFT` / `PENDING_APPROVAL` journals dated in the year.
+5. `No active Retained Earnings account. Add an equity account with subtype Retained earnings.`
+
+Warnings (do not block): Opening Balance Equity (subtype `OPENING_BALANCE`) is not zero at `end_date`; draft invoices or bills dated in the year; bank statement lines in the year that are not `MATCHED`.
+
+**`POST /fiscal-years/close?fiscal_year_id=`** fails with the first blocker. Otherwise:
+
+- When there are closing lines, a journal is posted dated `end_date`: memo `Year-end close {name}: {profit|loss} of {amount} to retained earnings`, reference the year name, source `{ type: "YEAR_END", reference: name }`, each line described `Year-end close`. It is posted straight to `POSTED` (no approval) and is not subject to the posting-date check.
+- Every period in the year that is not `CLOSED` becomes `CLOSED` (`locked_by` the actor, `locked_at` now).
+- If the next year has no periods, its twelve `OPEN` periods are created.
+- Audit `FISCAL_YEAR.CLOSED` (entity type `Fiscal year`).
+
+Response: 200 `{ fiscal_year: FiscalYearView, journal: JournalEntry | null }`. Detail: `{name} closed, {journal number} posted`.
+
+**`POST /fiscal-years/reopen?fiscal_year_id=`**, body `{ reason }`:
+
+- `Fiscal year not found.`; `{name} is not closed.`; `Reopen {later year} first. Years reopen in reverse order.` when a later year is `CLOSED`; reason required.
+- The closing entry (if any) is reversed with a reversal dated `end_date` (section 4, reversal rules; source stays `YEAR_END`).
+- The year's `CLOSED` periods become `LOCKED`, so nothing can be posted until a month is reopened deliberately.
+- Audit `FISCAL_YEAR.REOPENED` with the reason.
+
+**`POST /fiscal-years/add`** creates the twelve `OPEN` periods of the year after the latest one. It fails with `{name} can be opened from {date}.` until 92 days before that year starts. Audit `FISCAL_YEAR.OPENED`. Response 201 with the new `FiscalYearView`.
+
+Other guards: `POST /journals/reverse` rejects `YEAR_END` journals (`Year-end entries are undone by reopening the year in Fiscal periods.`).
+
+Effect on reports (section 17): the income statement, dashboard profit figures and monthly profit chart exclude `YEAR_END` journals, so a closed year still reports its profit. The balance sheet, trial balance and general ledger include them: after the close, retained earnings holds the profit and the year's income and expense accounts are zero.
 
 ---
 
@@ -1269,7 +1325,7 @@ Shared definitions:
 
 For every non-group account with movement up to and including `as_at` (from the beginning of the books): net = round2(debits − credits). Accounts with net 0 are omitted. A positive net goes in the `debit` column, a negative net (as a positive number) in the `credit` column. Rows are sorted by account code.
 
-Response: `{ rows: [{ account, debit, credit }], totals: { debit, credit, difference } }`, where `difference` = debit total − credit total (zero for balanced books). Income and expense accounts accumulate across years because there is no year-end close.
+Response: `{ rows: [{ account, debit, credit }], totals: { debit, credit, difference } }`, where `difference` = debit total − credit total (zero for balanced books). Income and expense accounts accumulate across years until the year is closed (section 3.4); after that the trial balance at or after year end is a post-closing trial balance.
 
 ### 17.2 General ledger (`GET /reports/general-ledger?account_id=&from_date=&to_date=`)
 
@@ -1285,7 +1341,7 @@ Response: `{ opening, rows: [{ journal, line, balance }], totals: { debit, credi
 
 ### 17.3 Income statement (`GET /reports/income-statement?from_date=&to_date=`)
 
-Using signed balances over the range:
+Using signed balances over the range, ignoring `YEAR_END` journals (section 3.4) so a closed year still shows its profit. The balance sheet's `current_earnings` uses the same calculation but **includes** `YEAR_END` journals, so profit already closed into retained earnings is not counted twice.
 
 - `revenue`: `REVENUE` accounts.
 - `cost_of_sales`: `EXPENSE` accounts with subtype `COST_OF_SALES`.
@@ -1505,7 +1561,7 @@ These are behaviours that are ambiguous, missing or probably wrong in the mock. 
 6. Are numbering gaps acceptable (database sequences), and must deleted draft numbers never be reused?
 7. With `block_posting_to_locked_periods` false, postings are allowed into `CLOSED` periods as well as `LOCKED` ones. Should `CLOSED` always block?
 8. Moving a period to `LOCKED` has no ordering checks (for example a `CLOSED` period can be moved to `LOCKED` while later periods are closed). Is that intended?
-9. How are the next financial year's periods created, and is there a year-end close into retained earnings? Reports currently use the calendar year rather than `fiscal_year_start`.
+9. Reports default to the calendar year rather than `fiscal_year_start`, and the balance sheet's `current_earnings` uses the calendar year too. Should both follow the financial year? Also: should the year-end close post by branch so branch P&L closes separately?
 10. Which time zone defines "today" for future-date checks, period checks and overdue status?
 
 **Journals**

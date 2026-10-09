@@ -44,6 +44,7 @@ import type {
   StatementImportInput,
   StatementImportResult,
 } from "@/mock/api/engine";
+import type { FiscalYearView } from "@/lib/fiscalYears";
 import { api, ApiError, fetchAll, type HttpMethod, type Query } from "@/core/apiClient";
 import { AppConstants } from "@/core/appConstants";
 import { currentClaims, mintMockToken, setToken } from "@/core/session";
@@ -201,6 +202,11 @@ const createActions = (
     deleteDraftJournal: (id: string) => call<JournalEntry>("DELETE", "/journals/delete", { query: { journal_id: id } }),
     setPeriodStatus: (id: string, status: PeriodStatus) =>
       call<FiscalPeriod>("PUT", "/fiscal-periods/update-status", { query: { period_id: id }, body: { status } }),
+    closeFiscalYear: (id: string) =>
+      call<{ fiscal_year: FiscalYearView; journal: JournalEntry | null }>("POST", "/fiscal-years/close", { query: { fiscal_year_id: id } }),
+    reopenFiscalYear: (id: string, reason: string) =>
+      call<FiscalYearView>("POST", "/fiscal-years/reopen", { query: { fiscal_year_id: id }, body: { reason } }),
+    addFiscalYear: () => call<FiscalYearView>("POST", "/fiscal-years/add"),
 
     // ---- Parties --------------------------------------------------------------------------
     saveParty: (kind: "customer" | "supplier", input: Partial<Customer> & { name: string }, id?: string) => {

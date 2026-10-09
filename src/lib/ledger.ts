@@ -122,13 +122,22 @@ export interface StatementLine {
 
 const sumLines = (lines: StatementLine[]) => round2(lines.reduce((s, l) => s + l.amount, 0));
 
+/** Year-end closing entries (and their reversals) that move profit into retained earnings. */
+export const isYearEndClose = (j: JournalEntry) => j.source.type === "YEAR_END";
+
+/**
+ * Profit and loss for a range. Year-end closing entries are left out so a closed
+ * year still reports its profit; pass `includeClosing` for the ledger's raw P&L
+ * balances (what the balance sheet needs).
+ */
 export const incomeStatement = (
   accounts: Account[],
   journals: JournalEntry[],
   from: string,
   to: string,
+  { includeClosing = false }: { includeClosing?: boolean } = {},
 ) => {
-  const balances = balancesByAccount(accounts, journals, { from, to });
+  const balances = balancesByAccount(accounts, includeClosing ? journals : journals.filter((j) => !isYearEndClose(j)), { from, to });
   const pick = (pred: (a: Account) => boolean): StatementLine[] =>
     accounts
       .filter((a) => !a.is_group && pred(a))
@@ -171,9 +180,10 @@ export const balanceSheet = (accounts: Account[], journals: JournalEntry[], asAt
 
   // Unclosed profit for the year sits in equity until year-end close.
   const yearStart = `${asAt.slice(0, 4)}-01-01`;
-  const currentEarnings = incomeStatement(accounts, journals, yearStart, asAt).netIncome;
+  const raw = { includeClosing: true };
+  const currentEarnings = incomeStatement(accounts, journals, yearStart, asAt, raw).netIncome;
   // Prior years' P&L that has not been closed into retained earnings.
-  const priorEarnings = incomeStatement(accounts, journals, "0000-01-01", addDayBefore(yearStart)).netIncome;
+  const priorEarnings = incomeStatement(accounts, journals, "0000-01-01", addDayBefore(yearStart), raw).netIncome;
 
   const totalAssets = round2(sumLines(currentAssets) + sumLines(fixedAssets));
   const totalLiabilities = round2(sumLines(currentLiabilities) + sumLines(longTermLiabilities));
@@ -309,7 +319,7 @@ export const monthlyProfitAndLoss = (
   const rows = months.map((m) => ({ month: m, revenue: 0, expenses: 0, profit: 0 }));
   const index = new Map(months.map((m, i) => [m, i]));
   for (const j of journals) {
-    if (!affectsLedger(j)) continue;
+    if (!affectsLedger(j) || isYearEndClose(j)) continue;
     const i = index.get(monthKey(j.date));
     if (i === undefined) continue;
     for (const l of j.lines) {
