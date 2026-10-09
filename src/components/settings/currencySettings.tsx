@@ -10,8 +10,9 @@ import StatusBadge from "@/components/statusBadge";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { useChartTheme } from "@/components/charts/chartTheme";
 import { useLedger } from "@/store/ledgerStore";
-import { billRows, invoiceRows } from "@/store/selectors";
+import { useReport } from "@/services/useApiQuery";
 import type { OrgSettings } from "@/models/accounting";
+import type { CurrencyExposure } from "@/models/lists";
 import { rateOn } from "@/lib/fx";
 import { addDays, todayIso } from "@/utils/dates";
 import { classNames, currencySymbol, fmtCurrency, fmtDate, fmtMoney, fmtRate } from "@/utils/format";
@@ -287,20 +288,20 @@ export const CurrencySettings = () => {
   const [selected, setSelected] = useState(foreign.find((c) => c.is_active)?.code ?? "");
   const today = todayIso();
 
-  const exposure = useMemo(() => {
-    const map = new Map<string, { docs: number; receivable: number; payable: number; banks: string[] }>();
-    const get = (c: string) => map.get(c) ?? map.set(c, { docs: 0, receivable: 0, payable: 0, banks: [] }).get(c)!;
-    for (const r of invoiceRows(state)) if (r.currency !== base && r.outstanding_fc > 0) {
-      get(r.currency).docs++;
-      get(r.currency).receivable += r.outstanding_fc;
-    }
-    for (const r of billRows(state)) if (r.currency !== base && r.outstanding_fc > 0) {
-      get(r.currency).docs++;
-      get(r.currency).payable += r.outstanding_fc;
-    }
-    for (const b of state.bankAccounts) if (b.currency !== base) get(b.currency).banks.push(b.name);
-    return map;
-  }, [state, base]);
+  const exposureQuery = useReport<CurrencyExposure>("/currencies/exposure", {});
+  const exposure = useMemo(() => new Map((exposureQuery.data?.items ?? []).map((e) => [e.currency, e])), [exposureQuery.data]);
+  const exposureCell = (v: number | undefined, code: string) =>
+    exposureQuery.error ? (
+      <span className="text-xs text-red-600" title={exposureQuery.error}>
+        Unavailable
+      </span>
+    ) : !exposureQuery.data ? (
+      <span className="text-neutral-300">…</span>
+    ) : v ? (
+      fmtMoney(v, code)
+    ) : (
+      "—"
+    );
 
   const missingToday = foreign.filter((c) => c.is_active && rateOn(state.exchangeRates, c.code, today)?.date !== today);
 
@@ -430,9 +431,14 @@ export const CurrencySettings = () => {
                         </span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right tabular-nums">{ex?.receivable ? fmtMoney(ex.receivable, c.code) : "—"}</td>
-                    <td className="px-4 py-3 text-right tabular-nums">{ex?.payable ? fmtMoney(ex.payable, c.code) : "—"}</td>
-                    <td className="px-4 py-3 text-xs text-neutral-600 dark:text-neutral-300">{ex?.banks.join(", ") || "—"}</td>
+                    <td className="px-4 py-3 text-right whitespace-nowrap tabular-nums">{exposureCell(ex?.receivable, c.code)}</td>
+                    <td className="px-4 py-3 text-right whitespace-nowrap tabular-nums">{exposureCell(ex?.payable, c.code)}</td>
+                    <td className="px-4 py-3 text-xs text-neutral-600 dark:text-neutral-300">
+                      {state.bankAccounts
+                        .filter((b) => b.currency === c.code)
+                        .map((b) => b.name)
+                        .join(", ") || "—"}
+                    </td>
                     <td className="px-4 py-3">
                       <StatusBadge status={c.is_active ? "ACTIVE" : "INACTIVE"} />
                     </td>

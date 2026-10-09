@@ -1,14 +1,5 @@
+import type { CustomFieldEntity, JournalStatus, Payment, PeriodStatus } from "@/models/accounting";
 import type {
-  CreditNote,
-  CustomFieldEntity,
-  JournalStatus,
-  Payment,
-  PeriodStatus,
-  PurchaseBill,
-  SalesInvoice,
-} from "@/models/accounting";
-import type {
-  DocumentListFields,
   DocumentListItem,
   DocumentStatistics,
   JournalListItem,
@@ -46,11 +37,23 @@ import { AGEING_BUCKETS, ageingBucket, emptyAgeing } from "@/lib/documents";
 import { partyStatement } from "@/lib/statements";
 import { fiscalYearFor, fiscalYearsView, yearEndPreview } from "@/lib/fiscalYears";
 import { customFieldUsage } from "@/lib/customFields";
-import { bankBaseBalances, billRows, invoiceRows, type DocumentRow } from "@/store/selectors";
 import { round2 } from "@/utils/format";
 import { addDays, addMonths, daysBetween, endOfMonth, todayIso } from "@/utils/dates";
 import { openingBalancesView, revaluationPreview, type LedgerEngine, type LedgerState } from "./engine";
-import { bankActivity, bankBalances, reconciliationView, revaluationItems, statementImportPreview } from "./banking";
+import { bankActivity, bankBalances, bankBaseBalances, reconciliationView, revaluationItems, statementImportPreview } from "./banking";
+import {
+  billRows,
+  creditItems,
+  creditStatistics,
+  currencyExposure,
+  documentDetail,
+  documentItems,
+  invoiceRows,
+  partyBalances,
+  paymentItems,
+  type DocumentRow,
+} from "./documents";
+import { auditStatistics, checkImportReferences, importItems, importStatistics, needsAttention } from "./records";
 import { ApiFault, found, fromResult, listResult, need, type HandlerResult, type ListOptions } from "./http";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- request bodies are untyped JSON */
@@ -79,9 +82,9 @@ const snakeKeys = (value: unknown): unknown => {
 };
 const report = (data: unknown): HandlerResult => ({ data: snakeKeys(data) });
 
-const creditList = (rows: CreditNote[], q: URLSearchParams) =>
-  listResult(rows, q, {
-    search: ["number", "reason", "supplier_reference"],
+const creditList = (state: LedgerState, kind: "customer" | "supplier", q: URLSearchParams) =>
+  listResult(creditItems(state, kind), q, {
+    search: ["number", "reason", "supplier_reference", "party_name", "document_number"],
     filters: { party_id: "party_id", document_id: "document_id", state: "state" },
     dateField: "date",
     defaultSort: { field: "date", order: "desc" },
@@ -268,33 +271,9 @@ const taxSummary = (state: LedgerState, q: URLSearchParams): TaxSummaryReport =>
 
 const journalItems = (state: LedgerState): JournalListItem[] => state.journals.map((j) => ({ ...j, total: lineTotals(j.lines).debit }));
 
-const documentItems = <T extends SalesInvoice | PurchaseBill>(rows: DocumentRow<T>[]): (T & DocumentListFields)[] =>
-  rows.map((r) => ({
-    ...r.doc,
-    party_code: r.party?.code ?? "",
-    party_name: r.party?.name ?? "",
-    status: r.status,
-    days_overdue: r.status === "OVERDUE" ? Math.max(0, daysBetween(r.doc.due_date, todayIso())) : 0,
-    subtotal: r.totals.subtotal,
-    tax: r.totals.tax,
-    total: r.totals.total,
-    outstanding: r.outstanding_fc,
-    total_base: r.total_base,
-    outstanding_base: r.outstanding,
-  }));
-
-const paymentItems = (state: LedgerState, kind: "receipt" | "payment"): PaymentListItem[] => {
-  const isReceipt = kind === "receipt";
-  const parties = new Map((isReceipt ? state.customers : state.suppliers).map((p) => [p.id, p.name]));
-  const docs = new Map<string, string>((isReceipt ? state.invoices : state.bills).map((d) => [d.id, d.number]));
-  const banks = new Map(state.bankAccounts.map((b) => [b.id, b.name]));
-  return (isReceipt ? state.receipts : state.supplierPayments).map((p) => ({
-    ...p,
-    party_name: parties.get(p.party_id) ?? "",
-    document_number: docs.get(p.document_id) ?? "",
-    bank_account_name: banks.get(p.bank_account_id) ?? "",
-  }));
-};
+/** `open=true` keeps documents with something still owed. */
+const openOnly = <T extends { outstanding_base: number }>(items: T[], q: URLSearchParams) =>
+  flag(q.get("open")) ? items.filter((d) => d.outstanding_base > 0) : items;
 
 const DOCUMENT_LIST: ListOptions<DocumentListItem> = {
   search: ["number", "party_name", "party_code", "supplier_reference", "source.reference", "currency", "notes", "custom_fields"],
@@ -401,6 +380,7 @@ const HANDLERS: Record<string, Handler> = {
 
   // ---- Currencies -------------------------------------------------------------
   "GET /currencies/list": ({ state, q }) => listResult(state.currencies, q, { search: ["code", "name"] }),
+  "GET /currencies/exposure": ({ state }) => ({ data: currencyExposure(state) }),
   "POST /currencies/add": ({ engine, body }) => fromResult(engine.addCurrency(body), 201),
   "PUT /currencies/update": ({ engine, state, q, body }) => {
     const code = need(q.get("currency_code"), "currency_code");
@@ -538,6 +518,7 @@ const HANDLERS: Record<string, Handler> = {
   // ---- Customers & suppliers ------------------------------------------------------------------------
   "GET /customers/list": ({ state, q }) =>
     listResult(state.customers, q, { search: ["code", "name", "email", "phone", "city"], filters: { status: "status" } }),
+  "GET /customers/balances": ({ state }) => ({ data: partyBalances(state, "customer") }),
   "GET /customers/get": ({ state, q }) => ({
     data: found(state.customers.find((c) => c.id === need(q.get("customer_id"), "customer_id")), "Customer"),
   }),
@@ -545,6 +526,7 @@ const HANDLERS: Record<string, Handler> = {
   "PUT /customers/update": ({ engine, q, body }) => fromResult(engine.saveParty("customer", body, need(q.get("customer_id"), "customer_id"))),
   "GET /suppliers/list": ({ state, q }) =>
     listResult(state.suppliers, q, { search: ["code", "name", "email", "phone", "city"], filters: { status: "status" } }),
+  "GET /suppliers/balances": ({ state }) => ({ data: partyBalances(state, "supplier") }),
   "GET /suppliers/get": ({ state, q }) => ({
     data: found(state.suppliers.find((c) => c.id === need(q.get("supplier_id"), "supplier_id")), "Supplier"),
   }),
@@ -553,14 +535,12 @@ const HANDLERS: Record<string, Handler> = {
 
   // ---- Invoices & receipts ------------------------------------------------------------------------------
   "GET /invoices/list": ({ state, q }) =>
-    listResult(documentItems(invoiceRows(state)), q, {
+    listResult(openOnly(documentItems(invoiceRows(state)), q), q, {
       ...DOCUMENT_LIST,
       filters: { state: "state", status: "status", customer_id: "customer_id", currency: "currency" },
     }),
   "GET /invoices/statistics": ({ state }) => ({ data: documentStatistics(documentItems(invoiceRows(state)), state.receipts) }),
-  "GET /invoices/get": ({ state, q }) => ({
-    data: found(state.invoices.find((d) => d.id === need(q.get("invoice_id"), "invoice_id")), "Invoice"),
-  }),
+  "GET /invoices/get": ({ state, q }) => ({ data: documentDetail(state, "invoice", need(q.get("invoice_id"), "invoice_id")) }),
   "POST /invoices/add": ({ engine, body }) => {
     const { approve, ...input } = body;
     return fromResult(engine.createInvoice(input, flag(approve)), 201);
@@ -571,24 +551,24 @@ const HANDLERS: Record<string, Handler> = {
   "GET /receipts/list": ({ state, q }) => listResult(paymentItems(state, "receipt"), q, PAYMENT_LIST),
   "GET /receipts/statistics": ({ state }) => ({ data: paymentStatistics(state, state.receipts) }),
   "POST /receipts/add": ({ engine, body }) => fromResult(engine.recordPayment("receipt", body), 201),
-  "GET /credit-notes/list": ({ state, q }) => creditList(state.creditNotes, q),
-  "GET /credit-notes/get": ({ state, q }) => ({
-    data: found(state.creditNotes.find((c) => c.id === need(q.get("credit_note_id"), "credit_note_id")), "Credit note"),
-  }),
+  "GET /credit-notes/list": ({ state, q }) => creditList(state, "customer", q),
+  "GET /credit-notes/statistics": ({ state }) => ({ data: creditStatistics(state, "customer") }),
+  "GET /credit-notes/get": ({ state, q }) => {
+    const id = need(q.get("credit_note_id"), "credit_note_id");
+    return { data: found(creditItems(state, "customer").find((c) => c.id === id), "Credit note") };
+  },
   "POST /credit-notes/add": ({ engine, body }) => fromResult(engine.createCreditNote("customer", body), 201),
   "POST /credit-notes/void": ({ engine, q, body }) =>
     fromResult(engine.voidCreditNote("customer", need(q.get("credit_note_id"), "credit_note_id"), String(body?.reason ?? ""))),
 
   // ---- Bills & supplier payments -----------------------------------------------------------------------------
   "GET /bills/list": ({ state, q }) =>
-    listResult(documentItems(billRows(state)), q, {
+    listResult(openOnly(documentItems(billRows(state)), q), q, {
       ...DOCUMENT_LIST,
       filters: { state: "state", status: "status", supplier_id: "supplier_id", currency: "currency" },
     }),
   "GET /bills/statistics": ({ state }) => ({ data: documentStatistics(documentItems(billRows(state)), state.supplierPayments) }),
-  "GET /bills/get": ({ state, q }) => ({
-    data: found(state.bills.find((d) => d.id === need(q.get("bill_id"), "bill_id")), "Bill"),
-  }),
+  "GET /bills/get": ({ state, q }) => ({ data: documentDetail(state, "bill", need(q.get("bill_id"), "bill_id")) }),
   "POST /bills/add": ({ engine, body }) => {
     const { approve, ...input } = body;
     return fromResult(engine.createBill(input, flag(approve)), 201);
@@ -599,10 +579,12 @@ const HANDLERS: Record<string, Handler> = {
   "GET /supplier-payments/list": ({ state, q }) => listResult(paymentItems(state, "payment"), q, PAYMENT_LIST),
   "GET /supplier-payments/statistics": ({ state }) => ({ data: paymentStatistics(state, state.supplierPayments) }),
   "POST /supplier-payments/add": ({ engine, body }) => fromResult(engine.recordPayment("payment", body), 201),
-  "GET /supplier-credits/list": ({ state, q }) => creditList(state.supplierCredits, q),
-  "GET /supplier-credits/get": ({ state, q }) => ({
-    data: found(state.supplierCredits.find((c) => c.id === need(q.get("supplier_credit_id"), "supplier_credit_id")), "Supplier credit"),
-  }),
+  "GET /supplier-credits/list": ({ state, q }) => creditList(state, "supplier", q),
+  "GET /supplier-credits/statistics": ({ state }) => ({ data: creditStatistics(state, "supplier") }),
+  "GET /supplier-credits/get": ({ state, q }) => {
+    const id = need(q.get("supplier_credit_id"), "supplier_credit_id");
+    return { data: found(creditItems(state, "supplier").find((c) => c.id === id), "Supplier credit") };
+  },
   "POST /supplier-credits/add": ({ engine, body }) => fromResult(engine.createCreditNote("supplier", body), 201),
   "POST /supplier-credits/void": ({ engine, q, body }) =>
     fromResult(engine.voidCreditNote("supplier", need(q.get("supplier_credit_id"), "supplier_credit_id"), String(body?.reason ?? ""))),
@@ -694,12 +676,20 @@ const HANDLERS: Record<string, Handler> = {
     if (body.is_active === undefined || flag(body.is_active) === rule.is_active) return { data: rule };
     return fromResult(engine.toggleRule(rule.id));
   },
-  "GET /imports/list": ({ state, q }) =>
-    listResult(state.importBatches, q, {
-      search: ["number", "file_name", "entity"],
+  "GET /imports/list": ({ state, q }) => {
+    const items = importItems(state);
+    return listResult(flag(q.get("attention")) ? items.filter((b) => needsAttention(b.status)) : items, q, {
+      search: ["number", "file_name", "entity", "source_name"],
       filters: { source_id: "source_id", status: "status" },
       defaultSort: { field: "created_at", order: "desc" },
-    }),
+    });
+  },
+  "GET /imports/statistics": ({ state }) => ({ data: importStatistics(state) }),
+  "GET /imports/get": ({ state, q }) => {
+    const id = need(q.get("import_batch_id"), "import_batch_id");
+    return { data: found(importItems(state).find((b) => b.id === id), "Import batch") };
+  },
+  "POST /imports/check-references": ({ state, body }) => ({ data: checkImportReferences(state, body?.references) }),
   "POST /imports/add": ({ engine, body }) => fromResult(engine.createImport(body), 201),
   "POST /imports/post": ({ engine, q }) => fromResult(engine.postImportBatch(need(q.get("import_batch_id"), "import_batch_id"))),
   "POST /imports/reprocess": ({ engine, q }) =>
@@ -709,10 +699,11 @@ const HANDLERS: Record<string, Handler> = {
   "GET /audit-logs/list": ({ state, q }) =>
     listResult(state.auditEvents, q, {
       search: ["summary", "entity_label", "actor_name", "action"],
-      filters: { entity_type: "entity_type", actor_id: "actor_id", actor_type: "actor_type" },
+      filters: { entity_type: "entity_type", actor_id: "actor_id", actor_type: "actor_type", actor_name: "actor_name" },
       dateField: "occurred_at",
       defaultSort: { field: "occurred_at", order: "desc" },
     }),
+  "GET /audit-logs/statistics": ({ state }) => ({ data: auditStatistics(state) }),
 
   // ---- Reports --------------------------------------------------------------------------------------------------------------------
   "GET /dashboard/statistics": ({ state, q }) => {

@@ -8,7 +8,7 @@ import type {
   StatementImportPreview,
   StatementImportPreviewInput,
 } from "@/models/banking";
-import { affectsLedger } from "@/lib/ledger";
+import { affectsLedger, balancesByAccount } from "@/lib/ledger";
 import { accountBalances, isForeign } from "@/lib/fx";
 import { partitionNewLines } from "@/lib/bankStatementCsv";
 import { round2 } from "@/utils/format";
@@ -27,6 +27,12 @@ const netOnBank = (lines: JournalLine[], bank: BankAccount) =>
 const ledgerBalance = (s: LedgerState, bank: BankAccount, asAt: string) => {
   const bal = accountBalances(s.journals, bank.gl_account_id, asAt);
   return { own: isForeign(bank.currency) ? bal.fc : bal.base, base: bal.base };
+};
+
+/** Ledger balance of each bank account in base currency. */
+export const bankBaseBalances = (s: LedgerState) => {
+  const balances = balancesByAccount(s.accounts, s.journals);
+  return new Map(s.bankAccounts.map((b) => [b.id, balances.get(b.gl_account_id) ?? 0]));
 };
 
 const findBank = (s: LedgerState, id: string) => found(s.bankAccounts.find((b) => b.id === id), "Bank account");

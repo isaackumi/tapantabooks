@@ -527,6 +527,19 @@ Notes:
 - `credit_limit` is stored but never enforced.
 - An inactive customer cannot receive new invoices (section 7.2). The mock does not block bills for inactive suppliers (open question).
 
+### 6.3 `GET /customers/balances`, `GET /suppliers/balances`
+
+Returns `{ as_at, items: [{ party_id, outstanding, overdue, open_count, outstanding_fc }], totals: { outstanding, overdue, with_balance_count, overdue_count } }` as at today.
+
+- Only parties with at least one document with `outstanding_base > 0` (section 7.8) appear in `items`, ordered by `outstanding` descending. The client shows zero for everyone else.
+- `outstanding`: sum of `outstanding_base` over the party's invoices (or bills). Base currency at the document rates, so it equals the party's line on the ageing report as at today.
+- `overdue`: the same over documents whose display status is `OVERDUE`.
+- `open_count`: number of those documents.
+- `outstanding_fc`: sum of `outstanding` (document currency) over documents whose currency is the party's own currency and is not the base currency; 0 otherwise.
+- `totals`: sums of `outstanding` and `overdue` over the items, the number of items, and the number with `overdue > 0`.
+
+The customer and supplier screens list parties from the cached reference collection and join these balances by `party_id`.
+
 ---
 
 ## 7. Sales invoices and purchase bills
@@ -696,8 +709,19 @@ There is no endpoint to reverse a payment, so a document with any payment can ne
 
 - `search`: number, party name and code, supplier reference, source reference, currency, notes, custom field values.
 - Filters: `state` (stored), `status` (display), `customer_id` or `supplier_id`, `currency`; `from_date` / `to_date` on `issue_date`; `cf_<key>`.
+- `open=true` keeps only documents with `outstanding_base > 0`. The payment and credit-note forms request `open=true&sort_by=due_date&sort_order=asc&size=100` for their document pickers.
 - `sort_by` accepts any of the item's fields, derived ones included (for example `outstanding_base`, `days_overdue`, `party_name`).
 - Default order: `issue_date` descending, then `number` descending.
+
+**`GET /invoices/get`, `GET /bills/get`.** Query `invoice_id` or `bill_id`; 404 `Invoice not found.` / `Bill not found.` Returns the list item (all fields above) plus:
+
+| Field | Definition |
+|---|---|
+| `tax_by_code` | `[{ tax_code_id, amount }]`, document currency, one per tax code with a non-zero rate (section 7.3) |
+| `journal_number` | Number of the posting journal, null for drafts |
+| `payments` | Receipts (or supplier payments) against the document as `PaymentListItem`s (section 8.5), oldest first |
+| `credits` | Credit notes (or supplier credits) against it as `CreditListItem`s (section 19.4), voided ones included, oldest first |
+| `realised_fx` | Sum of `fx_gain_loss` over `payments`, base currency |
 
 **`GET /invoices/statistics`, `GET /bills/statistics`.** Computed over every invoice (or bill), ignoring list filters. Amounts are base currency.
 
@@ -841,6 +865,16 @@ Query `currency_code`; body `{ is_active }`. The route returns 404 `Currency not
 Side effects: `is_active` is toggled. Audit `CURRENCY.ACTIVATED` or `CURRENCY.DEACTIVATED`. Deactivating does not affect open documents; their balances are still revalued.
 
 Response: the `Currency`. Detail: `{code} switched on` / `{code} switched off`.
+
+### 9.4a `GET /currencies/exposure`
+
+Returns `{ as_at, items: [{ currency, open_documents, receivable, payable }] }` as at today, one item per non-base currency with at least one open document, ordered by code.
+
+- `receivable`: sum of `outstanding` (document currency, section 7.8) over invoices in that currency with `outstanding > 0`.
+- `payable`: the same over bills.
+- `open_documents`: number of those invoices and bills.
+
+Settings → Currencies shows these next to each currency; the bank accounts per currency come from the cached bank account collection.
 
 ### 9.5 `POST /exchange-rates/add`
 
@@ -1297,6 +1331,20 @@ The import posting in the mock is a placeholder: it ignores field mappings, tax 
 
 Side effects: the row becomes `VALID` with message `Corrected and revalidated by {actor name}.`; a `FAILED` batch becomes `NEEDS_REVIEW` (and a `POSTED` batch would become `PARTIALLY_POSTED`). The mock does not actually re-validate the row. Audit `IMPORT.ROW_REPROCESSED`, label `{batch number} row {row}`. Response: the `ImportRecord`; detail `Row {row} is ready to post`.
 
+### 14.5 Import lists, detail, statistics and the reference check
+
+**`GET /imports/list`.** Each item is an `ImportListItem`: the batch (rows included) plus `source_name` (the data source's name, or its id when unknown), `row_count`, `valid_count`, `warning_count`, `error_count` and `posted_count`.
+
+- `search`: number, file name, entity, source name.
+- Filters: `source_id`, `status`; `attention=true` keeps `NEEDS_REVIEW`, `FAILED` and `PARTIALLY_POSTED` batches.
+- Default order: `created_at` descending.
+
+**`GET /imports/get`.** Query `import_batch_id`; the same item. 404 `Import batch not found.`
+
+**`GET /imports/statistics`.** Over every batch: `batch_count`; `row_count`, `posted_rows` and `held_rows` (sums of `row_count`, `posted_count` and `error_count`); `needs_attention` (batches `NEEDS_REVIEW` or `FAILED`); `status_counts { ALL, ATTENTION, POSTED }`, where `ATTENTION` matches the `attention=true` filter.
+
+**`POST /imports/check-references`.** Read-only; body `{ references: string[] }`, at most 5000 (400 `references must be an array of strings.` / `At most 5000 references per check.`). Blank references are ignored. Returns `{ items: [{ reference, batch_id, batch_number }] }` for each reference that some earlier batch already holds as a row's `external_reference`, compared case-insensitively; `reference` is echoed as sent (trimmed) and the batch is the earliest by `created_at`. The import wizard calls it before validating rows and marks matches `ERROR` (`Already imported in {batch number}.`).
+
 ---
 
 ## 15. Organisation setup, settings, dimensions and users
@@ -1443,7 +1491,9 @@ The seed data also contains `SYNC.PARTIAL` and `SYNC.FAILED` events (entity type
 
 Writes that record **no** audit event in the mock: draft journal edit, statement line unmatch, field mapping update and delete, custom field move, dimension activate or deactivate, and the no-op paths ("Nothing changed", unchanged toggles). Journals posted as a side effect (invoice and bill approvals, payments, void reversals, revaluation reversals) are covered by the parent action's event only; no separate `JOURNAL.*` event is written for them.
 
-`GET /audit-logs/list` supports `search` (summary, entity label, actor name, action), filters `entity_type`, `actor_id`, `actor_type`, and `from_date` / `to_date` on the date part of `occurred_at`; default sort is `occurred_at` descending.
+`GET /audit-logs/list` supports `search` (summary, entity label, actor name, action), filters `entity_type`, `actor_id`, `actor_type`, `actor_name` (exact; covers integrations and the posting engine, which have no user id), and `from_date` / `to_date` on the date part of `occurred_at`; default sort is `occurred_at` descending. The audit screen pages through it 50 at a time and exports every matching row by paging with the same filters.
+
+`GET /audit-logs/statistics` returns `{ as_at, total, today, by_actor_type: { USER, SYSTEM, INTEGRATION }, entity_types, actor_names }` over every event, ignoring filters: `today` counts events whose `occurred_at` date is today; `entity_types` and `actor_names` are the distinct values, sorted, used as the screen's filter options.
 
 ---
 
@@ -1736,6 +1786,24 @@ Query `credit_note_id` / `supplier_credit_id`; body `{ reason }`. Fails when the
 - FX revaluation (section 10.1) counts approved credits dated on or before `as_at` like payments: their totals reduce `amount_fc` and their `base_amount` reduces `carrying_base`.
 - The VAT figures are read from the ledger, so credited VAT drops out of the return for the credit's month.
 - `POST /journals/reverse` refuses credit journals because they carry a `document_id`.
+
+### 19.4 Lists, detail and statistics
+
+**`GET /credit-notes/list`, `GET /supplier-credits/list`.** Each item is a `CreditListItem`: the stored credit plus `party_name`, `document_number`, `subtotal`, `tax`, `total` (document currency, section 7.3 applied to the credit's lines) and `journal_number` (null when there is no journal).
+
+- `search`: number, reason, supplier reference, party name, document number.
+- Filters: `party_id`, `document_id`, `state`; `from_date` / `to_date` on `date`.
+- Default order: `date` descending.
+
+**`GET /credit-notes/get`, `GET /supplier-credits/get`.** Query `credit_note_id` / `supplier_credit_id`; returns the same `CreditListItem`. 404 `Credit note not found.` / `Supplier credit not found.`
+
+**`GET /credit-notes/statistics`, `GET /supplier-credits/statistics`.** Over every credit, ignoring list filters. "Live" means `state = APPROVED` and `date` on or before today. Amounts are base currency.
+
+| Field | Definition |
+|---|---|
+| `this_month` | `{ month, total, count }`: sum of `base_amount` and count of live credits dated in the current calendar month |
+| `year_to_date` | `{ from_date, total, count, tax }` over live credits dated from the start of the current financial year; `tax` is `round2(tax × exchange_rate)` summed, the output (or input) VAT reversed |
+| `state_counts` | `{ ALL, APPROVED, VOID }` |
 
 ---
 

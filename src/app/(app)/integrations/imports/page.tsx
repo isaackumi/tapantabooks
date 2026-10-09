@@ -8,42 +8,38 @@ import { Tabs } from "@/components/tabs";
 import StatCard from "@/components/statCard";
 import StatusBadge from "@/components/statusBadge";
 import RightDrawer from "@/components/rightDrawer";
-import DataTable, { type Column } from "@/components/dataTable";
+import DataTable, { serverPaging, type Column } from "@/components/dataTable";
+import { QueryError, QueryState, Skeleton } from "@/components/queryState";
 import ImportWizard from "@/components/integrations/importWizard";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
 import { useLedger } from "@/store/ledgerStore";
-import type { ImportBatch } from "@/models/accounting";
-import { matchesSearch, useGlobalState } from "@/utils/globalStateContext";
+import { useDebouncedValue, usePagedList, useReport } from "@/services/useApiQuery";
+import type { ImportListItem, ImportStatistics } from "@/models/lists";
+import { useGlobalState } from "@/utils/globalStateContext";
 import { useQueryParam } from "@/utils/useQueryParam";
 import { usePending } from "@/services/usePending";
 import { fmtCurrency, fmtDateTime } from "@/utils/format";
 
-type Row = ImportBatch & { source: string; valid: number; warnings: number; errors: number; posted: number };
+type Row = ImportListItem;
 
 export default function ImportsPage() {
-  const { state, actions } = useLedger();
+  const { actions } = useLedger();
   const { openJournal } = useJournalViewer();
   const { searchQuery } = useGlobalState();
   const [wizardOpen, setWizardOpen] = useState(false);
   const [tab, setTab] = useState("ALL");
   const [viewId, setViewId] = useState<string | null>(null);
   useQueryParam("open", setViewId);
+  const search = useDebouncedValue(searchQuery.trim());
 
-  const sourceName = new Map(state.dataSources.map((s) => [s.id, s.name]));
-  const rows: Row[] = state.importBatches.map((b) => ({
-    ...b,
-    source: sourceName.get(b.source_id) ?? b.source_id,
-    valid: b.records.filter((r) => r.status === "VALID").length,
-    warnings: b.records.filter((r) => r.status === "WARNING").length,
-    errors: b.records.filter((r) => r.status === "ERROR").length,
-    posted: b.records.filter((r) => r.posted).length,
-  }));
-  const filtered = rows.filter(
-    (r) =>
-      (tab === "ALL" || (tab === "ATTENTION" ? r.status === "NEEDS_REVIEW" || r.status === "FAILED" || r.status === "PARTIALLY_POSTED" : r.status === tab)) &&
-      matchesSearch(searchQuery, r.number, r.source, r.entity, r.file_name),
-  );
-  const viewing = rows.find((r) => r.id === viewId);
+  const stats = useReport<ImportStatistics>("/imports/statistics", {});
+  const list = usePagedList<Row>("/imports/list", {
+    status: tab === "POSTED" ? "POSTED" : "",
+    attention: tab === "ATTENTION" ? "true" : "",
+    search,
+  });
+  const detail = useReport<Row>(viewId ? "/imports/get" : null, { import_batch_id: viewId ?? "" });
+  const viewing = detail.data?.id === viewId ? detail.data : null;
   const ready = viewing ? viewing.records.filter((r) => r.status !== "ERROR" && !r.posted).length : 0;
 
   const { pending, track, anyPending } = usePending();
@@ -55,26 +51,25 @@ export default function ImportsPage() {
   const columns: Column<Row>[] = [
     { accessorKey: "number", header: "Batch", cell: ({ row }) => <span className="font-mono text-xs font-medium">{row.original.number}</span> },
     {
-      accessorKey: "source",
+      accessorKey: "source_name",
       header: "Source",
       cell: ({ row }) => (
         <div>
-          <p className="font-medium">{row.original.source}</p>
+          <p className="font-medium">{row.original.source_name}</p>
           <p className="text-xs text-neutral-500 dark:text-neutral-400">{row.original.file_name ?? "API / connector"}</p>
         </div>
       ),
     },
     { accessorKey: "entity", header: "Records" },
     {
-      id: "rows",
+      accessorKey: "row_count",
       header: "Rows",
-      accessorFn: (r) => r.records.length,
       cell: ({ row }) => (
         <span className="flex items-center gap-2 text-xs">
-          <span className="font-medium">{row.original.records.length}</span>
-          <span className="text-emerald-600">{row.original.valid} ok</span>
-          {row.original.warnings > 0 && <span className="text-amber-600">{row.original.warnings} warn</span>}
-          {row.original.errors > 0 && <span className="text-red-600">{row.original.errors} error</span>}
+          <span className="font-medium">{row.original.row_count}</span>
+          <span className="text-emerald-600">{row.original.valid_count} ok</span>
+          {row.original.warning_count > 0 && <span className="text-amber-600">{row.original.warning_count} warn</span>}
+          {row.original.error_count > 0 && <span className="text-red-600">{row.original.error_count} error</span>}
         </span>
       ),
     },
@@ -103,41 +98,45 @@ export default function ImportsPage() {
         }
       />
 
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" data-tour="stats">
-        <StatCard label="Batches" value={rows.length} sub={`${rows.reduce((s, r) => s + r.records.length, 0)} rows received`} />
-        <StatCard label="Rows posted" value={rows.reduce((s, r) => s + r.posted, 0)} tone="success" />
-        <StatCard label="Rows held" value={rows.reduce((s, r) => s + r.errors, 0)} tone="danger" sub="Failed validation" />
-        <StatCard
-          label="Need attention"
-          value={rows.filter((r) => r.status === "NEEDS_REVIEW" || r.status === "FAILED").length}
-          tone="warning"
-          sub="Waiting for review or failed"
-        />
-      </div>
+      <QueryState query={stats} skeleton={<Skeleton rows={2} />} className="mb-6">
+        {(st) => (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" data-tour="stats">
+            <StatCard label="Batches" value={st.batch_count} sub={`${st.row_count} rows received`} />
+            <StatCard label="Rows posted" value={st.posted_rows} tone="success" />
+            <StatCard label="Rows held" value={st.held_rows} tone="danger" sub="Failed validation" />
+            <StatCard label="Need attention" value={st.needs_attention} tone="warning" sub="Waiting for review or failed" />
+          </div>
+        )}
+      </QueryState>
 
       <Tabs
         tabs={[
-          { id: "ALL", label: "All", count: rows.length },
-          { id: "ATTENTION", label: "Needs attention", count: rows.filter((r) => ["NEEDS_REVIEW", "FAILED", "PARTIALLY_POSTED"].includes(r.status)).length },
-          { id: "POSTED", label: "Posted", count: rows.filter((r) => r.status === "POSTED").length },
+          { id: "ALL", label: "All", count: stats.data?.status_counts.ALL },
+          { id: "ATTENTION", label: "Needs attention", count: stats.data?.status_counts.ATTENTION },
+          { id: "POSTED", label: "Posted", count: stats.data?.status_counts.POSTED },
         ]}
         value={tab}
         onChange={setTab}
       />
       <div className="mt-4">
-        <DataTable
-          columns={columns}
-          data={filtered}
-          onRowClick={(r) => setViewId(r.id)}
-          emptyIcon={FiUploadCloud}
-          emptyTitle="No imports here"
-          emptyDescription="Start one with New import."
-          emptyActions={[{ label: "New import", onClick: () => setWizardOpen(true) }]}
-        />
+        <QueryState query={list} skeleton={<Skeleton rows={8} />}>
+          {() => (
+            <DataTable
+              columns={columns}
+              data={list.items}
+              server={serverPaging(list)}
+              onRowClick={(r) => setViewId(r.id)}
+              emptyIcon={FiUploadCloud}
+              emptyTitle={search ? "No imports match" : "No imports here"}
+              emptyDescription={search ? "Try another search or tab." : "Start one with New import."}
+              emptyActions={search ? undefined : [{ label: "New import", onClick: () => setWizardOpen(true) }]}
+            />
+          )}
+        </QueryState>
       </div>
 
       <RightDrawer
-        open={!!viewing}
+        open={!!viewId}
         onClose={() => setViewId(null)}
         widthClass="max-w-3xl"
         title={
@@ -148,7 +147,7 @@ export default function ImportsPage() {
             </span>
           )
         }
-        subtitle={viewing && `${viewing.entity} from ${viewing.source}`}
+        subtitle={viewing && `${viewing.entity} from ${viewing.source_name}`}
         footer={
           viewing && (
             <div className="flex flex-wrap justify-end gap-2">
@@ -166,6 +165,8 @@ export default function ImportsPage() {
           )
         }
       >
+        {!viewing &&
+          (detail.error && !detail.loading ? <QueryError message={detail.error} onRetry={detail.refetch} /> : <Skeleton rows={6} />)}
         {viewing && (
           <div className="space-y-5">
             {viewing.status === "FAILED" && (
@@ -175,10 +176,10 @@ export default function ImportsPage() {
             )}
             <div className="grid grid-cols-4 gap-3 text-center">
               {[
-                { label: "Rows", value: viewing.records.length },
-                { label: "Posted", value: viewing.posted },
-                { label: "Warnings", value: viewing.warnings },
-                { label: "Errors", value: viewing.errors },
+                { label: "Rows", value: viewing.row_count },
+                { label: "Posted", value: viewing.posted_count },
+                { label: "Warnings", value: viewing.warning_count },
+                { label: "Errors", value: viewing.error_count },
               ].map((s) => (
                 <div key={s.label} className="rounded-xl bg-neutral-50 p-3 dark:bg-neutral-900/40">
                   <p className="text-xl font-bold tabular-nums">{s.value}</p>
@@ -213,7 +214,7 @@ export default function ImportsPage() {
                       <td className="px-3 py-2 text-neutral-500">{r.row}</td>
                       <td className="px-3 py-2 font-mono text-xs">{r.external_reference}</td>
                       <td className="px-3 py-2">{r.summary}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{r.amount ? fmtCurrency(r.amount) : "—"}</td>
+                      <td className="px-3 py-2 text-right whitespace-nowrap tabular-nums">{r.amount ? fmtCurrency(r.amount) : "—"}</td>
                       <td className="px-3 py-2">
                         <div className="flex items-center gap-1.5">
                           <StatusBadge status={r.status} />

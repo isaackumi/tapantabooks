@@ -8,14 +8,17 @@ import RightDrawer from "@/components/rightDrawer";
 import StatusBadge from "@/components/statusBadge";
 import SourceBadge from "@/components/sourceBadge";
 import { Button, DetailRow } from "@/components/ui";
+import { QueryError, Skeleton } from "@/components/queryState";
 import ReasonModal from "@/components/accounting/reasonModal";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
 import PaymentModal from "./paymentModal";
 import CreditNoteModal from "./creditNoteModal";
 import { useLedger } from "@/store/ledgerStore";
-import { billRows, dimensionName, invoiceRows } from "@/store/selectors";
-import { documentTotals, lineAmount } from "@/lib/documents";
-import type { PurchaseBill, SalesInvoice } from "@/models/accounting";
+import { dimensionName } from "@/store/selectors";
+import { useReport } from "@/services/useApiQuery";
+import { lineAmount } from "@/lib/documents";
+import type { PurchaseBill } from "@/models/accounting";
+import type { DocumentDetail } from "@/models/lists";
 import { BASE_CURRENCY, classNames, fmtCurrency, fmtDate, fmtDateTime, fmtMoney, fmtRate, humanize } from "@/utils/format";
 import { CustomFieldDetails, EditCustomFieldsModal } from "@/components/customFields";
 
@@ -34,18 +37,16 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
   const [editCustom, setEditCustom] = useState(false);
   const isInvoice = kind === "invoice";
 
-  const rows = isInvoice ? invoiceRows(state) : billRows(state);
-  const row = rows.find((r) => r.doc.id === documentId);
-  const doc = row?.doc as (SalesInvoice | PurchaseBill) | undefined;
-  const payments = (isInvoice ? state.receipts : state.supplierPayments).filter((p) => p.document_id === documentId);
-  const credits = (isInvoice ? state.creditNotes : state.supplierCredits).filter((c) => c.document_id === documentId);
-  const liveCredits = credits.filter((c) => c.state === "APPROVED");
+  const query = useReport<DocumentDetail>(documentId ? (isInvoice ? "/invoices/get" : "/bills/get") : null, {
+    [isInvoice ? "invoice_id" : "bill_id"]: documentId ?? "",
+  });
+  const doc = query.data?.id === documentId ? query.data : null;
+  const liveCredits = doc?.credits.filter((c) => c.state === "APPROVED") ?? [];
   const accounts = new Map(state.accounts.map((a) => [a.id, a]));
   const taxCodes = new Map(state.taxCodes.map((t) => [t.id, t]));
-  const cur = row?.currency ?? BASE_CURRENCY;
+  const cur = doc?.currency ?? BASE_CURRENCY;
   const foreign = cur !== BASE_CURRENCY;
   const m = (v: number) => fmtMoney(v, cur);
-  const fxTotal = payments.reduce((t, p) => t + p.fx_gain_loss, 0);
 
   const approve = async () => {
     if (!doc) return;
@@ -54,7 +55,7 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
     else toast.error(res.error);
   };
 
-  const footer = row && doc && (
+  const footer = doc && (
     <div className="flex flex-wrap items-center justify-end gap-2">
       {doc.state !== "VOID" && doc.amount_paid === 0 && doc.source.type !== "OPENING_BALANCE" && (
         <Button variant="ghost" icon={FiSlash} className="mr-auto text-red-600" onClick={() => setVoidOpen(true)}>
@@ -69,12 +70,12 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
           Approve &amp; post
         </Button>
       )}
-      {row.outstanding > 0 && (
+      {doc.outstanding_base > 0 && (
         <Button variant="secondary" icon={FiCornerUpLeft} onClick={() => setCreditOpen(true)}>
           {isInvoice ? "Credit note" : "Supplier credit"}
         </Button>
       )}
-      {row.outstanding > 0 && (
+      {doc.outstanding_base > 0 && (
         <Button icon={FiDollarSign} onClick={() => setPayOpen(true)}>
           {isInvoice ? "Record receipt" : "Record payment"}
         </Button>
@@ -85,56 +86,62 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
   return (
     <>
       <RightDrawer
-        open={!!row}
+        open={!!documentId}
         onClose={onClose}
         widthClass="max-w-2xl"
         title={
-          row && (
+          doc ? (
             <span className="flex items-center gap-2">
-              <span className="font-mono">{row.doc.number}</span>
-              <StatusBadge status={row.status} />
+              <span className="font-mono">{doc.number}</span>
+              <StatusBadge status={doc.status} />
             </span>
+          ) : (
+            <span className="text-neutral-400">{isInvoice ? "Invoice" : "Bill"}</span>
           )
         }
-        subtitle={row?.party?.name}
+        subtitle={doc?.party_name}
         footer={footer}
       >
-        {row && doc && (
+        {!doc &&
+          (query.error && !query.loading ? (
+            <QueryError message={query.error} onRetry={query.refetch} />
+          ) : (
+            <Skeleton rows={8} />
+          ))}
+        {doc && (
           <div className="space-y-5">
             <div className="grid grid-cols-3 gap-3">
               <div className="rounded-xl bg-neutral-50 p-3 dark:bg-neutral-900/40">
                 <p className="text-xs text-neutral-500 dark:text-neutral-400">Total</p>
-                <p className="mt-0.5 font-semibold tabular-nums">{m(row.totals.total)}</p>
-                {foreign && <p className="text-xs tabular-nums text-neutral-500">{fmtCurrency(row.total_base)}</p>}
+                <p className="mt-0.5 font-semibold whitespace-nowrap tabular-nums">{m(doc.total)}</p>
+                {foreign && <p className="text-xs whitespace-nowrap tabular-nums text-neutral-500">{fmtCurrency(doc.total_base)}</p>}
               </div>
               <div className="rounded-xl bg-neutral-50 p-3 dark:bg-neutral-900/40">
                 <p className="text-xs text-neutral-500 dark:text-neutral-400">{liveCredits.length ? "Paid & credited" : "Paid"}</p>
-                <p className="mt-0.5 font-semibold tabular-nums">{m(doc.amount_paid)}</p>
+                <p className="mt-0.5 font-semibold whitespace-nowrap tabular-nums">{m(doc.amount_paid)}</p>
                 {foreign && doc.amount_paid > 0 && (
                   <p className="text-xs tabular-nums text-neutral-500">{fmtCurrency(doc.amount_paid_base)} at booking rate</p>
                 )}
               </div>
               <div className="rounded-xl bg-brand-50 p-3 dark:bg-brand-900/20">
                 <p className="text-xs text-brand-700 dark:text-brand-300">Outstanding</p>
-                <p className="mt-0.5 font-semibold tabular-nums text-brand-800 dark:text-brand-200">
-                  {m(row.outstanding_fc)}
-                </p>
-                {foreign && row.outstanding > 0 && (
-                  <p className="text-xs tabular-nums text-brand-700/80 dark:text-brand-300/80">{fmtCurrency(row.outstanding)}</p>
+                <p className="mt-0.5 font-semibold whitespace-nowrap tabular-nums text-brand-800 dark:text-brand-200">{m(doc.outstanding)}</p>
+                {foreign && doc.outstanding_base > 0 && (
+                  <p className="text-xs whitespace-nowrap tabular-nums text-brand-700/80 dark:text-brand-300/80">{fmtCurrency(doc.outstanding_base)}</p>
                 )}
               </div>
             </div>
 
             <div className="rounded-xl border border-neutral-200 px-4 py-1 divide-y divide-neutral-100 dark:border-neutral-700 dark:divide-neutral-700">
               <DetailRow label={isInvoice ? "Customer" : "Supplier"}>
-                {row.party?.name} <span className="text-neutral-400">({row.party?.code})</span>
+                {doc.party_name} <span className="text-neutral-400">({doc.party_code})</span>
               </DetailRow>
-              {!isInvoice && <DetailRow label="Supplier invoice no.">{(doc as PurchaseBill).supplier_reference}</DetailRow>}
+              {!isInvoice && <DetailRow label="Supplier invoice no.">{(doc as DocumentDetail<PurchaseBill>).supplier_reference}</DetailRow>}
               <DetailRow label="Issue date">{fmtDate(doc.issue_date)}</DetailRow>
               {foreign && (
                 <DetailRow label="Currency">
-                  {cur} · 1 {cur} = {fmtRate(doc.exchange_rate)} GH₵
-                  <p className="text-xs font-normal text-neutral-500">Posted to the ledger as {fmtCurrency(row.total_base)}</p>
+                  {cur} · 1 {cur} = {fmtRate(doc.exchange_rate)} {BASE_CURRENCY}
+                  <p className="text-xs font-normal text-neutral-500">Posted to the ledger as {fmtCurrency(doc.total_base)}</p>
                 </DetailRow>
               )}
               <DetailRow label="Due date">{fmtDate(doc.due_date)}</DetailRow>
@@ -144,11 +151,8 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
               </DetailRow>
               <DetailRow label="Ledger entry">
                 {doc.journal_id ? (
-                  <button
-                    onClick={() => openJournal(doc.journal_id!)}
-                    className="font-mono text-brand-700 hover:underline dark:text-brand-300"
-                  >
-                    {state.journals.find((j) => j.id === doc.journal_id)?.number ?? "View"}
+                  <button onClick={() => openJournal(doc.journal_id!)} className="font-mono text-brand-700 hover:underline dark:text-brand-300">
+                    {doc.journal_number ?? "View"}
                   </button>
                 ) : (
                   <span className="text-neutral-400">Not posted (draft)</span>
@@ -176,8 +180,8 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
                         </p>
                       </td>
                       <td className="px-4 py-2.5 text-right tabular-nums">{l.quantity}</td>
-                      <td className="px-4 py-2.5 text-right tabular-nums">{m(l.unit_price)}</td>
-                      <td className="px-4 py-2.5 text-right tabular-nums">{m(lineAmount(l))}</td>
+                      <td className="px-4 py-2.5 text-right whitespace-nowrap tabular-nums">{m(l.unit_price)}</td>
+                      <td className="px-4 py-2.5 text-right whitespace-nowrap tabular-nums">{m(lineAmount(l))}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -185,9 +189,9 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
               <dl className="space-y-1 border-t border-neutral-200 bg-neutral-50 px-4 py-3 text-sm dark:border-neutral-700 dark:bg-neutral-900/40">
                 <div className="flex justify-between">
                   <dt className="text-neutral-500">Subtotal</dt>
-                  <dd className="tabular-nums">{m(row.totals.subtotal)}</dd>
+                  <dd className="tabular-nums">{m(doc.subtotal)}</dd>
                 </div>
-                {row.totals.taxByCode.map((t) => (
+                {doc.tax_by_code.map((t) => (
                   <div key={t.tax_code_id} className="flex justify-between">
                     <dt className="text-neutral-500">{taxCodes.get(t.tax_code_id)?.name}</dt>
                     <dd className="tabular-nums">{m(t.amount)}</dd>
@@ -195,12 +199,14 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
                 ))}
                 <div className="flex justify-between font-semibold">
                   <dt>Total</dt>
-                  <dd className="tabular-nums">{m(row.totals.total)}</dd>
+                  <dd className="tabular-nums">{m(doc.total)}</dd>
                 </div>
                 {foreign && (
                   <div className="flex justify-between text-xs text-neutral-500">
-                    <dt>In GH₵ at {fmtRate(doc.exchange_rate)}</dt>
-                    <dd className="tabular-nums">{fmtCurrency(row.total_base)}</dd>
+                    <dt>
+                      In {BASE_CURRENCY} at {fmtRate(doc.exchange_rate)}
+                    </dt>
+                    <dd className="tabular-nums">{fmtCurrency(doc.total_base)}</dd>
                   </div>
                 )}
               </dl>
@@ -208,26 +214,24 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
 
             <div>
               <h4 className="mb-2 text-sm font-semibold">{isInvoice ? "Receipts" : "Payments"}</h4>
-              {payments.length === 0 ? (
+              {doc.payments.length === 0 ? (
                 <p className="text-sm text-neutral-500 dark:text-neutral-400">Nothing recorded yet.</p>
               ) : (
                 <ul className="divide-y divide-neutral-100 rounded-xl border border-neutral-200 dark:divide-neutral-700 dark:border-neutral-700">
-                  {payments.map((p) => (
+                  {doc.payments.map((p) => (
                     <li key={p.id} className="flex items-center justify-between px-4 py-2.5 text-sm">
                       <div>
-                        <button
-                          onClick={() => openJournal(p.journal_id)}
-                          className="font-mono text-brand-700 hover:underline dark:text-brand-300"
-                        >
+                        <button onClick={() => openJournal(p.journal_id)} className="font-mono text-brand-700 hover:underline dark:text-brand-300">
                           {p.number}
                         </button>
                         <p className="text-xs text-neutral-500 dark:text-neutral-400">
                           {fmtDate(p.date)} · {humanize(p.method)}
+                          {p.bank_account_name && ` · ${p.bank_account_name}`}
                           {p.reference && ` · ${p.reference}`}
                         </p>
                       </div>
                       <div className="text-right">
-                        <span className="font-medium tabular-nums">{fmtMoney(p.amount, p.currency)}</span>
+                        <span className="font-medium whitespace-nowrap tabular-nums">{fmtMoney(p.amount, p.currency)}</span>
                         {p.currency !== BASE_CURRENCY && (
                           <p className="text-xs tabular-nums text-neutral-500">
                             {fmtCurrency(p.base_amount)} at {fmtRate(p.exchange_rate)}
@@ -244,18 +248,18 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
                   ))}
                 </ul>
               )}
-              {foreign && fxTotal !== 0 && (
-                <p className={classNames("mt-2 text-xs", fxTotal > 0 ? "text-emerald-700 dark:text-emerald-400" : "text-red-700 dark:text-red-400")}>
-                  Net realised exchange {fxTotal > 0 ? "gain" : "loss"} on this {isInvoice ? "invoice" : "bill"}: {fmtCurrency(Math.abs(fxTotal))}
+              {foreign && doc.realised_fx !== 0 && (
+                <p className={classNames("mt-2 text-xs", doc.realised_fx > 0 ? "text-emerald-700 dark:text-emerald-400" : "text-red-700 dark:text-red-400")}>
+                  Net realised exchange {doc.realised_fx > 0 ? "gain" : "loss"} on this {isInvoice ? "invoice" : "bill"}: {fmtCurrency(Math.abs(doc.realised_fx))}
                 </p>
               )}
             </div>
 
-            {credits.length > 0 && (
+            {doc.credits.length > 0 && (
               <div>
                 <h4 className="mb-2 text-sm font-semibold">{isInvoice ? "Credit notes" : "Supplier credits"}</h4>
                 <ul className="divide-y divide-neutral-100 rounded-xl border border-neutral-200 dark:divide-neutral-700 dark:border-neutral-700">
-                  {credits.map((c) => (
+                  {doc.credits.map((c) => (
                     <li key={c.id} className={classNames("flex items-center justify-between px-4 py-2.5 text-sm", c.state === "VOID" && "opacity-50")}>
                       <div>
                         <Link
@@ -270,7 +274,7 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
                           {fmtDate(c.date)} · {c.reason}
                         </p>
                       </div>
-                      <span className="font-medium tabular-nums">{fmtMoney(documentTotals(c.lines, state.taxCodes).total, c.currency)}</span>
+                      <span className="font-medium whitespace-nowrap tabular-nums">{fmtMoney(c.total, c.currency)}</span>
                     </li>
                   ))}
                 </ul>
@@ -280,25 +284,17 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
             <CustomFieldDetails entity={isInvoice ? "Invoice" : "Bill"} values={doc.custom_fields} onEdit={doc.state === "VOID" ? undefined : () => setEditCustom(true)} />
 
             {doc.notes && (
-              <p className="rounded-xl bg-neutral-50 px-4 py-3 text-sm text-neutral-600 dark:bg-neutral-900/40 dark:text-neutral-300">
-                {doc.notes}
-              </p>
+              <p className="rounded-xl bg-neutral-50 px-4 py-3 text-sm text-neutral-600 dark:bg-neutral-900/40 dark:text-neutral-300">{doc.notes}</p>
             )}
 
             <div className="text-xs text-neutral-500 dark:text-neutral-400">
-              Created by {doc.created_by ?? "—"} · {fmtDateTime(doc.created_at)} · Updated by {doc.updated_by ?? "—"} ·{" "}
-              {fmtDateTime(doc.updated_at)}
+              Created by {doc.created_by ?? "—"} · {fmtDateTime(doc.created_at)} · Updated by {doc.updated_by ?? "—"} · {fmtDateTime(doc.updated_at)}
             </div>
           </div>
         )}
       </RightDrawer>
 
-      <PaymentModal
-        kind={isInvoice ? "receipt" : "payment"}
-        open={payOpen}
-        onClose={() => setPayOpen(false)}
-        documentId={documentId}
-      />
+      <PaymentModal kind={isInvoice ? "receipt" : "payment"} open={payOpen} onClose={() => setPayOpen(false)} documentId={documentId} />
       <CreditNoteModal kind={isInvoice ? "customer" : "supplier"} open={creditOpen} onClose={() => setCreditOpen(false)} documentId={documentId} />
       {doc && (
         <EditCustomFieldsModal

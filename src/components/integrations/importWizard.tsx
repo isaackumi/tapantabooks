@@ -6,8 +6,11 @@ import { FiCheck, FiFileText, FiUploadCloud } from "react-icons/fi";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal, type ModalButton } from "@/components/modal";
 import { Callout, Field, compactInputClass, inputClass } from "@/components/ui";
 import StatusBadge from "@/components/statusBadge";
-import { periodForDate, useLedger, type LedgerState } from "@/store/ledgerStore";
+import { QueryError, Skeleton } from "@/components/queryState";
+import { periodForDate, useLedger, type ClientState } from "@/store/ledgerStore";
+import { api } from "@/core/apiClient";
 import type { ImportRecord } from "@/models/accounting";
+import type { ImportReferenceCheck } from "@/models/lists";
 import { parseCsv, toCsv } from "@/utils/csv";
 import { classNames, fmtCurrency } from "@/utils/format";
 import { todayIso } from "@/utils/dates";
@@ -50,7 +53,7 @@ const parseDate = (raw: string): string | null => {
   return dt.toISOString().slice(0, 10);
 };
 
-const sampleFile = (entity: Entity, s: LedgerState): { name: string; text: string } => {
+const sampleFile = (entity: Entity, s: ClientState): { name: string; text: string } => {
   const c = s.customers.filter((x) => x.status === "ACTIVE").map((x) => x.name);
   const v = s.suppliers.filter((x) => x.status === "ACTIVE").map((x) => x.name);
   switch (entity) {
@@ -114,12 +117,19 @@ const sampleFile = (entity: Entity, s: LedgerState): { name: string; text: strin
   }
 };
 
-const validate = (entity: Entity, rows: string[][], mapping: Record<string, number>, s: LedgerState): Omit<ImportRecord, "posted">[] => {
+const referenceOf = (r: string[], mapping: Record<string, number>) => (mapping.reference >= 0 ? (r[mapping.reference] ?? "").trim() : "");
+
+/** `previous`: lower-cased reference → number of the batch that already imported it. */
+const validate = (
+  entity: Entity,
+  rows: string[][],
+  mapping: Record<string, number>,
+  s: ClientState,
+  previous: Map<string, string>,
+): Omit<ImportRecord, "posted">[] => {
   const fields = ENTITY_FIELDS[entity];
   const get = (r: string[], k: FieldKey) => (mapping[k] >= 0 ? (r[mapping[k]] ?? "").trim() : "");
   const seen = new Map<string, number>();
-  const previous = new Map<string, string>();
-  s.importBatches.forEach((b) => b.records.forEach((r) => previous.set(r.external_reference.toLowerCase(), b.number)));
   const parties = entity === "Bills" || entity === "Suppliers" ? s.suppliers : s.customers;
   const byName = new Map(parties.map((p) => [p.name.toLowerCase(), p]));
   const financial = entity === "Invoices" || entity === "Bills" || entity === "Sales";
@@ -237,10 +247,38 @@ const ImportWizard = ({ open, onClose, onDone }: { open: boolean; onClose: () =>
     reader.readAsText(file);
   };
 
-  const records = useMemo(
-    () => (step >= 3 ? validate(entity, dataRows, mapping, state) : []),
+  const references = useMemo(
+    () => (step >= 3 ? [...new Set(dataRows.map((r) => referenceOf(r, mapping)).filter(Boolean))] : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [step, entity, table, mapping, state],
+    [step, table, mapping],
+  );
+  const referencesKey = JSON.stringify(references);
+  const [check, setCheck] = useState<{ key: string; previous: Map<string, string> | null; error: string | null } | null>(null);
+  const [checkAttempt, setCheckAttempt] = useState(0);
+  useEffect(() => {
+    if (step < 3) return;
+    let live = true;
+    setCheck(null);
+    api
+      .post<ImportReferenceCheck>("/imports/check-references", { references })
+      .then((res) => {
+        if (live) setCheck({ key: referencesKey, previous: new Map((res.data?.items ?? []).map((i) => [i.reference.toLowerCase(), i.batch_number])), error: null });
+      })
+      .catch((e: unknown) => {
+        if (live) setCheck({ key: referencesKey, previous: null, error: e instanceof Error ? e.message : "Could not check earlier imports." });
+      });
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step >= 3, referencesKey, checkAttempt]);
+  const previous = check?.key === referencesKey ? check.previous : null;
+  const checkError = check?.key === referencesKey ? check.error : null;
+
+  const records = useMemo(
+    () => (step >= 3 && previous ? validate(entity, dataRows, mapping, state, previous) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [step, entity, table, mapping, state, previous],
   );
   const count = (s: ImportRecord["status"]) => records.filter((r) => r.status === s).length;
   const missingRequired = fields.filter((f) => f.required && (mapping[f.key] ?? -1) < 0);
@@ -280,7 +318,7 @@ const ImportWizard = ({ open, onClose, onDone }: { open: boolean; onClose: () =>
     (step === 0 && !!sourceId && !!entity) ||
     (step === 1 && table.length > 1) ||
     (step === 2 && missingRequired.length === 0) ||
-    step === 3;
+    (step === 3 && !!previous);
 
   const buttons: ModalButton[] = [
     step === 0
@@ -474,7 +512,20 @@ const ImportWizard = ({ open, onClose, onDone }: { open: boolean; onClose: () =>
         </div>
       )}
 
-      {step === 3 && (
+      {step === 3 && !previous && (
+        <div>
+          {checkError ? (
+            <QueryError message={checkError} onRetry={() => setCheckAttempt((n) => n + 1)} />
+          ) : (
+            <>
+              <p className="mb-3 text-sm text-neutral-500">Checking the rows against earlier imports…</p>
+              <Skeleton rows={6} />
+            </>
+          )}
+        </div>
+      )}
+
+      {step === 3 && previous && (
         <div>
           <div className="mb-4 grid grid-cols-3 gap-3 text-center">
             {(["VALID", "WARNING", "ERROR"] as const).map((s) => (

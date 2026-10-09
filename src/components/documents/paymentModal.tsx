@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { Field, FormError, inputClass } from "@/components/ui";
 import { useLedger } from "@/store/ledgerStore";
-import { billRows, invoiceRows } from "@/store/selectors";
 import type { PaymentMethod } from "@/models/accounting";
+import { OPEN_DOCUMENTS_PAGE, useOpenDocuments } from "./useOpenDocuments";
 import { todayIso } from "@/utils/dates";
 import { BASE_CURRENCY, classNames, fmtCurrency, fmtDate, fmtMoney, fmtRate } from "@/utils/format";
 import { FxRateField, useFxRate } from "@/components/fxRateField";
@@ -33,10 +33,7 @@ interface PaymentModalProps {
 const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) => {
   const { state, actions } = useLedger();
   const isReceipt = kind === "receipt";
-  const openDocs = useMemo(
-    () => (isReceipt ? invoiceRows(state) : billRows(state)).filter((r) => r.outstanding > 0),
-    [state, isReceipt],
-  );
+  const openDocs = useOpenDocuments(isReceipt ? "invoice" : "bill", open, documentId);
 
   const [docId, setDocId] = useState("");
   const [date, setDate] = useState(todayIso());
@@ -47,7 +44,7 @@ const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) =>
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const row = openDocs.find((r) => r.doc.id === docId);
+  const row = openDocs.docs.find((r) => r.id === docId);
   const currency = row?.currency ?? BASE_CURRENCY;
   const foreign = isForeign(currency);
   const fx = useFxRate(currency, date, open);
@@ -57,7 +54,7 @@ const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) =>
   const preview =
     row && foreign && amountFc > 0 && fx.rateValue > 0
       ? (() => {
-          const carrying = carryingBaseFor(row.doc, row.totals.total, Math.min(amountFc, row.outstanding_fc));
+          const carrying = carryingBaseFor(row, row.total, Math.min(amountFc, row.outstanding));
           const bankBase = toBase(amountFc, fx.rateValue);
           return { carrying, bankBase, gain: Math.round((isReceipt ? bankBase - carrying : carrying - bankBase) * 100) / 100 };
         })()
@@ -70,16 +67,19 @@ const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) =>
 
   useEffect(() => {
     if (!open) return;
-    const initial = openDocs.find((r) => r.doc.id === documentId);
-    setDocId(initial?.doc.id ?? "");
-    setAmount(initial ? String(initial.outstanding_fc) : "");
+    setDocId(documentId ?? "");
+    setAmount("");
     setDate(todayIso());
     setMethod("BANK_TRANSFER");
     setBankId("ba_gcb");
     setReference("");
     setError(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, documentId]);
+
+  useEffect(() => {
+    if (open && row) setAmount((a) => a || String(row.outstanding));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, row?.id]);
 
   const submit = async () => {
     setBusy(true);
@@ -117,22 +117,33 @@ const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) =>
         { label: isReceipt ? "Record receipt" : "Record payment", onClick: submit, className: BTN_PRIMARY, disabled: busy },
       ]}
     >
-      <FormError message={error} />
+      <FormError message={error ?? openDocs.error} />
       <div className="space-y-4">
-        <Field label={isReceipt ? "Invoice" : "Bill"} required>
+        <Field
+          label={isReceipt ? "Invoice" : "Bill"}
+          required
+          hint={openDocs.truncated ? `Showing the ${OPEN_DOCUMENTS_PAGE} due soonest. Record others from the ${isReceipt ? "invoice" : "bill"} itself.` : undefined}
+        >
           <select
             value={docId}
             onChange={(e) => {
               setDocId(e.target.value);
-              const r = openDocs.find((x) => x.doc.id === e.target.value);
-              if (r) setAmount(String(r.outstanding_fc));
+              const r = openDocs.docs.find((x) => x.id === e.target.value);
+              if (r) setAmount(String(r.outstanding));
             }}
             className={inputClass}
+            disabled={openDocs.loading && openDocs.docs.length === 0}
           >
-            <option value="">Select an open {isReceipt ? "invoice" : "bill"}</option>
-            {openDocs.map((r) => (
-              <option key={r.doc.id} value={r.doc.id}>
-                {r.doc.number} · {r.party?.name} · {fmtMoney(r.outstanding_fc, r.currency)} due {fmtDate(r.doc.due_date)}
+            <option value="">
+              {openDocs.loading && openDocs.docs.length === 0
+                ? `Loading open ${isReceipt ? "invoices" : "bills"}…`
+                : openDocs.docs.length === 0
+                  ? `No open ${isReceipt ? "invoices" : "bills"}`
+                  : `Select an open ${isReceipt ? "invoice" : "bill"}`}
+            </option>
+            {openDocs.docs.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.number} · {r.party_name} · {fmtMoney(r.outstanding, r.currency)} due {fmtDate(r.due_date)}
               </option>
             ))}
           </select>
@@ -141,21 +152,21 @@ const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) =>
           <div className="grid grid-cols-3 gap-3 rounded-xl bg-neutral-50 p-3 text-sm dark:bg-neutral-900/40">
             <div>
               <p className="text-xs text-neutral-500">Total</p>
-              <p className="font-medium tabular-nums">{fmtMoney(row.totals.total, currency)}</p>
+              <p className="font-medium whitespace-nowrap tabular-nums">{fmtMoney(row.total, currency)}</p>
             </div>
             <div>
               <p className="text-xs text-neutral-500">Paid so far</p>
-              <p className="font-medium tabular-nums">{fmtMoney(row.doc.amount_paid, currency)}</p>
+              <p className="font-medium whitespace-nowrap tabular-nums">{fmtMoney(row.amount_paid, currency)}</p>
             </div>
             <div>
               <p className="text-xs text-neutral-500">Outstanding</p>
-              <p className="font-semibold tabular-nums text-brand-700 dark:text-brand-300">
-                {fmtMoney(row.outstanding_fc, currency)}
+              <p className="font-semibold whitespace-nowrap tabular-nums text-brand-700 dark:text-brand-300">
+                {fmtMoney(row.outstanding, currency)}
               </p>
             </div>
             {foreign && (
               <p className="col-span-3 text-xs text-neutral-500 dark:text-neutral-400">
-                Booked at {fmtRate(row.doc.exchange_rate)} · {fmtCurrency(row.outstanding)} still carried in Accounts{" "}
+                Booked at {fmtRate(row.exchange_rate)} · {fmtCurrency(row.outstanding_base)} still carried in Accounts{" "}
                 {isReceipt ? "Receivable" : "Payable"}
               </p>
             )}
@@ -222,7 +233,7 @@ const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) =>
               </div>
               <div className="flex justify-between">
                 <dt className="text-neutral-500">
-                  {isReceipt ? "Receivable cleared" : "Payable cleared"} at {fmtRate(row!.doc.exchange_rate)}
+                  {isReceipt ? "Receivable cleared" : "Payable cleared"} at {fmtRate(row!.exchange_rate)}
                 </dt>
                 <dd className="tabular-nums">{fmtCurrency(preview.carrying)}</dd>
               </div>

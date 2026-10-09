@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
 import { FiPlus, FiTrash2 } from "react-icons/fi";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { Field, FormError, compactInputClass, inputClass } from "@/components/ui";
 import AccountSelect from "@/components/accounting/accountSelect";
 import { useLedger } from "@/store/ledgerStore";
-import { billRows, invoiceRows } from "@/store/selectors";
 import { documentTotals, lineAmount } from "@/lib/documents";
+import { OPEN_DOCUMENTS_PAGE, useOpenDocuments } from "./useOpenDocuments";
 import type { AccountType, DocumentLine } from "@/models/accounting";
 import { todayIso } from "@/utils/dates";
 import { fmtDate, fmtMoney, round2 } from "@/utils/format";
@@ -48,10 +48,7 @@ interface CreditNoteModalProps {
 const CreditNoteModal = ({ kind, open, onClose, documentId }: CreditNoteModalProps) => {
   const { state, actions } = useLedger();
   const isCustomer = kind === "customer";
-  const openDocs = useMemo(
-    () => (isCustomer ? invoiceRows(state) : billRows(state)).filter((r) => r.outstanding > 0),
-    [state, isCustomer],
-  );
+  const openDocs = useOpenDocuments(isCustomer ? "invoice" : "bill", open, documentId);
   const taxCodes = state.taxCodes.filter((t) => t.is_active && t.kind !== "WITHHOLDING");
 
   const [docId, setDocId] = useState("");
@@ -62,23 +59,28 @@ const CreditNoteModal = ({ kind, open, onClose, documentId }: CreditNoteModalPro
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const row = openDocs.find((r) => r.doc.id === docId);
+  const row = openDocs.docs.find((r) => r.id === docId);
   const currency = row?.currency ?? state.org.base_currency;
   const pick = (id: string) => {
     setDocId(id);
-    const r = openDocs.find((x) => x.doc.id === id);
-    setLines(r ? r.doc.lines.map(fromLine) : []);
+    const r = openDocs.docs.find((x) => x.id === id);
+    setLines(r ? r.lines.map(fromLine) : []);
   };
 
   useEffect(() => {
     if (!open) return;
-    pick(openDocs.find((r) => r.doc.id === documentId)?.doc.id ?? "");
+    setDocId(documentId ?? "");
+    setLines([]);
     setDate(todayIso());
     setReason("");
     setReference("");
     setError(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, documentId]);
+
+  useEffect(() => {
+    if (open && row) setLines((ls) => (ls.length ? ls : row.lines.map(fromLine)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, row?.id]);
 
   const asLines = lines.map((l) => ({
     id: String(l.key),
@@ -89,7 +91,7 @@ const CreditNoteModal = ({ kind, open, onClose, documentId }: CreditNoteModalPro
     account_id: l.account_id,
   }));
   const totals = documentTotals(asLines, state.taxCodes);
-  const over = row ? round2(totals.total - row.outstanding_fc) : 0;
+  const over = row ? round2(totals.total - row.outstanding) : 0;
   const update = (k: number, patch: Partial<LineState>) => setLines((ls) => ls.map((l) => (l.key === k ? { ...l, ...patch } : l)));
 
   const submit = async () => {
@@ -137,15 +139,26 @@ const CreditNoteModal = ({ kind, open, onClose, documentId }: CreditNoteModalPro
         },
       ]}
     >
-      <FormError message={error} />
+      <FormError message={error ?? openDocs.error} />
       <div className="space-y-4">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <Field label={isCustomer ? "Invoice" : "Bill"} required className="sm:col-span-2">
-            <select value={docId} onChange={(e) => pick(e.target.value)} className={inputClass}>
-              <option value="">Select an open {isCustomer ? "invoice" : "bill"}</option>
-              {openDocs.map((r) => (
-                <option key={r.doc.id} value={r.doc.id}>
-                  {r.doc.number} · {r.party?.name} · {fmtMoney(r.outstanding_fc, r.currency)} owed · {fmtDate(r.doc.issue_date)}
+          <Field
+            label={isCustomer ? "Invoice" : "Bill"}
+            required
+            className="sm:col-span-2"
+            hint={openDocs.truncated ? `Showing the ${OPEN_DOCUMENTS_PAGE} due soonest. Credit others from the ${isCustomer ? "invoice" : "bill"} itself.` : undefined}
+          >
+            <select value={docId} onChange={(e) => pick(e.target.value)} className={inputClass} disabled={openDocs.loading && openDocs.docs.length === 0}>
+              <option value="">
+                {openDocs.loading && openDocs.docs.length === 0
+                  ? `Loading open ${isCustomer ? "invoices" : "bills"}…`
+                  : openDocs.docs.length === 0
+                    ? `No open ${isCustomer ? "invoices" : "bills"}`
+                    : `Select an open ${isCustomer ? "invoice" : "bill"}`}
+              </option>
+              {openDocs.docs.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.number} · {r.party_name} · {fmtMoney(r.outstanding, r.currency)} owed · {fmtDate(r.issue_date)}
                 </option>
               ))}
             </select>
@@ -154,7 +167,7 @@ const CreditNoteModal = ({ kind, open, onClose, documentId }: CreditNoteModalPro
             <input
               type="date"
               value={date}
-              min={row?.doc.issue_date}
+              min={row?.issue_date}
               max={todayIso()}
               onChange={(e) => setDate(e.target.value)}
               className={inputClass}
@@ -253,7 +266,7 @@ const CreditNoteModal = ({ kind, open, onClose, documentId }: CreditNoteModalPro
             <div className="flex flex-col gap-4 border-t border-neutral-200 bg-neutral-50 px-3 py-3 sm:flex-row sm:items-start sm:justify-between dark:border-neutral-700 dark:bg-neutral-900/40">
               <button
                 type="button"
-                onClick={() => setLines((ls) => [...ls, { ...fromLine(row.doc.lines[0]), description: "", quantity: "1", unit_price: "" }])}
+                onClick={() => setLines((ls) => [...ls, { ...fromLine(row.lines[0]), description: "", quantity: "1", unit_price: "" }])}
                 className="inline-flex w-fit items-center gap-1.5 rounded-lg px-2 py-1 text-sm font-medium text-brand-700 hover:bg-brand-50 dark:text-brand-300 dark:hover:bg-brand-900/20"
               >
                 <FiPlus className="h-4 w-4" /> Add line
@@ -274,8 +287,8 @@ const CreditNoteModal = ({ kind, open, onClose, documentId }: CreditNoteModalPro
                   <dd className="tabular-nums">{fmtMoney(totals.total, currency)}</dd>
                 </div>
                 <div className="flex justify-between text-xs text-neutral-500">
-                  <dt>Still owed on {row.doc.number}</dt>
-                  <dd className="tabular-nums">{fmtMoney(row.outstanding_fc, currency)}</dd>
+                  <dt>Still owed on {row.number}</dt>
+                  <dd className="tabular-nums">{fmtMoney(row.outstanding, currency)}</dd>
                 </div>
                 {over > 0.005 && (
                   <p className="text-xs text-red-600 dark:text-red-400">

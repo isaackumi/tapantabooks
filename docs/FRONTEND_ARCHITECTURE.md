@@ -56,11 +56,10 @@ Contract mismatches to resolve with backend:
    recomputes on save).
 2. **Whole-book download.** The store fetches every journal, invoice, bill and payment on login. Lists, search and
    reports must move to server-side paging, filtering and aggregation per screen. Cached collections stay only for
-   small reference data (accounts, tax codes, currencies, dimensions, periods, custom fields). **Partly fixed in
-   phase 1, increment 2:** the journal, invoice, bill, receipt and supplier payment pages page, filter, search and
-   sort on the server through `usePagedList`, and their cards and tab counts read the new `/statistics` endpoints.
-   The store still downloads those collections for the drawers, modals and party pages that read them; removing
-   them is the next step.
+   small reference data (accounts, tax codes, currencies, dimensions, periods, custom fields). **Fixed in phase 1:**
+   every list pages, filters, searches and sorts on the server through `usePagedList`, cards and tab counts read
+   `/statistics` endpoints, and drawers read `/get` endpoints. The store (`ClientState`) holds only the organisation,
+   users and reference collections, so the compiler rejects any screen that reaches for a transaction collection.
 3. **Hard-coded calendar.** Several screens hard-coded 2026 months and presets (`"2026-10-01"`, `MONTHS` arrays). Report
    presets now come from `useReportPresets` (today plus `fiscal_year_start`). **Fixed:** no page imports `@/mock/seed`
    any more. The tax page takes its range from presets and its tax accounts from the tax codes; invoice and bill lines
@@ -350,16 +349,25 @@ added `GET /journals/statistics`, `/invoices/statistics`, `/bills/statistics`, `
 filters; payment list totals; and a 100-row page cap; see `PROCESSING_RULES.md` sections 1.1, 4.11, 7.8 and 8.5.
 `DataTable` takes a `server` prop for server-side sorting and paging; its column ids are the API's `sort_by` names.
 
-In progress: remove the transaction collections from the store so it keeps only reference data.
+Phase 1, increment 3 (reference-only store) is done; phase 1 is complete. The store keeps the organisation, users
+and reference collections; every transaction is read through the API.
 
-- Done: the shell, dashboard, journal drawer, periods, fiscal years, chart of accounts, reports landing page and
+- The shell, dashboard, journal drawer, periods, fiscal years, chart of accounts, reports landing page and
   custom-field usage (`/reports/summary`, `/accounts/balances`, `/fiscal-periods/statistics`, `/custom-fields/usage`).
-- Done: bank accounts, reconciliation, statement import, revaluation and opening balances (`/bank-accounts/balances`,
+- Bank accounts, reconciliation, statement import, revaluation and opening balances (`/bank-accounts/balances`,
   `/bank-accounts/activity`, `/reconciliation/get`, `/bank-statement-lines/preview`; journal numbers on
   `/revaluations/list`).
-- Next: the document drawer, payment and credit note modals, party pages, currency settings, audit trail and
-  integrations move to `/get` endpoints, filtered lists (for example `GET /invoices/list?customer_id=`) or statistics.
-  Then the transaction keys leave `COLLECTIONS` and the login download.
+- The document drawer, payment and credit note modals, credit note pages, customer and supplier pages, currency
+  settings, audit trail, imports, data sources and the import wizard (`/invoices/get` and `/bills/get` detail,
+  `open=true` on document lists, credit lists and `/statistics`, `/customers/balances`, `/suppliers/balances`,
+  `/currencies/exposure`, `/imports/statistics`, `/imports/get`, `POST /imports/check-references`,
+  `/audit-logs/statistics`); see `PROCESSING_RULES.md` sections 6.3, 7.8, 9.4a, 14.5, 16 and 19.4.
+- Transaction collections left `COLLECTIONS`; writes reload only the reference collections they change and bump the
+  revision that refetches open screens.
+
+Known limits for the API to settle: document pickers in the payment and credit note forms show the 100 open documents
+due soonest (a searchable picker would lift that), and the payment form's realised-FX preview still uses the
+document's carrying value client-side as a preview; the server recomputes on save.
 
 Backend dependency: each phase's endpoints are added to the catalogue first and handed to `tvs-accounting-bk` through
 `API_ENDPOINTS.md` and `PROCESSING_RULES.md`, so the API and the frontend converge on one contract.

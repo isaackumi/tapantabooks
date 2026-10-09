@@ -23,7 +23,7 @@ test("reconciles the GCB statement line by line and signs it off", async ({ sign
     if (await exact.count()) {
       await exact.getByRole("button", { name: "Match" }).click();
     } else {
-      await page.keyboard.press("Escape");
+      await finder.getByRole("button", { name: "Close" }).first().click();
       await expectNoDialogs(page);
       await line.getByRole("button", { name: "Create" }).click();
       const create = dialog(page, "Create entry from statement line");

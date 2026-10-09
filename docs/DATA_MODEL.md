@@ -803,9 +803,11 @@ Endpoints not listed take no body (ids and options are query parameters).
 
 These shapes are computed, not stored.
 
-**Document display status and outstanding amounts.** `GET /invoices/list` and `GET /bills/list` return them on each item (below). Screens that still read the whole collection (document drawer, payment and credit note modals) derive them in `src/store/selectors.ts`, where `outstanding` is base and `outstanding_fc` is document currency. `status` is `DRAFT`, `OPEN`, `PARTIALLY_PAID`, `PAID`, `OVERDUE` or `VOID`. Definitions are in `docs/PROCESSING_RULES.md` section 7.1.
+**Document display status and outstanding amounts.** `GET /invoices/list`, `GET /bills/list` and the `/get` endpoints return them on each document (below); the client never derives them. `status` is `DRAFT`, `OPEN`, `PARTIALLY_PAID`, `PAID`, `OVERDUE` or `VOID`. Definitions are in `docs/PROCESSING_RULES.md` section 7.1.
 
-**List items and list statistics** (types in `src/models/lists.ts`; definitions in `docs/PROCESSING_RULES.md` sections 4.11, 7.8 and 8.5):
+**What the client caches.** Only the organisation, its users and reference collections (accounts, tax codes, customers, suppliers, bank accounts, periods, dimensions, data sources, field mappings, custom fields, currencies, exchange rates, accounting rules) are loaded at sign-in (`COLLECTIONS` in `src/services/catalogue.ts`). Journals, documents, payments, credits, statement lines, import batches, revaluations and audit events are read page by page or through the shapes below.
+
+**List items and list statistics** (types in `src/models/lists.ts`; definitions in `docs/PROCESSING_RULES.md` sections 4.11, 6.3, 7.8, 8.5, 9.4a, 14.5, 16 and 19.4):
 
 | Endpoint | `data` shape |
 |---|---|
@@ -815,6 +817,15 @@ These shapes are computed, not stored.
 | `GET /journals/statistics` | `JournalStatistics`: `{ as_at, status_counts: { ALL, DRAFT, PENDING_APPROVAL, POSTED, REVERSED }, posted_this_month_count, posted_this_month_total, pending_approval_count, pending_approval_total, integration_share_pct }` |
 | `GET /invoices/statistics`, `GET /bills/statistics` | `DocumentStatistics`: `{ as_at, status_counts: { ALL, DRAFT, OPEN, PARTIALLY_PAID, OVERDUE, PAID, VOID }, outstanding, open_count, overdue, overdue_count, due_7_days, settled_this_month, settled_this_month_count, currencies: string[] }` |
 | `GET /receipts/statistics`, `GET /supplier-payments/statistics` | `PaymentStatistics`: `{ as_at, this_month: { month, total, count }, last_month: { month, total, count }, year_to_date: { from_date, total, count }, mobile_money_share_pct, months: string[] }` |
+| `GET /invoices/get`, `GET /bills/get` | `DocumentDetail`: the list item + `{ tax_by_code: [{ tax_code_id, amount }], journal_number, payments: PaymentListItem[], credits: CreditListItem[], realised_fx }` |
+| `GET /credit-notes/list`, `GET /supplier-credits/list`, `.../get` | `CreditListItem` = `CreditNote` + `{ party_name, document_number, subtotal, tax, total, journal_number }`; amounts in the credit's currency |
+| `GET /credit-notes/statistics`, `GET /supplier-credits/statistics` | `CreditStatistics`: `{ as_at, this_month: { month, total, count }, year_to_date: { from_date, total, count, tax }, state_counts: { ALL, APPROVED, VOID } }`; base currency |
+| `GET /customers/balances`, `GET /suppliers/balances` | `PartyBalances`: `{ as_at, items: [{ party_id, outstanding, overdue, open_count, outstanding_fc }], totals: { outstanding, overdue, with_balance_count, overdue_count } }`; only parties with a balance |
+| `GET /currencies/exposure` | `CurrencyExposure`: `{ as_at, items: [{ currency, open_documents, receivable, payable }] }`; amounts in each currency |
+| `GET /imports/list`, `GET /imports/get` | `ImportListItem` = `ImportBatch` + `{ source_name, row_count, valid_count, warning_count, error_count, posted_count }` |
+| `GET /imports/statistics` | `ImportStatistics`: `{ batch_count, row_count, posted_rows, held_rows, needs_attention, status_counts: { ALL, ATTENTION, POSTED } }` |
+| `POST /imports/check-references` | `ImportReferenceCheck`: `{ items: [{ reference, batch_id, batch_number }] }` |
+| `GET /audit-logs/statistics` | `AuditStatistics`: `{ as_at, total, today, by_actor_type: { USER, SYSTEM, INTEGRATION }, entity_types: string[], actor_names: string[] }` |
 
 **Report payloads** (definitions in `docs/PROCESSING_RULES.md` section 17):
 

@@ -6,32 +6,25 @@ import type { HttpMethod } from "@/core/apiClient";
  * renders it, and docs/API_ENDPOINTS.md is generated from it.
  */
 
-/** Client-side collections, each loaded from one list endpoint. */
+/**
+ * Reference data the client caches, each loaded in full from one list endpoint at sign-in.
+ * Transactions (journals, documents, payments, statement lines, imports, audit events) are
+ * never cached: screens read them page by page or through report endpoints.
+ */
 export const COLLECTIONS = {
   accounts: "/accounts/list",
   taxCodes: "/tax-codes/list",
   customers: "/customers/list",
   suppliers: "/suppliers/list",
-  journals: "/journals/list",
-  invoices: "/invoices/list",
-  bills: "/bills/list",
-  receipts: "/receipts/list",
-  supplierPayments: "/supplier-payments/list",
-  creditNotes: "/credit-notes/list",
-  supplierCredits: "/supplier-credits/list",
   bankAccounts: "/bank-accounts/list",
-  statementLines: "/bank-statement-lines/list",
   periods: "/fiscal-periods/list",
   dimensions: "/dimensions/list",
   dataSources: "/data-sources/list",
-  importBatches: "/imports/list",
   fieldMappings: "/field-mappings/list",
   customFields: "/custom-fields/list",
   currencies: "/currencies/list",
   exchangeRates: "/exchange-rates/list",
-  fxRevaluations: "/revaluations/list",
   rules: "/accounting-rules/list",
-  auditEvents: "/audit-logs/list",
 } as const;
 
 export type CollectionKey = keyof typeof COLLECTIONS;
@@ -117,8 +110,6 @@ const get = (module: string, path: string, resource: string, idParam: string, re
   permission: perm(resource, "get"),
 });
 
-const AUDIT: CacheKey[] = ["auditEvents"];
-
 export const ENDPOINTS: EndpointDef[] = [
   // ---- Platform -----------------------------------------------------------
   {
@@ -164,7 +155,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "OrganisationSetupInput",
     returns: "OrgSettings (setup_completed: true)",
     permission: perm("organisation", "update"),
-    invalidates: ["org", "currencies", "periods", ...AUDIT],
+    invalidates: ["org", "currencies", "periods"],
   },
   {
     method: "PUT",
@@ -174,7 +165,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "Partial<OrgSettings> (setup_completed is ignored)",
     returns: "OrgSettings",
     permission: perm("organisation", "update"),
-    invalidates: ["org", "currencies", "bankAccounts", "customers", "suppliers", "invoices", "bills", ...AUDIT],
+    invalidates: ["org", "currencies", "bankAccounts", "customers", "suppliers"],
   },
   list("Dimensions", "/dimensions/list", "dimension", "Dimension", {
     kind: "LEGAL_ENTITY | BRANCH | DEPARTMENT | COST_CENTRE | PROJECT",
@@ -188,7 +179,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ kind, code, name, description? }",
     returns: "Dimension",
     permission: perm("dimension", "add"),
-    invalidates: ["dimensions", ...AUDIT],
+    invalidates: ["dimensions"],
   },
   {
     method: "PUT",
@@ -204,6 +195,13 @@ export const ENDPOINTS: EndpointDef[] = [
 
   // ---- Currencies & rates -------------------------------------------------
   list("Currencies", "/currencies/list", "currency", "Currency"),
+  statistics(
+    "Currencies",
+    "/currencies/exposure",
+    "currency",
+    "CurrencyExposure",
+    "Open foreign-currency receivables and payables in each currency, with the number of open documents",
+  ),
   {
     method: "POST",
     path: "/currencies/add",
@@ -212,7 +210,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ code, name, symbol }",
     returns: "Currency",
     permission: perm("currency", "add"),
-    invalidates: ["currencies", ...AUDIT],
+    invalidates: ["currencies"],
   },
   {
     method: "PUT",
@@ -223,7 +221,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ is_active }",
     returns: "Currency",
     permission: perm("currency", "update"),
-    invalidates: ["currencies", ...AUDIT],
+    invalidates: ["currencies"],
   },
   list("Currencies", "/exchange-rates/list", "exchange-rate", "ExchangeRate", {
     currency: "ISO code",
@@ -239,7 +237,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ currency, date, rate }",
     returns: "ExchangeRate",
     permission: perm("exchange-rate", "add"),
-    invalidates: ["exchangeRates", ...AUDIT],
+    invalidates: ["exchangeRates"],
   },
   {
     method: "DELETE",
@@ -249,7 +247,7 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { exchange_rate_id: "Rate id" },
     returns: "null",
     permission: perm("exchange-rate", "delete"),
-    invalidates: ["exchangeRates", ...AUDIT],
+    invalidates: ["exchangeRates"],
   },
   {
     method: "POST",
@@ -258,7 +256,7 @@ export const ENDPOINTS: EndpointDef[] = [
     summary: "Pull today's Bank of Ghana reference rates for every active foreign currency",
     returns: "number (rates added; 0 when already up to date)",
     permission: perm("exchange-rate", "add"),
-    invalidates: ["exchangeRates", ...AUDIT],
+    invalidates: ["exchangeRates"],
   },
 
   // ---- Custom fields ------------------------------------------------------
@@ -282,7 +280,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ entity, key, label, type, scope, options?, required, description?, default_value?, show_in_list }",
     returns: "CustomField",
     permission: perm("custom-field", "add"),
-    invalidates: ["customFields", ...AUDIT],
+    invalidates: ["customFields"],
   },
   {
     method: "PUT",
@@ -293,7 +291,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "Partial<CustomField>",
     returns: "CustomField",
     permission: perm("custom-field", "update"),
-    invalidates: ["customFields", ...AUDIT],
+    invalidates: ["customFields"],
   },
   {
     method: "DELETE",
@@ -303,7 +301,7 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { custom_field_id: "Field id" },
     returns: "null",
     permission: perm("custom-field", "delete"),
-    invalidates: ["customFields", ...AUDIT],
+    invalidates: ["customFields"],
   },
   {
     method: "POST",
@@ -325,7 +323,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ values: Record<string, string> }",
     returns: "Record with custom_fields",
     permission: perm("custom-field", "update"),
-    invalidates: ["customers", "suppliers", "invoices", "bills", "journals", "accounts", ...AUDIT],
+    invalidates: ["customers", "suppliers", "accounts"],
   },
 
   // ---- Chart of accounts -------------------------------------------------
@@ -352,7 +350,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ code, name, parent_id, subtype, description?, is_bank?, custom_fields? }",
     returns: "Account",
     permission: perm("account", "add"),
-    invalidates: ["accounts", ...AUDIT],
+    invalidates: ["accounts"],
   },
   {
     method: "PUT",
@@ -363,7 +361,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ name?, description?, is_active?, custom_fields? }",
     returns: "Account",
     permission: perm("account", "update"),
-    invalidates: ["accounts", ...AUDIT],
+    invalidates: ["accounts"],
   },
 
   // ---- Journals ------------------------------------------------------------
@@ -386,7 +384,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "JournalDraftInput & { intent: 'DRAFT' | 'POST' }",
     returns: "JournalEntry",
     permission: perm("journal", "add"),
-    invalidates: ["journals", ...AUDIT],
   },
   {
     method: "PUT",
@@ -397,7 +394,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "JournalDraftInput",
     returns: "JournalEntry",
     permission: perm("journal", "update"),
-    invalidates: ["journals", ...AUDIT],
   },
   {
     method: "POST",
@@ -407,7 +403,6 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { journal_id: "Journal id" },
     returns: "JournalEntry",
     permission: perm("journal", "post"),
-    invalidates: ["journals", ...AUDIT],
   },
   {
     method: "POST",
@@ -417,7 +412,6 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { journal_id: "Journal id" },
     returns: "JournalEntry",
     permission: perm("journal", "approve"),
-    invalidates: ["journals", ...AUDIT],
   },
   {
     method: "POST",
@@ -428,7 +422,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ reason }",
     returns: "JournalEntry",
     permission: perm("journal", "approve"),
-    invalidates: ["journals", ...AUDIT],
   },
   {
     method: "POST",
@@ -439,7 +432,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ date, reason }",
     returns: "JournalEntry (the reversal)",
     permission: perm("journal", "reverse"),
-    invalidates: ["journals", ...AUDIT],
   },
   {
     method: "DELETE",
@@ -449,7 +441,6 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { journal_id: "Journal id" },
     returns: "null",
     permission: perm("journal", "delete"),
-    invalidates: ["journals", ...AUDIT],
   },
 
   // ---- Fiscal periods ----------------------------------------------------
@@ -471,7 +462,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ status: 'OPEN' | 'LOCKED' | 'CLOSED' }",
     returns: "FiscalPeriod",
     permission: perm("fiscal-period", "update"),
-    invalidates: ["periods", ...AUDIT],
+    invalidates: ["periods"],
   },
   {
     method: "GET",
@@ -498,7 +489,7 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { fiscal_year_id: "Fiscal year id" },
     returns: "{ fiscal_year: FiscalYearView, journal: JournalEntry | null }",
     permission: perm("fiscal-year", "close"),
-    invalidates: ["periods", "journals", ...AUDIT],
+    invalidates: ["periods"],
   },
   {
     method: "POST",
@@ -509,7 +500,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ reason }",
     returns: "FiscalYearView",
     permission: perm("fiscal-year", "reopen"),
-    invalidates: ["periods", "journals", ...AUDIT],
+    invalidates: ["periods"],
   },
   {
     method: "POST",
@@ -518,7 +509,7 @@ export const ENDPOINTS: EndpointDef[] = [
     summary: "Open the twelve periods of the next financial year",
     returns: "FiscalYearView",
     permission: perm("fiscal-period", "add"),
-    invalidates: ["periods", ...AUDIT],
+    invalidates: ["periods"],
   },
 
   // ---- FX revaluation ----------------------------------------------------
@@ -540,7 +531,6 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { period_id: "Period id" },
     returns: "FxRevaluation",
     permission: perm("revaluation", "add"),
-    invalidates: ["fxRevaluations", "journals", ...AUDIT],
   },
 
   // ---- Opening balances ----------------------------------------------------
@@ -561,11 +551,18 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "OpeningBalancesInput",
     returns: "OpeningBalancesView",
     permission: perm("opening-balance", "update"),
-    invalidates: ["accounts", "journals", "invoices", "bills", "org", ...AUDIT],
+    invalidates: ["accounts", "org"],
   },
 
   // ---- Customers & suppliers ---------------------------------------------
   list("Customers", "/customers/list", "customer", "Customer", { status: "ACTIVE | INACTIVE" }),
+  statistics(
+    "Customers",
+    "/customers/balances",
+    "customer",
+    "PartyBalances",
+    "Outstanding and overdue per customer (base currency at invoice rates, plus own-currency outstanding) and totals",
+  ),
   get("Customers", "/customers/get", "customer", "customer_id", "Customer"),
   {
     method: "POST",
@@ -575,7 +572,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "Partial<Customer> & { name }",
     returns: "Customer",
     permission: perm("customer", "add"),
-    invalidates: ["customers", ...AUDIT],
+    invalidates: ["customers"],
   },
   {
     method: "PUT",
@@ -586,9 +583,16 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "Customer fields (send the full record; name is required)",
     returns: "Customer",
     permission: perm("customer", "update"),
-    invalidates: ["customers", ...AUDIT],
+    invalidates: ["customers"],
   },
   list("Suppliers", "/suppliers/list", "supplier", "Supplier", { status: "ACTIVE | INACTIVE" }),
+  statistics(
+    "Suppliers",
+    "/suppliers/balances",
+    "supplier",
+    "PartyBalances",
+    "Outstanding and overdue per supplier (base currency at bill rates, plus own-currency outstanding) and totals",
+  ),
   get("Suppliers", "/suppliers/get", "supplier", "supplier_id", "Supplier"),
   {
     method: "POST",
@@ -598,7 +602,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "Partial<Supplier> & { name }",
     returns: "Supplier",
     permission: perm("supplier", "add"),
-    invalidates: ["suppliers", ...AUDIT],
+    invalidates: ["suppliers"],
   },
   {
     method: "PUT",
@@ -609,7 +613,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "Supplier fields (send the full record; name is required)",
     returns: "Supplier",
     permission: perm("supplier", "update"),
-    invalidates: ["suppliers", ...AUDIT],
+    invalidates: ["suppliers"],
   },
 
   // ---- Sales invoices & receipts -----------------------------------------
@@ -618,12 +622,13 @@ export const ENDPOINTS: EndpointDef[] = [
     status: "DRAFT | OPEN | PARTIALLY_PAID | OVERDUE | PAID | VOID (derived as at today)",
     customer_id: "Customer id",
     currency: "ISO code",
+    open: "true = only invoices with something still owed",
     from_date: "Issue date from",
     to_date: "Issue date to",
     ...CUSTOM_FIELD_QUERY,
   }),
   statistics("Invoices", "/invoices/statistics", "invoice", "DocumentStatistics", "Outstanding, overdue, due in 7 days, collected this month and counts by status"),
-  get("Invoices", "/invoices/get", "invoice", "invoice_id", "SalesInvoice"),
+  get("Invoices", "/invoices/get", "invoice", "invoice_id", "DocumentDetail<SalesInvoice>: list fields plus tax by code, journal number, receipts, credit notes and realised FX"),
   {
     method: "POST",
     path: "/invoices/add",
@@ -632,7 +637,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "DocumentInput & { approve: boolean }",
     returns: "SalesInvoice",
     permission: perm("invoice", "add"),
-    invalidates: ["invoices", "journals", ...AUDIT],
   },
   {
     method: "POST",
@@ -642,7 +646,6 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { invoice_id: "Invoice id" },
     returns: "SalesInvoice",
     permission: perm("invoice", "approve"),
-    invalidates: ["invoices", "journals", ...AUDIT],
   },
   {
     method: "POST",
@@ -653,7 +656,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ reason }",
     returns: "null",
     permission: perm("invoice", "void"),
-    invalidates: ["invoices", "journals", ...AUDIT],
   },
   paymentList("Receipts", "/receipts/list", "receipt", { party_id: "Customer id", document_id: "Invoice id" }),
   statistics("Receipts", "/receipts/statistics", "receipt", "PaymentStatistics", "This month, last month, financial year to date, mobile money share and active months"),
@@ -665,16 +667,22 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "PaymentInput",
     returns: "Payment",
     permission: perm("receipt", "add"),
-    invalidates: ["receipts", "invoices", "journals", ...AUDIT],
   },
-  list("Credit notes", "/credit-notes/list", "credit-note", "CreditNote", {
+  list("Credit notes", "/credit-notes/list", "credit-note", "CreditListItem", {
     party_id: "Customer id",
     document_id: "Invoice id",
     state: "APPROVED | VOID",
     from_date: "YYYY-MM-DD",
     to_date: "YYYY-MM-DD",
   }),
-  get("Credit notes", "/credit-notes/get", "credit-note", "credit_note_id", "CreditNote"),
+  statistics(
+    "Credit notes",
+    "/credit-notes/statistics",
+    "credit-note",
+    "CreditStatistics",
+    "Issued this month and financial year to date (base currency, live credits), output VAT reversed and counts by state",
+  ),
+  get("Credit notes", "/credit-notes/get", "credit-note", "credit_note_id", "CreditListItem"),
   {
     method: "POST",
     path: "/credit-notes/add",
@@ -683,7 +691,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "CreditNoteInput",
     returns: "CreditNote",
     permission: perm("credit-note", "add"),
-    invalidates: ["creditNotes", "invoices", "journals", ...AUDIT],
   },
   {
     method: "POST",
@@ -694,7 +701,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ reason }",
     returns: "CreditNote",
     permission: perm("credit-note", "void"),
-    invalidates: ["creditNotes", "invoices", "journals", ...AUDIT],
   },
 
   // ---- Bills & supplier payments -----------------------------------------
@@ -703,12 +709,13 @@ export const ENDPOINTS: EndpointDef[] = [
     status: "DRAFT | OPEN | PARTIALLY_PAID | OVERDUE | PAID | VOID (derived as at today)",
     supplier_id: "Supplier id",
     currency: "ISO code",
+    open: "true = only bills with something still owed",
     from_date: "Issue date from",
     to_date: "Issue date to",
     ...CUSTOM_FIELD_QUERY,
   }),
   statistics("Bills", "/bills/statistics", "bill", "DocumentStatistics", "Outstanding, overdue, due in 7 days, paid this month and counts by status"),
-  get("Bills", "/bills/get", "bill", "bill_id", "PurchaseBill"),
+  get("Bills", "/bills/get", "bill", "bill_id", "DocumentDetail<PurchaseBill>: list fields plus tax by code, journal number, payments, supplier credits and realised FX"),
   {
     method: "POST",
     path: "/bills/add",
@@ -717,7 +724,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "DocumentInput & { approve: boolean }",
     returns: "PurchaseBill",
     permission: perm("bill", "add"),
-    invalidates: ["bills", "journals", ...AUDIT],
   },
   {
     method: "POST",
@@ -727,7 +733,6 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { bill_id: "Bill id" },
     returns: "PurchaseBill",
     permission: perm("bill", "approve"),
-    invalidates: ["bills", "journals", ...AUDIT],
   },
   {
     method: "POST",
@@ -738,7 +743,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ reason }",
     returns: "null",
     permission: perm("bill", "void"),
-    invalidates: ["bills", "journals", ...AUDIT],
   },
   paymentList("Supplier payments", "/supplier-payments/list", "supplier-payment", { party_id: "Supplier id", document_id: "Bill id" }),
   statistics(
@@ -756,16 +760,22 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "PaymentInput",
     returns: "Payment",
     permission: perm("supplier-payment", "add"),
-    invalidates: ["supplierPayments", "bills", "journals", ...AUDIT],
   },
-  list("Supplier credits", "/supplier-credits/list", "supplier-credit", "CreditNote", {
+  list("Supplier credits", "/supplier-credits/list", "supplier-credit", "CreditListItem", {
     party_id: "Supplier id",
     document_id: "Bill id",
     state: "APPROVED | VOID",
     from_date: "YYYY-MM-DD",
     to_date: "YYYY-MM-DD",
   }),
-  get("Supplier credits", "/supplier-credits/get", "supplier-credit", "supplier_credit_id", "CreditNote"),
+  statistics(
+    "Supplier credits",
+    "/supplier-credits/statistics",
+    "supplier-credit",
+    "CreditStatistics",
+    "Recorded this month and financial year to date (base currency, live credits), input VAT reversed and counts by state",
+  ),
+  get("Supplier credits", "/supplier-credits/get", "supplier-credit", "supplier_credit_id", "CreditListItem"),
   {
     method: "POST",
     path: "/supplier-credits/add",
@@ -774,7 +784,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "CreditNoteInput",
     returns: "CreditNote",
     permission: perm("supplier-credit", "add"),
-    invalidates: ["supplierCredits", "bills", "journals", ...AUDIT],
   },
   {
     method: "POST",
@@ -785,7 +794,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ reason }",
     returns: "CreditNote",
     permission: perm("supplier-credit", "void"),
-    invalidates: ["supplierCredits", "bills", "journals", ...AUDIT],
   },
 
   // ---- Banking -------------------------------------------------------------
@@ -816,7 +824,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ from, to, amount, date, memo, rate? }",
     returns: "JournalEntry",
     permission: perm("bank-account", "transfer"),
-    invalidates: ["journals", ...AUDIT],
   },
   list("Banking", "/bank-statement-lines/list", "bank-statement", "BankStatementLine", {
     bank_account_id: "Bank account id",
@@ -832,7 +839,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "StatementImportInput",
     returns: "StatementImportResult",
     permission: perm("bank-statement", "import"),
-    invalidates: ["statementLines", "bankAccounts", ...AUDIT],
+    invalidates: ["bankAccounts"],
   },
   {
     method: "POST",
@@ -860,7 +867,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ statement_line_id, journal_id }",
     returns: "BankStatementLine",
     permission: perm("reconciliation", "update"),
-    invalidates: ["statementLines", ...AUDIT],
   },
   {
     method: "POST",
@@ -870,7 +876,6 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { statement_line_id: "Statement line id" },
     returns: "BankStatementLine",
     permission: perm("reconciliation", "update"),
-    invalidates: ["statementLines"],
   },
   {
     method: "POST",
@@ -880,7 +885,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ statement_line_id, account_id, memo }",
     returns: "JournalEntry (posted and matched)",
     permission: perm("reconciliation", "update"),
-    invalidates: ["statementLines", "journals", ...AUDIT],
   },
   {
     method: "POST",
@@ -890,7 +894,7 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { bank_account_id: "Bank account id" },
     returns: "BankAccount",
     permission: perm("reconciliation", "complete"),
-    invalidates: ["bankAccounts", ...AUDIT],
+    invalidates: ["bankAccounts"],
   },
 
   // ---- Tax -------------------------------------------------------------------
@@ -910,7 +914,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ entities: string[], schedule, connection: Record<string, string> }",
     returns: "DataSource",
     permission: perm("data-source", "update"),
-    invalidates: ["dataSources", ...AUDIT],
+    invalidates: ["dataSources"],
   },
   {
     method: "POST",
@@ -920,7 +924,7 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { data_source_id: "Source id" },
     returns: "DataSource",
     permission: perm("data-source", "update"),
-    invalidates: ["dataSources", ...AUDIT],
+    invalidates: ["dataSources"],
   },
   {
     method: "POST",
@@ -930,7 +934,7 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { data_source_id: "Source id" },
     returns: "number (records synced)",
     permission: perm("data-source", "sync"),
-    invalidates: ["dataSources", ...AUDIT],
+    invalidates: ["dataSources"],
   },
   list("Field mappings", "/field-mappings/list", "field-mapping", "FieldMapping", { source_id: "Source id", entity: "Entity name" }),
   {
@@ -941,7 +945,7 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "Omit<FieldMapping, 'id'>",
     returns: "FieldMapping",
     permission: perm("field-mapping", "add"),
-    invalidates: ["fieldMappings", ...AUDIT],
+    invalidates: ["fieldMappings"],
   },
   {
     method: "PUT",
@@ -977,9 +981,24 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "{ is_active }",
     returns: "AccountingRule",
     permission: perm("accounting-rule", "update"),
-    invalidates: ["rules", ...AUDIT],
+    invalidates: ["rules"],
   },
-  list("Imports", "/imports/list", "import", "ImportBatch", { source_id: "Source id", status: "NEEDS_REVIEW | POSTED | PARTIALLY_POSTED | FAILED" }),
+  list("Imports", "/imports/list", "import", "ImportListItem", {
+    source_id: "Source id",
+    status: "NEEDS_REVIEW | POSTED | PARTIALLY_POSTED | FAILED",
+    attention: "true = NEEDS_REVIEW, FAILED or PARTIALLY_POSTED",
+  }),
+  statistics("Imports", "/imports/statistics", "import", "ImportStatistics", "Batches, rows received, posted and held, batches needing attention and tab counts"),
+  get("Imports", "/imports/get", "import", "import_batch_id", "ImportListItem"),
+  {
+    method: "POST",
+    path: "/imports/check-references",
+    module: "Imports",
+    summary: "Which of these source references earlier batches already imported (read-only; case-insensitive)",
+    body: "{ references: string[] } (at most 5000)",
+    returns: "ImportReferenceCheck",
+    permission: perm("import", "list"),
+  },
   {
     method: "POST",
     path: "/imports/add",
@@ -988,7 +1007,6 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "ImportInput",
     returns: "ImportBatch",
     permission: perm("import", "add"),
-    invalidates: ["importBatches", "journals", ...AUDIT],
   },
   {
     method: "POST",
@@ -998,7 +1016,6 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { import_batch_id: "Batch id" },
     returns: "ImportBatch",
     permission: perm("import", "post"),
-    invalidates: ["importBatches", "journals", ...AUDIT],
   },
   {
     method: "POST",
@@ -1008,7 +1025,6 @@ export const ENDPOINTS: EndpointDef[] = [
     query: { import_batch_id: "Batch id", row: "Row number" },
     returns: "ImportRecord",
     permission: perm("import", "update"),
-    invalidates: ["importBatches", ...AUDIT],
   },
 
   // ---- Audit -----------------------------------------------------------------
@@ -1016,9 +1032,17 @@ export const ENDPOINTS: EndpointDef[] = [
     entity_type: "Entity type",
     actor_id: "User id",
     actor_type: "USER | SYSTEM | INTEGRATION",
+    actor_name: "Actor display name (users, integrations and the posting engine)",
     from_date: "YYYY-MM-DD",
     to_date: "YYYY-MM-DD",
   }),
+  statistics(
+    "Audit trail",
+    "/audit-logs/statistics",
+    "audit-log",
+    "AuditStatistics",
+    "Event counts (total, today, by channel) and the record types and actors for the filters",
+  ),
 
   // ---- Reports -----------------------------------------------------------------
   {

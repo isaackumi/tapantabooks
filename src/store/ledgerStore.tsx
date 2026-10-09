@@ -52,7 +52,10 @@ import { COLLECTIONS, endpointFor, type CacheKey, type CollectionKey } from "@/s
 import { setBaseCurrency } from "@/utils/format";
 import { addDays } from "@/utils/dates";
 
-export type { JournalDraftInput, LedgerState };
+export type { JournalDraftInput };
+
+/** What the client keeps: the organisation, its users and the reference collections. */
+export type ClientState = Pick<LedgerState, CollectionKey | "org" | "users" | "currentUserId">;
 
 export type Result<T = undefined> = { ok: true; data: T; message?: string } | { ok: false; error: string };
 
@@ -66,7 +69,7 @@ const applyCurrency = (org: OrgSettings, currencies?: Currency[]) =>
 const loadCollection = (key: CollectionKey) => fetchAll<unknown>(COLLECTIONS[key]);
 
 /** Loads the cached collections an endpoint invalidates and returns them as a state patch. */
-const reload = async (keys: readonly CacheKey[]): Promise<Partial<LedgerState>> => {
+const reload = async (keys: readonly CacheKey[]): Promise<Partial<ClientState>> => {
   const unique = [...new Set(keys)];
   const entries = await Promise.all(
     unique.map(async (key) =>
@@ -75,12 +78,12 @@ const reload = async (keys: readonly CacheKey[]): Promise<Partial<LedgerState>> 
         : ([key, await loadCollection(key)] as const),
     ),
   );
-  return Object.fromEntries(entries) as Partial<LedgerState>;
+  return Object.fromEntries(entries) as Partial<ClientState>;
 };
 
 const createActions = (
-  stateRef: { current: LedgerState | null },
-  apply: (patch: Partial<LedgerState>) => void,
+  stateRef: { current: ClientState | null },
+  apply: (patch: Partial<ClientState>) => void,
   reloadAll: () => Promise<void>,
   bumpRevision: () => void,
 ) => {
@@ -275,7 +278,7 @@ const createActions = (
 export type LedgerActions = ReturnType<typeof createActions>;
 
 interface LedgerContextValue {
-  state: LedgerState;
+  state: ClientState;
   actions: LedgerActions;
   /** Increments after every successful write or reload; report queries refetch when it changes. */
   revision: number;
@@ -293,15 +296,15 @@ const LedgerContext = createContext<LedgerShell | undefined>(undefined);
 
 /** Loads the tenant's books from the API once a session exists, and keeps them in step after every write. */
 export const LedgerProvider = ({ children }: { children: ReactNode }) => {
-  const [state, setState] = useState<LedgerState | null>(null);
+  const [state, setState] = useState<ClientState | null>(null);
   const [status, setStatus] = useState<LedgerStatus>("loading");
   const [error, setError] = useState<string | null>(null);
   const [org, setOrg] = useState<OrgSettings | null>(null);
   const [revision, setRevision] = useState(0);
-  const stateRef = useRef<LedgerState | null>(null);
+  const stateRef = useRef<ClientState | null>(null);
   const bumpRevision = useCallback(() => setRevision((r) => r + 1), []);
 
-  const apply = useCallback((patch: Partial<LedgerState>) => {
+  const apply = useCallback((patch: Partial<ClientState>) => {
     if (!stateRef.current) return;
     const next = { ...stateRef.current, ...patch };
     if (patch.org) {
@@ -330,7 +333,7 @@ export const LedgerProvider = ({ children }: { children: ReactNode }) => {
         org: loadedOrg,
         users,
         currentUserId: currentClaims()?.user_id ?? users[0]?.id ?? "",
-      } as LedgerState;
+      } as ClientState;
       applyCurrency(loadedOrg, next.currencies);
       stateRef.current = next;
       setState(next);
@@ -383,7 +386,7 @@ export const useCurrentUser = (): CurrentUser => {
   return state.users.find((u) => u.id === state.currentUserId) ?? state.users[0];
 };
 
-export const periodForDate = (s: Pick<LedgerState, "periods">, date: string) =>
+export const periodForDate = (s: Pick<ClientState, "periods">, date: string) =>
   s.periods.find((p) => date >= p.start_date && date <= p.end_date);
 
 export const defaultDueDate = (issue: string, terms: number) => addDays(issue, terms);

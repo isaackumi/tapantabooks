@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import toast from "react-hot-toast";
 import { FiAlertCircle, FiAlertTriangle, FiLink, FiRefreshCw, FiSettings, FiZap } from "react-icons/fi";
@@ -10,10 +10,16 @@ import StatCard from "@/components/statCard";
 import StatusBadge from "@/components/statusBadge";
 import RightDrawer from "@/components/rightDrawer";
 import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
+import { QueryError, Skeleton } from "@/components/queryState";
 import { useLedger } from "@/store/ledgerStore";
+import { useReport } from "@/services/useApiQuery";
+import type { ListData } from "@/core/apiClient";
 import type { DataSource, DataSourceKind } from "@/models/accounting";
+import type { ImportListItem } from "@/models/lists";
 import { matchesSearch, useGlobalState } from "@/utils/globalStateContext";
 import { classNames, fmtDateTime, fmtRelative, humanize } from "@/utils/format";
+
+const SOURCE_HISTORY_SIZE = 10;
 
 const KIND_LABEL: Record<DataSourceKind, string> = {
   TROVESUITE: "Trovesuite apps",
@@ -183,10 +189,12 @@ export default function SourcesPage() {
   const viewing = state.dataSources.find((s) => s.id === viewId);
   const connected = state.dataSources.filter((s) => s.status !== "NOT_CONNECTED");
   const issues = state.dataSources.filter((s) => s.status === "ERROR" || s.status === "WARNING");
-  const batches = useMemo(
-    () => (viewing ? state.importBatches.filter((b) => b.source_id === viewing.id) : []),
-    [state.importBatches, viewing],
-  );
+  const history = useReport<ListData<ImportListItem>>(viewing ? "/imports/list" : null, {
+    source_id: viewing?.id ?? "",
+    size: SOURCE_HISTORY_SIZE,
+  });
+  const batches = (history.data?.items ?? []).filter((b) => b.source_id === viewing?.id);
+  const moreBatches = (history.pagination?.total ?? 0) - batches.length;
 
   const sync = async (s: DataSource) => {
     const res = await actions.syncSource(s.id);
@@ -392,7 +400,11 @@ export default function SourcesPage() {
 
             <div>
               <h4 className="mb-2 text-sm font-semibold">Import history</h4>
-              {batches.length === 0 ? (
+              {history.error && !history.loading ? (
+                <QueryError message={history.error} onRetry={history.refetch} />
+              ) : !history.data || (history.loading && batches.length === 0) ? (
+                <Skeleton rows={3} />
+              ) : batches.length === 0 ? (
                 <p className="text-sm text-neutral-500">No batches yet. Event-driven sources post continuously through rules.</p>
               ) : (
                 <ul className="divide-y divide-neutral-100 rounded-xl border border-neutral-200 dark:divide-neutral-700 dark:border-neutral-700">
@@ -402,12 +414,19 @@ export default function SourcesPage() {
                         <span>
                           <span className="font-mono text-xs">{b.number}</span>
                           <span className="ml-2">{b.entity}</span>
-                          <span className="ml-2 text-xs text-neutral-500">{b.records.length} rows</span>
+                          <span className="ml-2 text-xs text-neutral-500">{b.row_count} rows</span>
                         </span>
                         <StatusBadge status={b.status} />
                       </Link>
                     </li>
                   ))}
+                  {moreBatches > 0 && (
+                    <li>
+                      <Link href="/integrations/imports" className="block px-4 py-2.5 text-xs text-brand-700 hover:underline dark:text-brand-300">
+                        {moreBatches} earlier batch{moreBatches === 1 ? "" : "es"} in Imports
+                      </Link>
+                    </li>
+                  )}
                 </ul>
               )}
             </div>

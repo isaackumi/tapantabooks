@@ -5,6 +5,7 @@ import toast from "react-hot-toast";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { Field, FormError, Toggle, inputClass } from "@/components/ui";
 import { useLedger } from "@/store/ledgerStore";
+import { useApiQuery } from "@/services/useApiQuery";
 import type { Party } from "@/models/accounting";
 import { CustomFieldInputs } from "@/components/customFields";
 import { defaultCustomValues } from "@/lib/customFields";
@@ -37,7 +38,11 @@ const PartyFormModal = ({ kind, open, onClose, party }: PartyFormModalProps) => 
   const [busy, setBusy] = useState(false);
   const entity = kind === "customer" ? "Customer" : "Supplier";
   const currencies = state.currencies.filter((c) => c.is_active || c.code === party?.currency);
-  const hasDocs = !!party && (kind === "customer" ? state.invoices.some((d) => d.customer_id === party.id) : state.bills.some((d) => d.supplier_id === party.id));
+  const docCount = useApiQuery<unknown>(open && party ? (kind === "customer" ? "/invoices/list" : "/bills/list") : null, {
+    [kind === "customer" ? "customer_id" : "supplier_id"]: party?.id ?? "",
+    size: 1,
+  });
+  const hasDocs = (docCount.pagination?.total ?? 0) > 0;
 
   useEffect(() => {
     if (!open) return;
