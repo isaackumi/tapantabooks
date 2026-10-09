@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const PORT = 3005;
+const PORT = Number(process.env.E2E_PORT ?? 3005);
 const ci = !!process.env.CI;
 
 export default defineConfig({
@@ -20,8 +20,8 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } }],
   webServer: {
-    // CI tests the production build; locally a running `npm run dev` is reused.
-    command: ci ? "npm run start" : "npm run dev",
+    // CI tests the production build (run `npm run build` first); locally a running `npm run dev` is reused.
+    command: ci ? `npx next start -p ${PORT}` : `npx next dev -p ${PORT}`,
     url: `http://localhost:${PORT}/auth/login`,
     reuseExistingServer: !ci,
     timeout: 180_000,

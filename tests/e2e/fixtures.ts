@@ -31,9 +31,12 @@ const PANEL = '[id^="headlessui-dialog-panel"]';
 
 export const dialog = (page: Page, title: string | RegExp) => page.locator(PANEL).filter({ has: page.getByRole("heading", { name: title }) });
 
+/** Waits out closing transitions too: a closing panel still shows its old content. */
+export const expectNoDialogs = (page: Page) => expect(page.locator(`${PANEL}:visible`)).toHaveCount(0);
+
 export const closeDialogs = async (page: Page) => {
   await page.keyboard.press("Escape");
-  await expect(page.locator(`${PANEL}:visible`)).toHaveCount(0);
+  await expectNoDialogs(page);
 };
 
 /** Reads the document number from the success toast, e.g. "INV-2026-0044 approved and posted". */
