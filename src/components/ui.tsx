@@ -138,6 +138,9 @@ export const inputClass =
 export const compactInputClass =
   "w-full px-2.5 py-2 text-sm bg-white dark:bg-neutral-900/30 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-900 dark:text-white placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-400 transition-all";
 
+/** Toolbar filters: compact, sized by the caller (`w-40`) instead of filling the row. */
+export const filterInputClass = compactInputClass.replace("w-full ", "");
+
 export const Field = ({
   label,
   required,

@@ -39,7 +39,7 @@ Contract mismatches to resolve with backend:
 | Item | Frontend | Backend template | Proposed resolution |
 | --- | --- | --- | --- |
 | `app-id` | `app-accounting` | `app-product-template` | Backend renames to `app-accounting`. |
-| Max page size | `fetchAll` asks for 500 | `PagedQuery` caps at 100 | Frontend moves to paged queries per screen (roadmap phase 1); `fetchAll` drops to 100. |
+| Max page size | 100 (`MAX_PAGE_SIZE`); list pages ask for 25 | `PagedQuery` caps at 100 | Resolved. The mock clamps `size` to 100 like the API. |
 | Pagination aliases | reads `pagination.has_next` | also emits `page_size`, `total_count`, `total_pages` | Harmless; agree one set. |
 | Permissions to client | role names only | permissions only inside the JWT; no `/me/permissions` | Add `GET /users/me` returning `permissions[]` (already in the catalogue as `/users/me`; extend its shape). |
 
@@ -56,7 +56,11 @@ Contract mismatches to resolve with backend:
    recomputes on save).
 2. **Whole-book download.** The store fetches every journal, invoice, bill and payment on login. Lists, search and
    reports must move to server-side paging, filtering and aggregation per screen. Cached collections stay only for
-   small reference data (accounts, tax codes, currencies, dimensions, periods, custom fields).
+   small reference data (accounts, tax codes, currencies, dimensions, periods, custom fields). **Partly fixed in
+   phase 1, increment 2:** the journal, invoice, bill, receipt and supplier payment pages page, filter, search and
+   sort on the server through `usePagedList`, and their cards and tab counts read the new `/statistics` endpoints.
+   The store still downloads those collections for the drawers, modals and party pages that read them; removing
+   them is the next step.
 3. **Hard-coded calendar.** Several screens hard-coded 2026 months and presets (`"2026-10-01"`, `MONTHS` arrays). Report
    presets now come from `useReportPresets` (today plus `fiscal_year_start`). **Fixed:** no page imports `@/mock/seed`
    any more. The tax page takes its range from presets and its tax accounts from the tax codes; invoice and bill lines
@@ -340,7 +344,15 @@ surfaced, for the API:
 - Ageing `as_at` excludes later documents but not later payments, so it is not a true historical ageing.
 - Year-to-date figures use the calendar year, not `fiscal_year_start`.
 
-Next increment: paged server-side lists for journals, invoices, bills and payments, so the store keeps only reference data.
+Phase 1, increment 2 (paged lists) is done for the journal, invoice, bill, receipt and supplier payment pages. It
+added `GET /journals/statistics`, `/invoices/statistics`, `/bills/statistics`, `/receipts/statistics` and
+`/supplier-payments/statistics`; derived fields on invoice, bill and payment list items; `cf_<key>` custom field
+filters; payment list totals; and a 100-row page cap; see `PROCESSING_RULES.md` sections 1.1, 4.11, 7.8 and 8.5.
+`DataTable` takes a `server` prop for server-side sorting and paging; its column ids are the API's `sort_by` names.
+
+Next increment: remove the transaction collections from the store. The document drawer, payment and credit note
+modals, party pages and the reports landing page read them today; each moves to `/get` endpoints, filtered lists
+(for example `GET /invoices/list?customer_id=`) or statistics, so the store keeps only reference data.
 
 Backend dependency: each phase's endpoints are added to the catalogue first and handed to `tvs-accounting-bk` through
 `API_ENDPOINTS.md` and `PROCESSING_RULES.md`, so the API and the frontend converge on one contract.

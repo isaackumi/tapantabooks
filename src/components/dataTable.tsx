@@ -15,6 +15,8 @@ import { FiInbox } from "react-icons/fi";
 import type { IconType } from "react-icons";
 import Pagination from "./pagination";
 import EmptyState, { type EmptyAction } from "./emptyState";
+import type { ListSort, PagedList } from "@/services/useApiQuery";
+import type { ListData } from "@/core/apiClient";
 
 export type Column<T> = ColumnDef<T, unknown> & { align?: "left" | "right" | "center" };
 
@@ -34,6 +36,20 @@ interface DataTableProps<T extends object> {
   /** Extra rows rendered before the data, e.g. an opening balance. */
   prefixRows?: React.ReactNode;
   dense?: boolean;
+  /** Keep every cell on one line; the table scrolls sideways instead. For dense transaction lists. */
+  nowrap?: boolean;
+  /**
+   * Server-side paging and sorting: `data` is one page and column ids are the API's `sort_by` fields.
+   * Set `enableSorting: false` on columns the API cannot sort by.
+   */
+  server?: {
+    page: number;
+    size: number;
+    total: number;
+    onPageChange: (page: number) => void;
+    sort: ListSort | null;
+    onSortChange: (sort: ListSort | null) => void;
+  };
 }
 
 const alignClass = (align?: string) =>
@@ -52,21 +68,37 @@ const DataTable = <T extends object>({
   footer,
   prefixRows,
   dense = false,
+  nowrap = false,
+  server,
 }: DataTableProps<T>) => {
-  const [sorting, setSorting] = useState<SortingState>([]);
-  const [pagination, setPagination] = useState({ pageIndex: 0, pageSize: pageSize || 100000 });
+  const [localSorting, setLocalSorting] = useState<SortingState>([]);
+  const [localPagination, setLocalPagination] = useState({ pageIndex: 0, pageSize: pageSize || 100000 });
 
   // Filters and tabs change the data; start again from page one.
   useEffect(() => {
-    setPagination((p) => ({ ...p, pageIndex: 0 }));
-  }, [data.length]);
+    if (!server) setLocalPagination((p) => ({ ...p, pageIndex: 0 }));
+  }, [data.length, server]);
+
+  const sorting: SortingState = server ? (server.sort ? [{ id: server.sort.by, desc: server.sort.order === "desc" }] : []) : localSorting;
+  const pagination = server ? { pageIndex: server.page - 1, pageSize: server.size } : localPagination;
 
   const table = useReactTable({
     data,
     columns,
     state: { sorting, pagination },
-    onSortingChange: setSorting,
-    onPaginationChange: setPagination,
+    onSortingChange: (updater) => {
+      if (!server) return setLocalSorting(updater);
+      const next = typeof updater === "function" ? updater(sorting) : updater;
+      server.onSortChange(next[0] ? { by: next[0].id, order: next[0].desc ? "desc" : "asc" } : null);
+    },
+    onPaginationChange: (updater) => {
+      if (!server) return setLocalPagination(updater);
+      const next = typeof updater === "function" ? updater(pagination) : updater;
+      server.onPageChange(next.pageIndex + 1);
+    },
+    manualSorting: !!server,
+    manualPagination: !!server,
+    pageCount: server ? Math.max(1, Math.ceil(server.total / server.size)) : undefined,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
@@ -76,11 +108,13 @@ const DataTable = <T extends object>({
     return <EmptyState icon={emptyIcon} title={emptyTitle} description={emptyDescription} actions={emptyActions} />;
   }
 
-  const cellPad = dense ? "px-4 py-2.5" : "px-6 py-4";
+  const padX = dense ? (nowrap ? "px-3" : "px-4") : "px-6";
+  const cellPad = `${padX} ${dense ? "py-2.5" : "py-4"}${nowrap ? " whitespace-nowrap" : ""}`;
   const pageCount = table.getPageCount();
   const { pageIndex } = table.getState().pagination;
+  const totalRows = server ? server.total : data.length;
   const first = pageIndex * pagination.pageSize + 1;
-  const last = Math.min(data.length, (pageIndex + 1) * pagination.pageSize);
+  const last = Math.min(totalRows, (pageIndex + 1) * pagination.pageSize);
 
   return (
     <div className="w-full" data-tour="table">
@@ -93,7 +127,7 @@ const DataTable = <T extends object>({
                   const align = (header.column.columnDef as Column<T>).align;
                   const sortable = header.column.getCanSort();
                   return (
-                    <th key={header.id} className={`${dense ? "px-4 py-2.5" : "px-6 py-3"} whitespace-nowrap`}>
+                    <th key={header.id} className={`${padX} ${dense ? "py-2.5" : "py-3"} whitespace-nowrap`}>
                       {header.isPlaceholder ? null : (
                         <div
                           className={`flex items-center gap-x-2 ${alignClass(align)} ${
@@ -151,16 +185,26 @@ const DataTable = <T extends object>({
           )}
         </table>
       </div>
-      {pageSize > 0 && pageCount > 1 && (
+      {(server || pageSize > 0) && pageCount > 1 && (
         <Pagination
           currentPage={pageIndex + 1}
           totalPages={pageCount}
           onPageChange={(p) => table.setPageIndex(p - 1)}
-          summary={`Showing ${first}–${last} of ${data.length}`}
+          summary={`Showing ${first}–${last} of ${totalRows}`}
         />
       )}
     </div>
   );
 };
+
+/** `server` props for a page from `usePagedList`. */
+export const serverPaging = <T,>(list: PagedList<T, ListData<T>>): NonNullable<DataTableProps<object>["server"]> => ({
+  page: list.page,
+  size: list.size,
+  total: list.pagination?.total ?? list.items.length,
+  onPageChange: list.setPage,
+  sort: list.sort,
+  onSortChange: list.setSort,
+});
 
 export default DataTable;

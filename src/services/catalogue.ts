@@ -57,10 +57,15 @@ export interface EndpointDef {
 
 const LIST_QUERY = {
   page: "1-based page (default 1)",
-  size: "Page size (default 20, max 500)",
-  sort_by: "Field to sort by",
+  size: "Page size (default 20, max 100)",
+  sort_by: "Field to sort by; cf_<key> sorts by a custom field",
   sort_order: "asc | desc",
   search: "Free-text search",
+};
+
+/** For entities that carry custom fields. */
+const CUSTOM_FIELD_QUERY = {
+  "cf_<key>": "Custom field equals value; for yes/no fields `false` also matches records where it was never set",
 };
 
 const perm = (resource: string, action: string) => `permission-accounting-${resource}-${action}`;
@@ -78,6 +83,27 @@ const list = (
   summary: `List ${path.split("/")[1].replace(/-/g, " ")} (paginated)`,
   query: { ...LIST_QUERY, ...filters },
   returns: `{ items: ${returns}[] }`,
+  permission: perm(resource, "list"),
+});
+
+const paymentList = (module: string, path: string, resource: string, filters: Record<string, string>): EndpointDef => ({
+  ...list(module, path, resource, "PaymentListItem", {
+    ...filters,
+    method: "BANK_TRANSFER | MOBILE_MONEY | CASH | CHEQUE",
+    bank_account_id: "Bank account id",
+    from_date: "YYYY-MM-DD",
+    to_date: "YYYY-MM-DD",
+  }),
+  returns: "PaymentListData: { items: PaymentListItem[], totals: { count, base_amount } } (totals cover every matching row)",
+});
+
+/** Figures behind a list page's cards and tab counts; unaffected by list filters. */
+const statistics = (module: string, path: string, resource: string, returns: string, summary: string): EndpointDef => ({
+  method: "GET",
+  path,
+  module,
+  summary,
+  returns,
   permission: perm(resource, "list"),
 });
 
@@ -324,13 +350,15 @@ export const ENDPOINTS: EndpointDef[] = [
   },
 
   // ---- Journals ------------------------------------------------------------
-  list("Journals", "/journals/list", "journal", "JournalEntry", {
+  list("Journals", "/journals/list", "journal", "JournalListItem", {
     status: "DRAFT | PENDING_APPROVAL | POSTED | REVERSED",
     source_type: "MANUAL | SALES | PURCHASES | BANKING | IMPORT | …",
     branch_id: "Branch dimension id",
     from_date: "YYYY-MM-DD",
     to_date: "YYYY-MM-DD",
+    ...CUSTOM_FIELD_QUERY,
   }),
+  statistics("Journals", "/journals/statistics", "journal", "JournalStatistics", "Counts by status, posted this month, awaiting approval and integration share"),
   get("Journals", "/journals/get", "journal", "journal_id", "JournalEntry"),
   {
     method: "POST",
@@ -559,13 +587,16 @@ export const ENDPOINTS: EndpointDef[] = [
   },
 
   // ---- Sales invoices & receipts -----------------------------------------
-  list("Invoices", "/invoices/list", "invoice", "SalesInvoice", {
+  list("Invoices", "/invoices/list", "invoice", "InvoiceListItem", {
     state: "DRAFT | APPROVED | VOID",
+    status: "DRAFT | OPEN | PARTIALLY_PAID | OVERDUE | PAID | VOID (derived as at today)",
     customer_id: "Customer id",
     currency: "ISO code",
     from_date: "Issue date from",
     to_date: "Issue date to",
+    ...CUSTOM_FIELD_QUERY,
   }),
+  statistics("Invoices", "/invoices/statistics", "invoice", "DocumentStatistics", "Outstanding, overdue, due in 7 days, collected this month and counts by status"),
   get("Invoices", "/invoices/get", "invoice", "invoice_id", "SalesInvoice"),
   {
     method: "POST",
@@ -598,13 +629,8 @@ export const ENDPOINTS: EndpointDef[] = [
     permission: perm("invoice", "void"),
     invalidates: ["invoices", "journals", ...AUDIT],
   },
-  list("Receipts", "/receipts/list", "receipt", "Payment", {
-    party_id: "Customer id",
-    document_id: "Invoice id",
-    method: "BANK_TRANSFER | MOBILE_MONEY | CASH | CHEQUE",
-    from_date: "YYYY-MM-DD",
-    to_date: "YYYY-MM-DD",
-  }),
+  paymentList("Receipts", "/receipts/list", "receipt", { party_id: "Customer id", document_id: "Invoice id" }),
+  statistics("Receipts", "/receipts/statistics", "receipt", "PaymentStatistics", "This month, last month, financial year to date, mobile money share and active months"),
   {
     method: "POST",
     path: "/receipts/add",
@@ -646,13 +672,16 @@ export const ENDPOINTS: EndpointDef[] = [
   },
 
   // ---- Bills & supplier payments -----------------------------------------
-  list("Bills", "/bills/list", "bill", "PurchaseBill", {
+  list("Bills", "/bills/list", "bill", "BillListItem", {
     state: "DRAFT | APPROVED | VOID",
+    status: "DRAFT | OPEN | PARTIALLY_PAID | OVERDUE | PAID | VOID (derived as at today)",
     supplier_id: "Supplier id",
     currency: "ISO code",
     from_date: "Issue date from",
     to_date: "Issue date to",
+    ...CUSTOM_FIELD_QUERY,
   }),
+  statistics("Bills", "/bills/statistics", "bill", "DocumentStatistics", "Outstanding, overdue, due in 7 days, paid this month and counts by status"),
   get("Bills", "/bills/get", "bill", "bill_id", "PurchaseBill"),
   {
     method: "POST",
@@ -685,13 +714,14 @@ export const ENDPOINTS: EndpointDef[] = [
     permission: perm("bill", "void"),
     invalidates: ["bills", "journals", ...AUDIT],
   },
-  list("Supplier payments", "/supplier-payments/list", "supplier-payment", "Payment", {
-    party_id: "Supplier id",
-    document_id: "Bill id",
-    method: "BANK_TRANSFER | MOBILE_MONEY | CASH | CHEQUE",
-    from_date: "YYYY-MM-DD",
-    to_date: "YYYY-MM-DD",
-  }),
+  paymentList("Supplier payments", "/supplier-payments/list", "supplier-payment", { party_id: "Supplier id", document_id: "Bill id" }),
+  statistics(
+    "Supplier payments",
+    "/supplier-payments/statistics",
+    "supplier-payment",
+    "PaymentStatistics",
+    "This month, last month, financial year to date, mobile money share and active months",
+  ),
   {
     method: "POST",
     path: "/supplier-payments/add",

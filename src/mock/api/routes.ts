@@ -1,4 +1,21 @@
-import type { CreditNote, CustomFieldEntity, PeriodStatus } from "@/models/accounting";
+import type {
+  CreditNote,
+  CustomFieldEntity,
+  JournalStatus,
+  Payment,
+  PeriodStatus,
+  PurchaseBill,
+  SalesInvoice,
+} from "@/models/accounting";
+import type {
+  DocumentListFields,
+  DocumentListItem,
+  DocumentStatistics,
+  JournalListItem,
+  JournalStatistics,
+  PaymentListItem,
+  PaymentStatistics,
+} from "@/models/lists";
 import { ENDPOINTS, endpointKey } from "@/services/catalogue";
 import type {
   AgeingReport,
@@ -17,6 +34,7 @@ import {
   cashFlow,
   generalLedger,
   incomeStatement,
+  lineTotals,
   monthlyProfitAndLoss,
   trialBalance,
 } from "@/lib/ledger";
@@ -27,7 +45,7 @@ import { bankBaseBalances, billRows, invoiceRows, type DocumentRow } from "@/sto
 import { round2 } from "@/utils/format";
 import { addDays, addMonths, daysBetween, endOfMonth, todayIso } from "@/utils/dates";
 import { openingBalancesView, revaluationPreview, type LedgerEngine, type LedgerState } from "./engine";
-import { ApiFault, found, fromResult, listResult, need, type HandlerResult } from "./http";
+import { ApiFault, found, fromResult, listResult, need, type HandlerResult, type ListOptions } from "./http";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- request bodies are untyped JSON */
 
@@ -240,6 +258,119 @@ const taxSummary = (state: LedgerState, q: URLSearchParams): TaxSummaryReport =>
   };
 };
 
+// ---- List rows and list statistics ---------------------------------------------------------------------------
+
+const journalItems = (state: LedgerState): JournalListItem[] => state.journals.map((j) => ({ ...j, total: lineTotals(j.lines).debit }));
+
+const documentItems = <T extends SalesInvoice | PurchaseBill>(rows: DocumentRow<T>[]): (T & DocumentListFields)[] =>
+  rows.map((r) => ({
+    ...r.doc,
+    party_code: r.party?.code ?? "",
+    party_name: r.party?.name ?? "",
+    status: r.status,
+    days_overdue: r.status === "OVERDUE" ? Math.max(0, daysBetween(r.doc.due_date, todayIso())) : 0,
+    subtotal: r.totals.subtotal,
+    tax: r.totals.tax,
+    total: r.totals.total,
+    outstanding: r.outstanding_fc,
+    total_base: r.total_base,
+    outstanding_base: r.outstanding,
+  }));
+
+const paymentItems = (state: LedgerState, kind: "receipt" | "payment"): PaymentListItem[] => {
+  const isReceipt = kind === "receipt";
+  const parties = new Map((isReceipt ? state.customers : state.suppliers).map((p) => [p.id, p.name]));
+  const docs = new Map<string, string>((isReceipt ? state.invoices : state.bills).map((d) => [d.id, d.number]));
+  const banks = new Map(state.bankAccounts.map((b) => [b.id, b.name]));
+  return (isReceipt ? state.receipts : state.supplierPayments).map((p) => ({
+    ...p,
+    party_name: parties.get(p.party_id) ?? "",
+    document_number: docs.get(p.document_id) ?? "",
+    bank_account_name: banks.get(p.bank_account_id) ?? "",
+  }));
+};
+
+const DOCUMENT_LIST: ListOptions<DocumentListItem> = {
+  search: ["number", "party_name", "party_code", "supplier_reference", "source.reference", "currency", "notes", "custom_fields"],
+  dateField: "issue_date",
+  defaultSort: { field: "issue_date", order: "desc", then: "number" },
+};
+
+const PAYMENT_LIST: ListOptions<PaymentListItem> = {
+  search: ["number", "reference", "party_name", "document_number"],
+  filters: { party_id: "party_id", document_id: "document_id", method: "method", bank_account_id: "bank_account_id" },
+  dateField: "date",
+  defaultSort: { field: "date", order: "desc", then: "number" },
+  summarise: (rows) => ({ totals: { count: rows.length, base_amount: round2(rows.reduce((t, p) => t + p.base_amount, 0)) } }),
+};
+
+/** Entries the ledger creates itself; everything else came from an integration or import. */
+const OWN_SOURCES = new Set(["MANUAL", "SALES", "PURCHASES", "BANKING", "FX_REVALUATION", "OPENING_BALANCE", "YEAR_END"]);
+
+const journalStatistics = (state: LedgerState): JournalStatistics => {
+  const today = todayIso();
+  const items = journalItems(state);
+  const sum = (rows: JournalListItem[]) => round2(rows.reduce((t, j) => t + j.total, 0));
+  const count = (s: JournalStatus) => items.filter((j) => j.status === s).length;
+  const postedThisMonth = items.filter((j) => j.status === "POSTED" && j.date.slice(0, 7) === today.slice(0, 7) && j.date <= today);
+  const pending = items.filter((j) => j.status === "PENDING_APPROVAL");
+  return {
+    as_at: today,
+    status_counts: { ALL: items.length, DRAFT: count("DRAFT"), PENDING_APPROVAL: pending.length, POSTED: count("POSTED"), REVERSED: count("REVERSED") },
+    posted_this_month_count: postedThisMonth.length,
+    posted_this_month_total: sum(postedThisMonth),
+    pending_approval_count: pending.length,
+    pending_approval_total: sum(pending),
+    integration_share_pct: items.length ? Math.round((items.filter((j) => !OWN_SOURCES.has(j.source.type)).length / items.length) * 100) : 0,
+  };
+};
+
+const documentStatistics = (items: DocumentListItem[], payments: { date: string; base_amount: number }[]): DocumentStatistics => {
+  const today = todayIso();
+  const open = items.filter((d) => d.outstanding_base > 0);
+  const overdue = items.filter((d) => d.status === "OVERDUE");
+  const settled = payments.filter((p) => p.date.slice(0, 7) === today.slice(0, 7) && p.date <= today);
+  const sum = (xs: number[]) => round2(xs.reduce((t, v) => t + v, 0));
+  const count = (s: DocumentListItem["status"]) => items.filter((d) => d.status === s).length;
+  return {
+    as_at: today,
+    status_counts: {
+      ALL: items.length,
+      DRAFT: count("DRAFT"),
+      OPEN: count("OPEN"),
+      PARTIALLY_PAID: count("PARTIALLY_PAID"),
+      OVERDUE: overdue.length,
+      PAID: count("PAID"),
+      VOID: count("VOID"),
+    },
+    outstanding: sum(open.map((d) => d.outstanding_base)),
+    open_count: open.length,
+    overdue: sum(overdue.map((d) => d.outstanding_base)),
+    overdue_count: overdue.length,
+    due_7_days: sum(open.filter((d) => d.due_date >= today && d.due_date <= addDays(today, 7)).map((d) => d.outstanding_base)),
+    settled_this_month: sum(settled.map((p) => p.base_amount)),
+    settled_this_month_count: settled.length,
+    currencies: [...new Set(items.map((d) => d.currency))].sort(),
+  };
+};
+
+const paymentStatistics = (state: LedgerState, payments: Payment[]): PaymentStatistics => {
+  const today = todayIso();
+  const thisMonth = today.slice(0, 7);
+  const lastMonth = addMonths(thisMonth, -1);
+  const fyStart = fiscalYearFor(state.org, today).start_date;
+  const upToToday = payments.filter((p) => p.date <= today);
+  const window = (rows: Payment[]) => ({ total: round2(rows.reduce((t, p) => t + p.base_amount, 0)), count: rows.length });
+  return {
+    as_at: today,
+    this_month: { month: thisMonth, ...window(upToToday.filter((p) => p.date.startsWith(thisMonth))) },
+    last_month: { month: lastMonth, ...window(upToToday.filter((p) => p.date.startsWith(lastMonth))) },
+    year_to_date: { from_date: fyStart, ...window(upToToday.filter((p) => p.date >= fyStart)) },
+    mobile_money_share_pct: payments.length ? Math.round((payments.filter((p) => p.method === "MOBILE_MONEY").length / payments.length) * 100) : 0,
+    months: [...new Set(payments.map((p) => p.date.slice(0, 7)))].sort().reverse(),
+  };
+};
+
 const HANDLERS: Record<string, Handler> = {
   // ---- Platform -----------------------------------------------------------
   "GET /navigation": () => ({
@@ -321,12 +452,13 @@ const HANDLERS: Record<string, Handler> = {
 
   // ---- Journals ----------------------------------------------------------------------
   "GET /journals/list": ({ state, q }) =>
-    listResult(state.journals, q, {
-      search: ["number", "memo", "reference"],
+    listResult(journalItems(state), q, {
+      search: ["number", "memo", "reference", "created_by", "source.type", "source.reference", "custom_fields"],
       filters: { status: "status", source_type: "source.type", branch_id: "branch_id" },
       dateField: "date",
-      defaultSort: { field: "date", order: "desc" },
+      defaultSort: { field: "date", order: "desc", then: "number" },
     }),
+  "GET /journals/statistics": ({ state }) => ({ data: journalStatistics(state) }),
   "GET /journals/get": ({ state, q }) => ({
     data: found(state.journals.find((j) => j.id === need(q.get("journal_id"), "journal_id")), "Journal"),
   }),
@@ -384,12 +516,11 @@ const HANDLERS: Record<string, Handler> = {
 
   // ---- Invoices & receipts ------------------------------------------------------------------------------
   "GET /invoices/list": ({ state, q }) =>
-    listResult(state.invoices, q, {
-      search: ["number", "notes"],
-      filters: { state: "state", customer_id: "customer_id", currency: "currency" },
-      dateField: "issue_date",
-      defaultSort: { field: "issue_date", order: "desc" },
+    listResult(documentItems(invoiceRows(state)), q, {
+      ...DOCUMENT_LIST,
+      filters: { state: "state", status: "status", customer_id: "customer_id", currency: "currency" },
     }),
+  "GET /invoices/statistics": ({ state }) => ({ data: documentStatistics(documentItems(invoiceRows(state)), state.receipts) }),
   "GET /invoices/get": ({ state, q }) => ({
     data: found(state.invoices.find((d) => d.id === need(q.get("invoice_id"), "invoice_id")), "Invoice"),
   }),
@@ -400,13 +531,8 @@ const HANDLERS: Record<string, Handler> = {
   "POST /invoices/approve": ({ engine, q }) => fromResult(engine.approveInvoice(need(q.get("invoice_id"), "invoice_id"))),
   "POST /invoices/void": ({ engine, q, body }) =>
     fromResult(engine.voidDocument("invoice", need(q.get("invoice_id"), "invoice_id"), String(body.reason ?? ""))),
-  "GET /receipts/list": ({ state, q }) =>
-    listResult(state.receipts, q, {
-      search: ["number", "reference"],
-      filters: { party_id: "party_id", document_id: "document_id", method: "method" },
-      dateField: "date",
-      defaultSort: { field: "date", order: "desc" },
-    }),
+  "GET /receipts/list": ({ state, q }) => listResult(paymentItems(state, "receipt"), q, PAYMENT_LIST),
+  "GET /receipts/statistics": ({ state }) => ({ data: paymentStatistics(state, state.receipts) }),
   "POST /receipts/add": ({ engine, body }) => fromResult(engine.recordPayment("receipt", body), 201),
   "GET /credit-notes/list": ({ state, q }) => creditList(state.creditNotes, q),
   "GET /credit-notes/get": ({ state, q }) => ({
@@ -418,12 +544,11 @@ const HANDLERS: Record<string, Handler> = {
 
   // ---- Bills & supplier payments -----------------------------------------------------------------------------
   "GET /bills/list": ({ state, q }) =>
-    listResult(state.bills, q, {
-      search: ["number", "supplier_reference", "notes"],
-      filters: { state: "state", supplier_id: "supplier_id", currency: "currency" },
-      dateField: "issue_date",
-      defaultSort: { field: "issue_date", order: "desc" },
+    listResult(documentItems(billRows(state)), q, {
+      ...DOCUMENT_LIST,
+      filters: { state: "state", status: "status", supplier_id: "supplier_id", currency: "currency" },
     }),
+  "GET /bills/statistics": ({ state }) => ({ data: documentStatistics(documentItems(billRows(state)), state.supplierPayments) }),
   "GET /bills/get": ({ state, q }) => ({
     data: found(state.bills.find((d) => d.id === need(q.get("bill_id"), "bill_id")), "Bill"),
   }),
@@ -434,13 +559,8 @@ const HANDLERS: Record<string, Handler> = {
   "POST /bills/approve": ({ engine, q }) => fromResult(engine.approveBill(need(q.get("bill_id"), "bill_id"))),
   "POST /bills/void": ({ engine, q, body }) =>
     fromResult(engine.voidDocument("bill", need(q.get("bill_id"), "bill_id"), String(body.reason ?? ""))),
-  "GET /supplier-payments/list": ({ state, q }) =>
-    listResult(state.supplierPayments, q, {
-      search: ["number", "reference"],
-      filters: { party_id: "party_id", document_id: "document_id", method: "method" },
-      dateField: "date",
-      defaultSort: { field: "date", order: "desc" },
-    }),
+  "GET /supplier-payments/list": ({ state, q }) => listResult(paymentItems(state, "payment"), q, PAYMENT_LIST),
+  "GET /supplier-payments/statistics": ({ state }) => ({ data: paymentStatistics(state, state.supplierPayments) }),
   "POST /supplier-payments/add": ({ engine, body }) => fromResult(engine.recordPayment("payment", body), 201),
   "GET /supplier-credits/list": ({ state, q }) => creditList(state.supplierCredits, q),
   "GET /supplier-credits/get": ({ state, q }) => ({
@@ -540,20 +660,13 @@ const HANDLERS: Record<string, Handler> = {
     fromResult(engine.reprocessRecord(need(q.get("import_batch_id"), "import_batch_id"), Number(need(q.get("row"), "row")))),
 
   // ---- Audit ------------------------------------------------------------------------------------------------------------------
-  "GET /audit-logs/list": ({ state, q }) => {
-    const res = listResult(state.auditEvents, q, {
+  "GET /audit-logs/list": ({ state, q }) =>
+    listResult(state.auditEvents, q, {
       search: ["summary", "entity_label", "actor_name", "action"],
       filters: { entity_type: "entity_type", actor_id: "actor_id", actor_type: "actor_type" },
+      dateField: "occurred_at",
       defaultSort: { field: "occurred_at", order: "desc" },
-    });
-    const from = q.get("from_date");
-    const to = q.get("to_date");
-    if (!from && !to) return res;
-    const items = (res.data as { items: { occurred_at: string }[] }).items.filter(
-      (e) => (!from || e.occurred_at.slice(0, 10) >= from) && (!to || e.occurred_at.slice(0, 10) <= to),
-    );
-    return { ...res, data: { items } };
-  },
+    }),
 
   // ---- Reports --------------------------------------------------------------------------------------------------------------------
   "GET /dashboard/statistics": ({ state, q }) => {

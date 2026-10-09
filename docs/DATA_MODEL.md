@@ -803,7 +803,18 @@ Endpoints not listed take no body (ids and options are query parameters).
 
 These shapes are computed, not stored.
 
-**Document display status and outstanding amounts.** The frontend derives these from each invoice or bill (`src/store/selectors.ts`); the API does not return them today. `status` is `DRAFT`, `OPEN`, `PARTIALLY_PAID`, `PAID`, `OVERDUE` or `VOID`; `total_base` and `outstanding` are base; `outstanding_fc` is document currency. Definitions are in `docs/PROCESSING_RULES.md` section 7.1.
+**Document display status and outstanding amounts.** `GET /invoices/list` and `GET /bills/list` return them on each item (below). Screens that still read the whole collection (document drawer, payment and credit note modals) derive them in `src/store/selectors.ts`, where `outstanding` is base and `outstanding_fc` is document currency. `status` is `DRAFT`, `OPEN`, `PARTIALLY_PAID`, `PAID`, `OVERDUE` or `VOID`. Definitions are in `docs/PROCESSING_RULES.md` section 7.1.
+
+**List items and list statistics** (types in `src/models/lists.ts`; definitions in `docs/PROCESSING_RULES.md` sections 4.11, 7.8 and 8.5):
+
+| Endpoint | `data` shape |
+|---|---|
+| `GET /journals/list` | `{ items: JournalListItem[] }`; `JournalListItem` = `JournalEntry` + `{ total }` |
+| `GET /invoices/list`, `GET /bills/list` | `{ items: (SalesInvoice \| PurchaseBill) & { party_code, party_name, status, days_overdue, subtotal, tax, total, outstanding, total_base, outstanding_base }[] }`; `outstanding` is document currency, `*_base` are base |
+| `GET /receipts/list`, `GET /supplier-payments/list` | `{ items: PaymentListItem[], totals: { count, base_amount } }`; `PaymentListItem` = `Payment` + `{ party_name, document_number, bank_account_name }`; `totals` cover every matching row |
+| `GET /journals/statistics` | `JournalStatistics`: `{ as_at, status_counts: { ALL, DRAFT, PENDING_APPROVAL, POSTED, REVERSED }, posted_this_month_count, posted_this_month_total, pending_approval_count, pending_approval_total, integration_share_pct }` |
+| `GET /invoices/statistics`, `GET /bills/statistics` | `DocumentStatistics`: `{ as_at, status_counts: { ALL, DRAFT, OPEN, PARTIALLY_PAID, OVERDUE, PAID, VOID }, outstanding, open_count, overdue, overdue_count, due_7_days, settled_this_month, settled_this_month_count, currencies: string[] }` |
+| `GET /receipts/statistics`, `GET /supplier-payments/statistics` | `PaymentStatistics`: `{ as_at, this_month: { month, total, count }, last_month: { month, total, count }, year_to_date: { from_date, total, count }, mobile_money_share_pct, months: string[] }` |
 
 **Report payloads** (definitions in `docs/PROCESSING_RULES.md` section 17):
 

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import toast from "react-hot-toast";
 import { FiEdit2 } from "react-icons/fi";
 import type { CustomField, CustomFieldEntity } from "@/models/accounting";
-import { DetailRow, Field, FormError, compactInputClass, inputClass } from "@/components/ui";
+import { DetailRow, Field, FormError, filterInputClass, inputClass } from "@/components/ui";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import type { Column } from "@/components/dataTable";
 import { useLedger } from "@/store/ledgerStore";
@@ -233,7 +233,7 @@ export const CustomFieldFilters = ({
           key={f.id}
           value={value[f.key] ?? ""}
           onChange={(e) => onChange({ ...value, [f.key]: e.target.value })}
-          className={`${compactInputClass.replace("w-full ", "")} w-auto min-w-36`}
+          className={`${filterInputClass} w-auto min-w-36`}
           aria-label={f.label}
         >
           <option value="">{`${f.label}: any`}</option>
@@ -254,6 +254,10 @@ export const matchesCustomFilters = (values: Values | undefined, filters: Values
     const actual = values?.[k] ?? "";
     return v === "false" ? actual !== "true" : actual === v;
   });
+
+/** Custom field filters as list query parameters (`cf_<key>`). */
+export const customFilterQuery = (filters: Values) =>
+  Object.fromEntries(Object.entries(filters).filter(([, v]) => v).map(([k, v]) => [`cf_${k}`, v]));
 
 /** Free text from custom values so the global search finds them. */
 export const customSearchText = (values: Values | undefined) => Object.values(values ?? {}).join(" ");

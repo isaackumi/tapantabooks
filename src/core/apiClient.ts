@@ -204,8 +204,11 @@ export const api = {
   delete: <T>(path: string, query?: Query) => apiRequest<T>("DELETE", path, { query }),
 };
 
+/** Largest page the API serves. */
+export const MAX_PAGE_SIZE = 100;
+
 /** Reads every page of a list endpoint. */
-export const fetchAll = async <T>(path: string, query: Query = {}, size = 500): Promise<T[]> => {
+export const fetchAll = async <T>(path: string, query: Query = {}, size = MAX_PAGE_SIZE): Promise<T[]> => {
   const items: T[] = [];
   for (let page = 1; ; page++) {
     const res = await api.get<ListData<T>>(path, { ...query, page, size });

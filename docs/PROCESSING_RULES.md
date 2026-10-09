@@ -38,7 +38,9 @@ This document specifies the business rules that tvs-accounting-bk must enforce s
 
 - All paths are relative to `/api/v1`. Resource ids go in the query string (`?journal_id=…`), never in the path. Wire format is snake_case JSON.
 - Every response uses the standard Trovesuite envelope (`success`, `status_code`, `detail`, `error`, `data`, `field_errors`, `pagination`). See `docs/API_RESPONSE_FORMAT.md` in the tvs-accounting-bk repository for the envelope, `docs/AUDIT_FIELDS.md` there for the six audit fields, and `docs/RBAC_ROLES.md` there for how the permission ids in the catalogue (`permission-accounting-{resource}-{verb}`) are seeded and enforced.
-- Every `/list` endpoint accepts `page` (1-based, default 1), `size` (default 20, maximum 500), `sort_by`, `sort_order` (`asc` or `desc`) and `search`, and returns `data.items[]` plus `pagination`. Module filters are equality matches on a field; `from_date` and `to_date` are inclusive bounds on the list's date field. The frontend reads whole collections by paging with `size=500` until `has_next` is false.
+- Every `/list` endpoint accepts `page` (1-based, default 1), `size` (default 20, maximum 100, the `PagedQuery` cap; larger values are clamped), `sort_by`, `sort_order` (`asc` or `desc`) and `search`, and returns `data.items[]` plus `pagination`. Module filters are equality matches on a field; `from_date` and `to_date` are inclusive bounds on the date part of the list's date field. Filtering, search and sorting happen before pagination, and `pagination.total` counts every matching row. An explicit `sort_by` without `sort_order` sorts ascending; without `sort_by` each list uses its documented default order.
+- Lists of records that carry custom fields (journals, invoices, bills) also accept `cf_<key>=<value>`, an equality filter on that custom field's value. For a `BOOLEAN` field, `cf_<key>=false` also matches records where the field was never set. `sort_by=cf_<key>` sorts by that value, and `search` matches custom field values too.
+- The journal, invoice and bill list pages and the receipt and supplier payment pages read one page at a time (`size=25`) with the user's filters, search, sort and page on the query string. Their stat cards and tab counts come from the matching `/statistics` endpoint, never from the loaded page. Exports page through the same list query at `size=100`. Other screens still read whole collections by paging at `size=100` until `has_next` is false; that moves to per-screen queries in later steps.
 
 ### 1.2 Request pipeline and error mapping
 
@@ -411,6 +413,23 @@ Side effects (shared with voids and revaluations, called "reverse into" below):
 
 Response: 200 with the **reversal** `JournalEntry`. Detail: `{original number} reversed by {reversal number}`.
 
+### 4.11 Lists and statistics
+
+**`GET /journals/list`.** Each item is the `JournalEntry` plus `total`, the sum of its line debits (equal to the credits for any balanced journal).
+
+- `search`: number, memo, reference, `created_by`, source type, source reference, custom field values.
+- Filters: `status`, `source_type` (`source.type`), `branch_id`; `from_date` / `to_date` on `date`; `cf_<key>`.
+- Default order: `date` descending, then `number` descending.
+
+**`GET /journals/statistics`.** Computed over every journal, ignoring list filters.
+
+| Field | Definition |
+|---|---|
+| `status_counts` | Count per `status` (`DRAFT`, `PENDING_APPROVAL`, `POSTED`, `REVERSED`), plus `ALL` |
+| `posted_this_month_count`, `posted_this_month_total` | `POSTED` journals dated from the 1st of this month to today; total is the sum of `total` |
+| `pending_approval_count`, `pending_approval_total` | `PENDING_APPROVAL` journals |
+| `integration_share_pct` | Journals whose `source.type` is not one the ledger creates itself (`MANUAL`, `SALES`, `PURCHASES`, `BANKING`, `FX_REVALUATION`, `OPENING_BALANCE`, `YEAR_END`), as a whole-number percentage of all journals; 0 when there are none |
+
 ---
 
 ## 5. Chart of accounts
@@ -649,6 +668,35 @@ Response: `data: null`. Detail: `{number} voided`.
 
 There is no endpoint to reverse a payment, so a document with any payment can never be voided (open question).
 
+### 7.8 Lists and statistics
+
+**`GET /invoices/list`, `GET /bills/list`.** Each item is the stored document plus derived fields, computed at read time:
+
+| Field | Definition |
+|---|---|
+| `party_code`, `party_name` | From the customer or supplier; empty string if missing |
+| `status` | Display status (section 7.1) |
+| `days_overdue` | Days from `due_date` to today when `status = OVERDUE`, otherwise 0 |
+| `subtotal`, `tax`, `total` | Line totals in document currency (section 7.3) |
+| `outstanding` | Unpaid amount in document currency |
+| `total_base`, `outstanding_base` | The same in base currency, at the document rate |
+
+- `search`: number, party name and code, supplier reference, source reference, currency, notes, custom field values.
+- Filters: `state` (stored), `status` (display), `customer_id` or `supplier_id`, `currency`; `from_date` / `to_date` on `issue_date`; `cf_<key>`.
+- `sort_by` accepts any of the item's fields, derived ones included (for example `outstanding_base`, `days_overdue`, `party_name`).
+- Default order: `issue_date` descending, then `number` descending.
+
+**`GET /invoices/statistics`, `GET /bills/statistics`.** Computed over every invoice (or bill), ignoring list filters. Amounts are base currency.
+
+| Field | Definition |
+|---|---|
+| `status_counts` | Count per display status, plus `ALL` |
+| `outstanding`, `open_count` | Sum and count of `outstanding_base` over documents with `outstanding_base > 0`. Equals the ageing report total as at today |
+| `overdue`, `overdue_count` | Same over `status = OVERDUE` |
+| `due_7_days` | `outstanding_base` of open documents due from today to today + 7 days inclusive |
+| `settled_this_month`, `settled_this_month_count` | Sum of `base_amount` and count of receipts (for invoices) or supplier payments (for bills) dated from the 1st of this month to today |
+| `currencies` | Distinct document currencies, sorted; the frontend's currency filter options |
+
 ---
 
 ## 8. Receipts and supplier payments
@@ -718,6 +766,25 @@ Response: 201 with the `Payment`. Detail: `{number} recorded · {amount}` plus t
 `amount_paid` (document currency) drives the display status and the overpayment check; `amount_paid_base` (base, at the document rate) drives every base-currency outstanding figure. They must both be maintained.
 
 Payment journals carry `source.document_id`, so they cannot be reversed through `POST /journals/reverse`, and there is no payment void endpoint (open question).
+
+### 8.5 Lists and statistics
+
+**`GET /receipts/list`, `GET /supplier-payments/list`.** Each item is the `Payment` plus `party_name`, `document_number` and `bank_account_name`, resolved at read time (empty string when the record is missing).
+
+- `search`: number, reference, party name, document number.
+- Filters: `party_id`, `document_id`, `method`, `bank_account_id`; `from_date` / `to_date` on `date`.
+- Default order: `date` descending, then `number` descending.
+- `data.totals` = `{ count, base_amount }` over **every** matching payment, not only the returned page, so a filtered list can show its total.
+
+**`GET /receipts/statistics`, `GET /supplier-payments/statistics`.** Computed over every payment of that kind, ignoring list filters. "Today" is the server date.
+
+| Field | Definition |
+|---|---|
+| `this_month` | `{ month: "YYYY-MM", total, count }`: payments dated from the 1st of this month to today; `total` is the sum of `base_amount` |
+| `last_month` | Same shape for the whole previous calendar month |
+| `year_to_date` | `{ from_date, total, count }`: from the start of the fiscal year containing today (from `fiscal_year_start`) to today |
+| `mobile_money_share_pct` | Payments with `method = MOBILE_MONEY` as a whole-number percentage of all payments, by count; 0 when there are none |
+| `months` | Distinct `YYYY-MM` values of payment dates, newest first; the frontend's month filter options |
 
 ---
 
@@ -1311,7 +1378,7 @@ The seed data also contains `SYNC.PARTIAL` and `SYNC.FAILED` events (entity type
 
 Writes that record **no** audit event in the mock: draft journal edit, statement line unmatch, field mapping update and delete, custom field move, dimension activate or deactivate, and the no-op paths ("Nothing changed", unchanged toggles). Journals posted as a side effect (invoice and bill approvals, payments, void reversals, revaluation reversals) are covered by the parent action's event only; no separate `JOURNAL.*` event is written for them.
 
-`GET /audit-logs/list` supports `search` (summary, entity label, actor name, action), filters `entity_type`, `actor_id`, `actor_type`, and `from_date` / `to_date` on the date part of `occurred_at`; default sort is `occurred_at` descending. The mock applies the date filter after paginating, which is a bug the API must not copy.
+`GET /audit-logs/list` supports `search` (summary, entity label, actor name, action), filters `entity_type`, `actor_id`, `actor_type`, and `from_date` / `to_date` on the date part of `occurred_at`; default sort is `occurred_at` descending.
 
 ---
 
@@ -1675,5 +1742,5 @@ The mock runs in one browser tab against one in-memory copy of the books. These 
 - **Simulated integrations.** Manual sync invents a record count, and the reference-rate fetch invents rates by drifting the last one. Call the real sources.
 - **Client-side import validation.** Import rows arrive with a status chosen by the browser. Validate rows on the server and do not trust client-supplied `status` values.
 - **Report computation.** The mock recomputes every report by scanning every journal line. Use indexed queries or maintained balances.
-- **List filtering order.** The audit log list applies its date filter after pagination. Filter before paginating everywhere.
+- **List queries.** The mock builds every list item, including derived fields such as `outstanding` and `days_overdue`, for the whole collection and then filters, sorts and slices it in memory. Push filters, sorting and paging into SQL, and maintain or index the derived columns the lists sort on.
 - **Placeholder business logic.** Import posting (fixed accounts and a 20% VAT split), the hard-coded receipt and payment prefixes, and the fixed control-account ids are stand-ins and must be replaced by configuration or real logic.
