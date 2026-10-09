@@ -11,7 +11,7 @@ npm install
 npm run dev        # http://localhost:3005
 ```
 
-Also available: `npm run build`, `npm run start`, `npm run lint`.
+Also available: `npm run build`, `npm run start`, `npm run lint`, `npm test` (unit tests in `tests/unit/` for the ledger maths, statement import parsing and the mock API engine's accounting rules), `npm run test:e2e` (Playwright browser tests in `tests/e2e/` for sign-in, invoice to receipt, bill to payment, journal approval, locked periods and year-end; they reuse a running `npm run dev`, or start one). Install the browser once with `npx playwright install chromium`.
 
 Stack: Next.js 15 (App Router), React 19, TypeScript, Tailwind CSS v4, Headless UI, TanStack Table, Recharts.
 
