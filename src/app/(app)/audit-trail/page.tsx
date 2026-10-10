@@ -4,7 +4,7 @@ import { Fragment, useState } from "react";
 import Link from "next/link";
 import toast from "react-hot-toast";
 import { FiChevronDown, FiChevronRight, FiCpu, FiDownload, FiLink, FiUser } from "react-icons/fi";
-import { Button, PageHeader, compactInputClass } from "@/components/ui";
+import { Button, PageHeader, filterInputClass } from "@/components/ui";
 import StatCard from "@/components/statCard";
 import Pagination from "@/components/pagination";
 import { QueryState, Skeleton } from "@/components/queryState";
@@ -155,27 +155,27 @@ export default function AuditTrailPage() {
       </QueryState>
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        <select value={actorType} onChange={(e) => setActorType(e.target.value as "" | ActorType)} className={`${compactInputClass} w-40`}>
+        <select value={actorType} onChange={(e) => setActorType(e.target.value as "" | ActorType)} className={`${filterInputClass} w-40`}>
           <option value="">All channels</option>
           <option value="USER">People</option>
           <option value="INTEGRATION">Integrations</option>
           <option value="SYSTEM">System</option>
         </select>
-        <select value={actor} onChange={(e) => setActor(e.target.value)} className={`${compactInputClass} w-48`}>
+        <select value={actor} onChange={(e) => setActor(e.target.value)} className={`${filterInputClass} w-48`}>
           <option value="">Anyone</option>
           {(stats.data?.actor_names ?? []).map((a) => (
             <option key={a}>{a}</option>
           ))}
         </select>
-        <select value={entityType} onChange={(e) => setEntityType(e.target.value)} className={`${compactInputClass} w-44`}>
+        <select value={entityType} onChange={(e) => setEntityType(e.target.value)} className={`${filterInputClass} w-44`}>
           <option value="">All record types</option>
           {(stats.data?.entity_types ?? []).map((t) => (
             <option key={t}>{t}</option>
           ))}
         </select>
-        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className={`${compactInputClass} w-40`} aria-label="From" />
+        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className={`${filterInputClass} w-40`} aria-label="From" />
         <span className="text-sm text-neutral-400">to</span>
-        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className={`${compactInputClass} w-40`} aria-label="To" />
+        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className={`${filterInputClass} w-40`} aria-label="To" />
         {filtered && (
           <button
             onClick={() => {
