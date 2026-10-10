@@ -9,6 +9,8 @@ import { captureHandoff } from "./session";
 if (typeof window !== "undefined") {
   captureHandoff();
   if (AppConstants.useMockApi) {
-    configureApiClient({ ready: import("@/mock/api/worker").then((m) => m.startMockApi()) });
+    const worker = import("@/mock/api/worker");
+    void worker.then((m) => m.startMockApi());
+    configureApiClient({ ready: () => worker.then((m) => m.mockApiReady()) });
   }
 }

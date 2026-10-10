@@ -63,15 +63,15 @@ export const troveHeaders = (): Record<string, string> => {
 
 type Transport = (request: Request) => Promise<Response>;
 
-let ready: Promise<void> = Promise.resolve();
+let ready: () => Promise<void> = () => Promise.resolve();
 let transport: Transport = (request) => fetch(request);
 let onUnauthorized: (() => boolean) | null = null;
 
-/** Resolves once the transport can take requests (the mock service worker has started). */
-export const whenApiReady = () => ready;
+/** Called before every request; resolves once the transport can take it (the mock service worker is serving this tab). */
+export const whenApiReady = () => ready();
 
 export const configureApiClient = (opts: {
-  ready?: Promise<void>;
+  ready?: () => Promise<void>;
   transport?: Transport;
   onUnauthorized?: () => boolean;
 }) => {
@@ -179,7 +179,7 @@ const fieldErrorText = (fe: Record<string, string> | null) => (fe ? Object.value
 
 /** Sends one request with the Trove headers and returns the envelope; throws `ApiError` on failure. */
 export const apiRequest = async <T>(method: HttpMethod, path: string, opts: RequestOptions = {}) => {
-  await ready;
+  await ready();
   setInFlight(1);
   try {
     let envelope = await send<T>(method, path, opts);

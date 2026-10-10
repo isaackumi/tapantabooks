@@ -124,3 +124,31 @@ export const startMockApi = () => {
     .then(() => undefined);
   return started;
 };
+
+let activating: Promise<void> | null = null;
+
+// The browser stops an idle service worker (a background tab throttles MSW's keep-alive), and
+// a restarted worker has forgotten which tabs it serves, so it passes their requests through
+// to the dev server, which answers 404. Re-registering before each request avoids that.
+const reactivate = () =>
+  new Promise<void>((resolve) => {
+    const container = navigator.serviceWorker;
+    const controller = container.controller;
+    if (!controller) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      container.removeEventListener("message", onMessage);
+      resolve();
+    };
+    const onMessage = (event: MessageEvent) => {
+      if (event.data?.type === "MOCKING_ENABLED") done();
+    };
+    const timer = setTimeout(done, 1000);
+    container.addEventListener("message", onMessage);
+    container.startMessages();
+    controller.postMessage("MOCK_ACTIVATE");
+  });
+
+/** Resolves when the mock worker has started and is serving this tab. */
+export const mockApiReady = () =>
+  startMockApi().then(() => (activating ??= reactivate().finally(() => (activating = null))));
