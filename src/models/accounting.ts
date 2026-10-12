@@ -235,6 +235,15 @@ export interface BankAccount extends AuditFields {
   last_reconciled_at: string | null;
   /** Inactive accounts keep their history but cannot take new payments, transfers or statements. */
   is_active: boolean;
+  /** The latest statement import, kept so it can be undone; cleared once undone. */
+  last_import?: {
+    import_id: string;
+    file_name: string | null;
+    imported_at: string;
+    lines: number;
+    previous_statement_balance: number;
+    previous_statement_date: string;
+  } | null;
 }
 
 export interface BankAccountInput {
@@ -246,7 +255,11 @@ export interface BankAccountInput {
   gl_account_id?: string | null;
 }
 
-export type StatementLineStatus = "UNMATCHED" | "SUGGESTED" | "MATCHED";
+/** `EXCLUDED`: on the statement but deliberately never booked (e.g. a bank error reversed later). */
+export type StatementLineStatus = "UNMATCHED" | "SUGGESTED" | "MATCHED" | "EXCLUDED";
+
+/** Still waiting to be matched, created or excluded. */
+export const isOpenLine = (l: { status: StatementLineStatus }) => l.status === "UNMATCHED" || l.status === "SUGGESTED";
 
 export interface BankStatementLine {
   id: string;
@@ -262,6 +275,9 @@ export interface BankStatementLine {
   reference?: string | null;
   /** Set on lines that came from POST /bank-statement-lines/import; null for feed lines. */
   import_id?: string | null;
+  exclude_reason?: string | null;
+  /** Set when a completed reconciliation signed the line off; it is locked until the reconciliation is reopened. */
+  reconciled_at?: string | null;
 }
 
 export interface TaxCode extends AuditFields {

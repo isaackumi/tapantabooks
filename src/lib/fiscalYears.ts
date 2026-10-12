@@ -8,6 +8,7 @@ import type {
   PurchaseBill,
   SalesInvoice,
 } from "@/models/accounting";
+import { isOpenLine } from "@/models/accounting";
 import { balancesByAccount, incomeStatement, isYearEndClose } from "@/lib/ledger";
 import { addDays, todayIso } from "@/utils/dates";
 import { fmtDate, round2 } from "@/utils/format";
@@ -171,7 +172,7 @@ export const yearEndPreview = (s: FiscalSource, fiscalYearId: string): YearEndPr
   if (obeBalance !== 0) warnings.push(`Opening Balance Equity is not zero at year end. Finish the opening balances so it can be cleared.`);
   const drafts = [...s.invoices, ...s.bills].filter((d) => d.state === "DRAFT" && inYear(d.issue_date)).length;
   if (drafts) warnings.push(`${drafts} draft invoice${drafts === 1 ? "" : "s"} or bill${drafts === 1 ? "" : "s"} dated in ${fy.name} will have to be dated in the next year.`);
-  const unmatched = s.statementLines.filter((l) => l.status !== "MATCHED" && inYear(l.date)).length;
+  const unmatched = s.statementLines.filter((l) => isOpenLine(l) && inYear(l.date)).length;
   if (unmatched) warnings.push(`${unmatched} bank statement line${unmatched === 1 ? "" : "s"} in ${fy.name} ${unmatched === 1 ? "is" : "are"} not reconciled.`);
 
   return {

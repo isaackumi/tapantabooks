@@ -45,6 +45,7 @@ const STATUS_COLORS: Record<string, string> = {
   MATCHED: GREEN,
   SUGGESTED: BLUE,
   UNMATCHED: ORANGE,
+  EXCLUDED: NEUTRAL,
 };
 
 const LABELS: Record<string, string> = {

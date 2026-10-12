@@ -1,5 +1,5 @@
 import type { CustomFieldEntity, JournalStatus, Payment, PeriodStatus } from "@/models/accounting";
-import { isLivePayment } from "@/models/accounting";
+import { isLivePayment, isOpenLine } from "@/models/accounting";
 import type {
   DocumentListItem,
   DocumentStatistics,
@@ -692,6 +692,16 @@ const HANDLERS: Record<string, Handler> = {
     ),
   "POST /reconciliation/complete": ({ engine, q }) =>
     fromResult(engine.completeReconciliation(need(q.get("bank_account_id"), "bank_account_id"))),
+  "POST /reconciliation/reopen": ({ engine, q, body }) =>
+    fromResult(engine.reopenReconciliation(need(q.get("bank_account_id"), "bank_account_id"), String(body?.reason ?? ""))),
+  "POST /bank-statement-lines/exclude": ({ engine, q, body }) =>
+    fromResult(engine.excludeStatementLine(need(q.get("statement_line_id"), "statement_line_id"), String(body?.reason ?? ""))),
+  "POST /bank-statement-lines/restore": ({ engine, q }) =>
+    fromResult(engine.restoreStatementLine(need(q.get("statement_line_id"), "statement_line_id"))),
+  "DELETE /bank-statement-lines/delete": ({ engine, q }) =>
+    fromResult(engine.deleteStatementLine(need(q.get("statement_line_id"), "statement_line_id"))),
+  "POST /bank-statement-lines/undo-import": ({ engine, q }) =>
+    fromResult(engine.undoStatementImport(need(q.get("bank_account_id"), "bank_account_id"))),
 
   // ---- Tax ------------------------------------------------------------------------------------------------------------
   "GET /tax-codes/list": ({ state, q }) =>
@@ -789,7 +799,7 @@ const HANDLERS: Record<string, Handler> = {
       payables_due_7_days: sum(ap.filter((r) => r.outstanding > 0 && r.doc.due_date <= addDays(asAt, 7)).map((r) => r.outstanding)),
       journals_pending_approval: state.journals.filter((j) => j.status === "PENDING_APPROVAL").length,
       draft_journals: state.journals.filter((j) => j.status === "DRAFT").length,
-      unmatched_statement_lines: state.statementLines.filter((l) => l.status !== "MATCHED").length,
+      unmatched_statement_lines: state.statementLines.filter(isOpenLine).length,
       imports_needing_review: state.importBatches.filter((b) => b.status === "NEEDS_REVIEW" || b.status === "FAILED").length,
     };
     return { data };

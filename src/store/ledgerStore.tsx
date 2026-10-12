@@ -272,6 +272,15 @@ const createActions = (
       call<StatementImportResult>("POST", "/bank-statement-lines/import", { body: input }),
     completeReconciliation: (bankId: string) =>
       call<BankAccount>("POST", "/reconciliation/complete", { query: { bank_account_id: bankId } }),
+    reopenReconciliation: (bankId: string, reason: string) =>
+      call<BankAccount>("POST", "/reconciliation/reopen", { query: { bank_account_id: bankId }, body: { reason } }),
+    excludeStatementLine: (lineId: string, reason: string) =>
+      call<BankStatementLine>("POST", "/bank-statement-lines/exclude", { query: { statement_line_id: lineId }, body: { reason } }),
+    restoreStatementLine: (lineId: string) =>
+      call<BankStatementLine>("POST", "/bank-statement-lines/restore", { query: { statement_line_id: lineId } }),
+    deleteStatementLine: (lineId: string) => call<null>("DELETE", "/bank-statement-lines/delete", { query: { statement_line_id: lineId } }),
+    undoStatementImport: (bankId: string) =>
+      call<BankAccount>("POST", "/bank-statement-lines/undo-import", { query: { bank_account_id: bankId } }),
 
     // ---- Integrations -----------------------------------------------------------------------------------
     connectSource: (id: string, input: { entities: string[]; schedule: string; connection: Record<string, string> }) =>

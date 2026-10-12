@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
-import { FiCheck, FiCheckCircle, FiLink, FiPlus, FiSearch, FiUpload, FiX, FiZap } from "react-icons/fi";
+import { FiCheck, FiCheckCircle, FiLink, FiLock, FiPlus, FiRotateCcw, FiSearch, FiSlash, FiTrash2, FiUpload, FiX, FiZap } from "react-icons/fi";
 import { Button, Callout, Field, FormError, PageHeader, Panel, compactInputClass, inputClass } from "@/components/ui";
 import { Tabs } from "@/components/tabs";
 import StatusBadge from "@/components/statusBadge";
-import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
+import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
+import ReasonModal from "@/components/accounting/reasonModal";
 import { QueryError, Skeleton } from "@/components/queryState";
 import AccountSelect from "@/components/accounting/accountSelect";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
@@ -14,6 +15,7 @@ import StatementImportModal from "@/components/banking/statementImportModal";
 import { useLedger } from "@/store/ledgerStore";
 import { useReport } from "@/services/useApiQuery";
 import type { BankAccountBalances, BankReconciliation, ReconciliationCandidate, ReconciliationLine } from "@/models/banking";
+import { isOpenLine } from "@/models/accounting";
 import { useQueryParam } from "@/utils/useQueryParam";
 import { usePending } from "@/services/usePending";
 import { fmtDate, fmtDateTime, fmtMoney } from "@/utils/format";
@@ -30,6 +32,9 @@ export default function ReconciliationPage() {
   const [matching, setMatching] = useState<ReconciliationLine | null>(null);
   const [creating, setCreating] = useState<ReconciliationLine | null>(null);
   const [importing, setImporting] = useState(false);
+  const [excluding, setExcluding] = useState<ReconciliationLine | null>(null);
+  const [deleting, setDeleting] = useState<ReconciliationLine | null>(null);
+  const [reopening, setReopening] = useState(false);
   useQueryParam("account", setBankId);
 
   const firstWithFeed = balances.data?.items.find((i) => i.statement_lines > 0)?.bank_account_id;
@@ -41,9 +46,10 @@ export default function ReconciliationPage() {
 
   const lines = rec?.lines ?? [];
   const matchedCount = rec?.counts.MATCHED ?? 0;
-  const review = lines.filter((l) => l.status !== "MATCHED");
-  const shown = tab === "REVIEW" ? review : lines.filter((l) => l.status === "MATCHED");
-  const progress = lines.length ? Math.round((matchedCount / lines.length) * 100) : 100;
+  const excludedCount = rec?.counts.EXCLUDED ?? 0;
+  const review = lines.filter(isOpenLine);
+  const shown = tab === "REVIEW" ? review : lines.filter((l) => l.status === tab);
+  const progress = lines.length ? Math.round(((matchedCount + excludedCount) / lines.length) * 100) : 100;
   const inTransit = rec?.candidates.filter((c) => c.in_transit) ?? [];
 
   const { pending, track, anyPending } = usePending();
@@ -165,23 +171,47 @@ export default function ReconciliationPage() {
                 </dl>
                 <div>
                   <div className="mb-2 flex justify-between text-sm">
-                    <span className="text-neutral-500 dark:text-neutral-400">Lines matched</span>
+                    <span className="text-neutral-500 dark:text-neutral-400">Lines resolved</span>
                     <span className="font-medium">
-                      {matchedCount} of {lines.length}
+                      {matchedCount + excludedCount} of {lines.length}
                     </span>
                   </div>
                   <div className="h-3 rounded-full bg-neutral-100 dark:bg-neutral-700">
                     <div className="h-3 rounded-full bg-brand-600 transition-all" style={{ width: `${progress}%` }} />
                   </div>
-                  <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
-                    {(["MATCHED", "SUGGESTED", "UNMATCHED"] as const).map((s) => (
+                  <div className="mt-4 grid grid-cols-2 gap-2 text-center text-xs sm:grid-cols-4">
+                    {(["MATCHED", "SUGGESTED", "UNMATCHED", "EXCLUDED"] as const).map((s) => (
                       <div key={s} className="rounded-lg bg-neutral-50 p-2 dark:bg-neutral-900/40">
                         <p className="text-lg font-bold tabular-nums">{rec.counts[s]}</p>
                         <StatusBadge status={s} />
                       </div>
                     ))}
                   </div>
-                  <p className="mt-4 text-xs text-neutral-500 dark:text-neutral-400">Last completed {fmtDateTime(rec.last_reconciled_at)}.</p>
+                  <div className="mt-4 flex items-center justify-between gap-2 text-xs text-neutral-500 dark:text-neutral-400">
+                    <span>Last completed {fmtDateTime(rec.last_reconciled_at)}.</span>
+                    {rec.last_reconciled_at && (
+                      <Button size="sm" variant="ghost" icon={FiRotateCcw} onClick={() => setReopening(true)}>
+                        Reopen
+                      </Button>
+                    )}
+                  </div>
+                  {bank.last_import && (
+                    <div className="mt-2 flex items-center justify-between gap-2 text-xs text-neutral-500 dark:text-neutral-400">
+                      <span>
+                        Latest import: {bank.last_import.file_name ?? "statement"} · {bank.last_import.lines} line{bank.last_import.lines === 1 ? "" : "s"} ·{" "}
+                        {fmtDateTime(bank.last_import.imported_at)}
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        icon={FiRotateCcw}
+                        disabled={anyPending}
+                        onClick={() => track("undo", async () => run(await actions.undoStatementImport(bank.id)))}
+                      >
+                        {pending("undo") ? "Undoing…" : "Undo import"}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </div>
             </Panel>
@@ -213,6 +243,7 @@ export default function ReconciliationPage() {
             tabs={[
               { id: "REVIEW", label: "To review", count: review.length },
               { id: "MATCHED", label: "Matched", count: matchedCount },
+              { id: "EXCLUDED", label: "Excluded", count: excludedCount },
             ]}
             value={tab}
             onChange={setTab}
@@ -241,7 +272,11 @@ export default function ReconciliationPage() {
                 {shown.length === 0 && (
                   <tr>
                     <td colSpan={6} className="px-4 py-10 text-center text-neutral-500">
-                      {tab === "REVIEW" ? "Every line is matched. Complete the reconciliation to sign it off." : "Nothing matched yet."}
+                      {tab === "REVIEW"
+                        ? "Every line is matched or excluded. Complete the reconciliation to sign it off."
+                        : tab === "EXCLUDED"
+                          ? "No lines excluded."
+                          : "Nothing matched yet."}
                     </td>
                   </tr>
                 )}
@@ -252,7 +287,12 @@ export default function ReconciliationPage() {
                     <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums text-emerald-600 dark:text-emerald-400">{l.amount > 0 ? money(l.amount) : ""}</td>
                     <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums">{l.amount < 0 ? money(-l.amount) : ""}</td>
                     <td className="px-4 py-3">
-                      {l.matched_journal_id ? (
+                      {l.status === "EXCLUDED" ? (
+                        <span className="text-xs text-neutral-500">
+                          <StatusBadge status="EXCLUDED" label="Excluded" />
+                          <span className="mt-1 block max-w-xs truncate">{l.exclude_reason}</span>
+                        </span>
+                      ) : l.matched_journal_id ? (
                         <button onClick={() => openJournal(l.matched_journal_id!)} className="text-left">
                           <span className="font-mono text-xs text-brand-700 dark:text-brand-300">{l.matched_journal_number}</span>
                           <span className="block max-w-xs truncate text-xs text-neutral-500">{l.matched_journal_memo}</span>
@@ -270,7 +310,21 @@ export default function ReconciliationPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex justify-end gap-1.5">
-                        {l.status === "MATCHED" ? (
+                        {l.reconciled_at ? (
+                          <span className="inline-flex items-center gap-1 text-xs text-neutral-500" title={`Signed off ${fmtDateTime(l.reconciled_at)}`}>
+                            <FiLock className="h-3 w-3" /> Reconciled
+                          </span>
+                        ) : l.status === "EXCLUDED" ? (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            icon={FiRotateCcw}
+                            disabled={lineBusy(l.id)}
+                            onClick={() => track(l.id, async () => run(await actions.restoreStatementLine(l.id)))}
+                          >
+                            Restore
+                          </Button>
+                        ) : l.status === "MATCHED" ? (
                           <Button
                             size="sm"
                             variant="ghost"
@@ -298,6 +352,12 @@ export default function ReconciliationPage() {
                             <Button size="sm" variant="secondary" icon={FiPlus} onClick={() => setCreating(l)}>
                               Create
                             </Button>
+                            <Button size="sm" variant="ghost" icon={FiSlash} title="Exclude from the reconciliation" onClick={() => setExcluding(l)}>
+                              Exclude
+                            </Button>
+                            {l.import_id && (
+                              <Button size="sm" variant="ghost" icon={FiTrash2} title="Delete this imported line" aria-label="Delete line" onClick={() => setDeleting(l)} />
+                            )}
                           </>
                         )}
                       </div>
@@ -321,6 +381,50 @@ export default function ReconciliationPage() {
       />
       <CreateEntryModal line={creating} currency={rec?.currency} onClose={() => setCreating(null)} />
       {bank && <StatementImportModal bankId={bank.id} open={importing} onClose={() => setImporting(false)} />}
+      <ReasonModal
+        open={!!excluding}
+        onClose={() => setExcluding(null)}
+        title="Exclude statement line"
+        description={
+          excluding
+            ? `${excluding.description} · ${fmtMoney(excluding.amount, rec?.currency)}. It stays on the statement and still explains the difference, but needs no ledger entry.`
+            : ""
+        }
+        confirmLabel="Exclude line"
+        placeholder="e.g. Bank error, reversed on the next statement"
+        onConfirm={(reason) => actions.excludeStatementLine(excluding!.id, reason)}
+      />
+      <Modal
+        open={!!deleting}
+        onClose={() => setDeleting(null)}
+        size="sm"
+        title="Delete imported line?"
+        description={deleting ? `${deleting.description} · ${fmtMoney(deleting.amount, rec?.currency)} on ${fmtDate(deleting.date)}` : ""}
+        buttons={[
+          { label: "Cancel", onClick: () => setDeleting(null), className: BTN_SECONDARY },
+          {
+            label: "Delete line",
+            className: BTN_DANGER,
+            disabled: anyPending,
+            onClick: () =>
+              track("delete", async () => {
+                if (deleting && run(await actions.deleteStatementLine(deleting.id))) setDeleting(null);
+              }),
+          },
+        ]}
+      />
+      {bank && (
+        <ReasonModal
+          open={reopening}
+          onClose={() => setReopening(false)}
+          danger
+          title={`Reopen ${bank.name} reconciliation`}
+          description="Unlocks the lines signed off by the latest completed reconciliation so matches can be changed. Complete it again afterwards."
+          confirmLabel="Reopen"
+          placeholder="e.g. Receipt matched to the wrong invoice payment"
+          onConfirm={(reason) => actions.reopenReconciliation(bank.id, reason)}
+        />
+      )}
     </div>
   );
 }

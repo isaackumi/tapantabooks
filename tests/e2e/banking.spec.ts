@@ -13,6 +13,15 @@ test("reconciles the GCB statement line by line and signs it off", async ({ sign
 
   // What is left either has a ledger entry of the exact amount to find, or needs an entry posting.
   const open = page.locator("[data-tour=rec-lines] tbody tr").filter({ has: page.getByRole("button", { name: "Create" }) });
+  const before = await open.count();
+  await open.first().getByRole("button", { name: "Exclude" }).click();
+  const exclude = dialog(page, "Exclude statement line");
+  await exclude.getByRole("textbox").fill("Bank error, reversed on the next statement");
+  await exclude.getByRole("button", { name: "Exclude line" }).click();
+  await expectNoDialogs(page);
+  await expect(open).toHaveCount(before - 1);
+  await expect(page.getByRole("tab", { name: /Excluded/ })).toContainText("1");
+
   for (let remaining = await open.count(); remaining > 0; remaining = await open.count()) {
     const line = open.first();
     const description = (await line.locator("td").nth(1).textContent())!;
@@ -35,10 +44,21 @@ test("reconciles the GCB statement line by line and signs it off", async ({ sign
     await expect(open).toHaveCount(remaining - 1);
   }
 
-  await expect(page.getByText("Every line is matched. Complete the reconciliation to sign it off.")).toBeVisible();
+  await expect(page.getByText("Every line is matched or excluded. Complete the reconciliation to sign it off.")).toBeVisible();
   await expect(difference).toContainText("0.00");
   await complete.click();
   await expect(page.getByText("GCB Operating Account reconciled")).toBeVisible();
+
+  await page.getByRole("tab", { name: /Matched/ }).click();
+  const lines = page.locator("[data-tour=rec-lines] tbody tr");
+  await expect(lines.first().getByText("Reconciled")).toBeVisible();
+  await expect(lines.getByRole("button", { name: "Unmatch" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Reopen" }).click();
+  const reopen = dialog(page, "Reopen GCB Operating Account reconciliation");
+  await reopen.getByRole("textbox").fill("Receipt matched to the wrong line");
+  await reopen.getByRole("button", { name: "Reopen" }).click();
+  await expect(page.getByText("GCB Operating Account reconciliation reopened")).toBeVisible();
+  await expect(lines.first().getByRole("button", { name: "Unmatch" })).toBeVisible();
 });
 
 test("adds a bank account, renames it and deactivates it", async ({ signedIn: page }) => {

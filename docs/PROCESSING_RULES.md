@@ -1061,7 +1061,7 @@ Query `as_at` (default today). One item per bank account, from ledger-affecting 
 - `ledger_balance_base`: debits − credits on the GL account (base, at booked rates).
 - `statement_balance`, `statement_date`: copied from the bank account.
 - `statement_difference` = round2(`statement_balance` − `ledger_balance`). It compares the latest statement with the ledger at `as_at`, so payments after the statement date show here until the next statement arrives.
-- `statement_lines`, `unmatched_lines`: the account's statement lines, and those not `MATCHED`.
+- `statement_lines`, `unmatched_lines`: the account's statement lines, and those still open (`UNMATCHED` or `SUGGESTED`; `EXCLUDED` lines are resolved).
 
 Totals: `total_base` = sum of `ledger_balance_base`; `unmatched_lines` = sum over accounts; `out_of_agreement` = accounts with a non-zero `statement_difference`.
 
@@ -1119,7 +1119,7 @@ Response: 201 with the `JournalEntry`. Detail: `Transfer posted as {journal numb
 
 ### 11.3 Statement lines
 
-`BankStatementLine.amount` is positive for money in and negative for money out. Status is `UNMATCHED`, `SUGGESTED` (a suggestion with `suggested_journal_id`) or `MATCHED` (`matched_journal_id`). Lines come from a bank feed or from a statement file (section 11.3a). Matching compares the statement amount with the journal's base-currency movement on the bank GL; for foreign bank accounts this mixes currencies (open question).
+`BankStatementLine.amount` is positive for money in and negative for money out. Status is `UNMATCHED`, `SUGGESTED` (a suggestion with `suggested_journal_id`), `MATCHED` (`matched_journal_id`) or `EXCLUDED` (set aside with `exclude_reason`, section 11.8). A line is *open* while `UNMATCHED` or `SUGGESTED`. `reconciled_at` is set when a completed reconciliation signs the line off (section 11.7). Lines come from a bank feed or from a statement file (section 11.3a). Matching compares the statement amount with the journal's base-currency movement on the bank GL; for foreign bank accounts this mixes currencies (open question).
 
 ### 11.3a `POST /bank-statement-lines/import`
 
@@ -1138,7 +1138,7 @@ Processing:
 - **Duplicates.** A line is the same transaction as a held one when date, amount (2 dp) and description (trimmed, whitespace collapsed, case-insensitive) agree. Counts matter: if the account holds the key twice and the file has it three times, one line is new. This lets overlapping exports be re-imported safely while keeping genuine repeats (two identical charges on one day). Reference is stored but not part of the key, because feed lines have none.
 - **Suggestions.** For each new line, in file order: candidate journals affect the ledger, touch the bank's GL account, have a net movement on it equal to the line amount (within 0.005), are within 7 days of the line date, and are not already matched or suggested on any line (including lines earlier in this import). The closest date wins, then the lower journal number. A hit sets `SUGGESTED`; otherwise `UNMATCHED`. Nothing is matched automatically.
 - New lines get `import_id` (one id per call) and `reference` when given.
-- The bank account's `statement_balance` becomes `closing_balance` and `statement_date` becomes `statement_date`.
+- The bank account's `statement_balance` becomes `closing_balance` and `statement_date` becomes `statement_date`. The previous values are kept in `last_import { import_id, file_name, imported_at, lines, previous_statement_balance, previous_statement_date }` so the import can be undone (section 11.9).
 - `expected_closing_balance` = previous `statement_balance` + new lines dated after the previous `statement_date`; `balance_difference` = `closing_balance` − expected. A difference does not block the import (the reconciliation summary shows it as unexplained), but usually means the file is missing lines.
 - Audit `BANK_STATEMENT.IMPORTED` on the bank account.
 
@@ -1160,6 +1160,7 @@ Validation, in order:
 - `Ledger entry not found.`
 - `Amounts differ: statement {line amount}, ledger {net}.` where net = round2(sum of debit − credit on the line's bank GL in that journal), when the two differ by more than 0.005.
 - `{journal number} is already matched to another statement line.`
+- `This line is excluded. Restore it first.` · `This line was reconciled on {date}. Reopen the reconciliation first.`
 
 The mock does not check the journal's status or whether the line is already matched (a match simply replaces the previous one).
 
@@ -1171,9 +1172,9 @@ Response: the `BankStatementLine`. Detail: `Matched to {journal number}`.
 
 Query `statement_line_id`.
 
-Validation: `Line is not matched.` when the line does not exist or is not `MATCHED`.
+Validation: `Line is not matched.` when the line does not exist or is not `MATCHED`; `This line was reconciled on {date}. Reopen the reconciliation first.` when `reconciled_at` is set.
 
-Side effects: `status: UNMATCHED`, `matched_journal_id` cleared. No audit is recorded (open question).
+Side effects: `status: UNMATCHED`, `matched_journal_id` cleared. Audit `RECON.UNMATCHED`, summary `Match to {journal number} removed.`
 
 Response: the `BankStatementLine`. Detail: `Match removed`.
 
@@ -1205,11 +1206,34 @@ Response: 201 with the new `JournalEntry`. Detail: `{journal number} posted and 
 
 Query `bank_account_id`.
 
-Validation: `Bank account not found.`; `{n} statement line(s) are not matched yet.` when any of the account's statement lines is not `MATCHED` (`SUGGESTED` counts as not matched).
+Validation: `Bank account not found.`; `{n} statement line(s) are not matched yet.` when any of the account's lines is open (`SUGGESTED` counts as open; `EXCLUDED` does not).
 
-Side effects: `last_reconciled_at` = now. The mock does not compare the statement balance with the ledger balance (open question). Audit `RECON.COMPLETED` (entity type `Bank account`), summary `Reconciled to statement dated {statement_date}.`
+Side effects: `last_reconciled_at` = now; every line of the account without `reconciled_at` gets the same timestamp and is locked (no unmatch, match, restore or delete) until reopened; `last_import` is cleared, so a signed-off import cannot be undone. The mock does not compare the statement balance with the ledger balance (open question). Audit `RECON.COMPLETED` (entity type `Bank account`), summary `Reconciled to statement dated {statement_date}.`
 
 Response: the `BankAccount`. Detail: `{bank name} reconciled`.
+
+### 11.8 Excluding, restoring and deleting statement lines
+
+**`POST /bank-statement-lines/exclude`**, query `statement_line_id`, body `{ reason }`. For lines the business will never book, such as a bank error reversed on a later statement. `Statement line not found.`; `Already excluded.`; `Unmatch the line before excluding it.` for a matched line; `Give a reason for excluding the line.` Sets `status: EXCLUDED`, `exclude_reason`, clears `suggested_journal_id`. Excluded lines stay in `statement_only` (they still explain the statement balance) but no longer block completion. Audit `RECON.LINE_EXCLUDED`. Detail `Line excluded`.
+
+**`POST /bank-statement-lines/restore`**, query `statement_line_id`. `Line is not excluded.`; the reconciled-line lock applies. Back to `UNMATCHED`, reason cleared. Audit `RECON.LINE_RESTORED`. Detail `Line restored`.
+
+**`DELETE /bank-statement-lines/delete`**, query `statement_line_id`. Only lines from a statement file: `Lines from the bank feed cannot be deleted. Exclude it instead.`; `Unmatch the line before deleting it.` for matched or reconciled lines. The line is removed; the statement balance is not changed (re-import or undo the import if the closing balance was wrong). Audit `BANK_STATEMENT.LINE_DELETED`. Response `data: null`, detail `Line deleted`.
+
+### 11.9 `POST /bank-statement-lines/undo-import`
+
+Query `bank_account_id`. Only the account's latest import can be undone, and only before the next reconciliation is completed.
+
+- `{bank} has no statement import to undo. Only the latest import can be undone.` when `last_import` is null.
+- `{n} line(s) from this import are matched. Unmatch them first.`
+
+Removes every line with that `import_id`, restores `statement_balance` and `statement_date` from `last_import`, and clears `last_import`. Audit `BANK_STATEMENT.IMPORT_UNDONE`. Response: the `BankAccount`. Detail `Import undone · {n} lines removed`.
+
+### 11.10 `POST /reconciliation/reopen`
+
+Query `bank_account_id`, body `{ reason }`. `{bank} has not been reconciled yet.`; `Give a reason for reopening.`
+
+Clears `reconciled_at` on the lines signed off at the latest `last_reconciled_at` and sets `last_reconciled_at` back to the previous sign-off (latest remaining `reconciled_at`, or null). Nothing posts. Audit `RECON.REOPENED`, summary names the sign-off time, the number of lines unlocked and the reason. Response: the `BankAccount`. Detail `{bank} reconciliation reopened`.
 
 ---
 

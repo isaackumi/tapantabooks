@@ -1,4 +1,4 @@
-import type { BankAccount, JournalEntry, JournalLine, StatementLineStatus } from "@/models/accounting";
+import { isOpenLine, type BankAccount, type JournalEntry, type JournalLine, type StatementLineStatus } from "@/models/accounting";
 import type {
   BankAccountBalances,
   BankActivityItem,
@@ -50,7 +50,7 @@ export const bankBalances = (s: LedgerState, asAt = todayIso()): BankAccountBala
       statement_date: b.statement_date,
       statement_difference: round2(b.statement_balance - ledger.own),
       statement_lines: lines.length,
-      unmatched_lines: lines.filter((l) => l.status !== "MATCHED").length,
+      unmatched_lines: lines.filter(isOpenLine).length,
     };
   });
   return {
@@ -140,6 +140,7 @@ export const reconciliationView = (s: LedgerState, bankId: string): BankReconcil
       MATCHED: lines.filter((l) => l.status === "MATCHED").length,
       SUGGESTED: lines.filter((l) => l.status === "SUGGESTED").length,
       UNMATCHED: lines.filter((l) => l.status === "UNMATCHED").length,
+      EXCLUDED: lines.filter((l) => l.status === "EXCLUDED").length,
     },
     lines: lines.map((l) => ({
       ...l,

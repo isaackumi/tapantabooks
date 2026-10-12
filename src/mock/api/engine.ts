@@ -40,7 +40,7 @@ import type {
   SourceRef,
   Supplier,
 } from "@/models/accounting";
-import { isLivePayment } from "@/models/accounting";
+import { isLivePayment, isOpenLine } from "@/models/accounting";
 import { buildSeed, CURRENT_USER, USERS, ACC, TAX, openingEquityAccount, stamp, type SeedData } from "@/mock/seed";
 import { affectsLedger, isBalanced, lineTotals } from "@/lib/ledger";
 import { documentTotals } from "@/lib/documents";
@@ -58,7 +58,7 @@ import {
   toBase,
 } from "@/lib/fx";
 import { customFieldUsage, normaliseCustomValues, recordsForEntity, validateCustomValues } from "@/lib/customFields";
-import { BASE_CURRENCY, CURRENCY_SYMBOLS, fmtCurrency, fmtDate, fmtMoney, fmtRate, round2 } from "@/utils/format";
+import { BASE_CURRENCY, CURRENCY_SYMBOLS, fmtCurrency, fmtDate, fmtDateTime, fmtMoney, fmtRate, round2 } from "@/utils/format";
 import { addDays, daysBetween, isIsoDate, nowIso, todayIso } from "@/utils/dates";
 
 /** `users` stands in for the tenant's cp_users rows; `currentUserId` is the JWT `user_id` of the request being served. */
@@ -1861,7 +1861,7 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
             if (round2(own) !== 0 || round2(bal.base) !== 0) {
               return fail(`${bank.name} still holds ${fmtMoney(own, bank.currency)}. Transfer it out before deactivating.`);
             }
-            const open = s.statementLines.filter((l) => l.bank_account_id === bank.id && l.status !== "MATCHED").length;
+            const open = s.statementLines.filter((l) => l.bank_account_id === bank.id && isOpenLine(l)).length;
             if (open) return fail(`${bank.name} has ${open} unmatched statement line${open === 1 ? "" : "s"}. Reconcile them first.`);
           }
           const changes: NonNullable<AuditEvent["changes"]> = [];
@@ -1949,6 +1949,8 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
         commit((s) => {
           const line = s.statementLines.find((l) => l.id === lineId);
           if (!line) return fail("Statement line not found.");
+          if (line.status === "EXCLUDED") return fail("This line is excluded. Restore it first.");
+          if (line.reconciled_at) return fail(`This line was reconciled on ${fmtDate(line.reconciled_at.slice(0, 10))}. Reopen the reconciliation first.`);
           const j = s.journals.find((x) => x.id === journalId);
           if (!j) return fail("Ledger entry not found.");
           const bank = s.bankAccounts.find((b) => b.id === line.bank_account_id)!;
@@ -1978,9 +1980,96 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
         commit((s) => {
           const line = s.statementLines.find((l) => l.id === lineId);
           if (!line || line.status !== "MATCHED") return fail("Line is not matched.");
+          if (line.reconciled_at) return fail(`This line was reconciled on ${fmtDate(line.reconciled_at.slice(0, 10))}. Reopen the reconciliation first.`);
+          const journal = s.journals.find((j) => j.id === line.matched_journal_id);
           line.status = "UNMATCHED";
           line.matched_journal_id = null;
+          audit(s, {
+            action: "RECON.UNMATCHED",
+            entity_type: "Statement line",
+            entity_id: line.id,
+            entity_label: line.description,
+            summary: `Match to ${journal?.number ?? "ledger entry"} removed.`,
+          });
           return ok(line, "Match removed");
+        }),
+
+      excludeStatementLine: (lineId: string, reason: string) =>
+        commit((s) => {
+          const line = s.statementLines.find((l) => l.id === lineId);
+          if (!line) return fail("Statement line not found.");
+          if (!isOpenLine(line)) return fail(line.status === "EXCLUDED" ? "Already excluded." : "Unmatch the line before excluding it.");
+          if (!reason.trim()) return fail("Give a reason for excluding the line.");
+          line.status = "EXCLUDED";
+          line.suggested_journal_id = null;
+          line.exclude_reason = reason.trim();
+          audit(s, {
+            action: "RECON.LINE_EXCLUDED",
+            entity_type: "Statement line",
+            entity_id: line.id,
+            entity_label: line.description,
+            summary: `Excluded: ${reason.trim()}`,
+          });
+          return ok(line, "Line excluded");
+        }),
+
+      restoreStatementLine: (lineId: string) =>
+        commit((s) => {
+          const line = s.statementLines.find((l) => l.id === lineId);
+          if (!line) return fail("Statement line not found.");
+          if (line.status !== "EXCLUDED") return fail("Line is not excluded.");
+          if (line.reconciled_at) return fail(`This line was reconciled on ${fmtDate(line.reconciled_at.slice(0, 10))}. Reopen the reconciliation first.`);
+          line.status = "UNMATCHED";
+          line.exclude_reason = null;
+          audit(s, {
+            action: "RECON.LINE_RESTORED",
+            entity_type: "Statement line",
+            entity_id: line.id,
+            entity_label: line.description,
+            summary: "Back to review.",
+          });
+          return ok(line, "Line restored");
+        }),
+
+      deleteStatementLine: (lineId: string) =>
+        commit((s) => {
+          const line = s.statementLines.find((l) => l.id === lineId);
+          if (!line) return fail("Statement line not found.");
+          if (!line.import_id) return fail("Lines from the bank feed cannot be deleted. Exclude it instead.");
+          if (line.status === "MATCHED" || line.reconciled_at) return fail("Unmatch the line before deleting it.");
+          s.statementLines = s.statementLines.filter((l) => l.id !== lineId);
+          audit(s, {
+            action: "BANK_STATEMENT.LINE_DELETED",
+            entity_type: "Statement line",
+            entity_id: line.id,
+            entity_label: line.description,
+            summary: `Deleted imported line ${fmtDate(line.date)} · ${fmtMoney(line.amount, s.bankAccounts.find((b) => b.id === line.bank_account_id)?.currency)}.`,
+          });
+          return ok(undefined, "Line deleted");
+        }),
+
+      undoStatementImport: (bankId: string) =>
+        commit((s) => {
+          const bank = s.bankAccounts.find((b) => b.id === bankId);
+          if (!bank) return fail("Bank account not found.");
+          const last = bank.last_import;
+          if (!last) return fail(`${bank.name} has no statement import to undo. Only the latest import can be undone.`);
+          const lines = s.statementLines.filter((l) => l.import_id === last.import_id);
+          const matched = lines.filter((l) => l.status === "MATCHED" || l.reconciled_at).length;
+          if (matched) return fail(`${matched} line${matched === 1 ? " from this import is" : "s from this import are"} matched. Unmatch ${matched === 1 ? "it" : "them"} first.`);
+          s.statementLines = s.statementLines.filter((l) => l.import_id !== last.import_id);
+          bank.statement_balance = last.previous_statement_balance;
+          bank.statement_date = last.previous_statement_date;
+          bank.last_import = null;
+          touch(s, bank);
+          audit(s, {
+            action: "BANK_STATEMENT.IMPORT_UNDONE",
+            entity_type: "Bank account",
+            entity_id: bank.id,
+            entity_label: bank.name,
+            summary: `${last.file_name ?? "Statement"} undone: ${lines.length} line(s) removed, statement back to ${fmtDate(last.previous_statement_date)}.`,
+          });
+          return ok(bank, `Import undone · ${lines.length} line${lines.length === 1 ? "" : "s"} removed`);
         }),
 
       createEntryFromStatementLine: (lineId: string, accountId: string, memo: string) =>
@@ -2094,6 +2183,14 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
             bank.statement_balance + added.filter((l) => l.date > bank.statement_date).reduce((t, l) => t + l.amount, 0),
           );
           const closing = round2(input.closing_balance);
+          bank.last_import = {
+            import_id: importId,
+            file_name: input.file_name?.trim() || null,
+            imported_at: nowIso(),
+            lines: added.length,
+            previous_statement_balance: bank.statement_balance,
+            previous_statement_date: bank.statement_date,
+          };
           s.statementLines.push(...added);
           bank.statement_balance = closing;
           bank.statement_date = statementDate;
@@ -2127,9 +2224,12 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
         commit((s) => {
           const bank = s.bankAccounts.find((b) => b.id === bankId);
           if (!bank) return fail("Bank account not found.");
-          const open = s.statementLines.filter((l) => l.bank_account_id === bankId && l.status !== "MATCHED");
+          const open = s.statementLines.filter((l) => l.bank_account_id === bankId && isOpenLine(l));
           if (open.length) return fail(`${open.length} statement line(s) are not matched yet.`);
-          bank.last_reconciled_at = nowIso();
+          const at = nowIso();
+          for (const l of s.statementLines) if (l.bank_account_id === bankId && !l.reconciled_at) l.reconciled_at = at;
+          bank.last_reconciled_at = at;
+          bank.last_import = null;
           touch(s, bank);
           audit(s, {
             action: "RECON.COMPLETED",
@@ -2139,6 +2239,32 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
             summary: `Reconciled to statement dated ${bank.statement_date}.`,
           });
           return ok(bank, `${bank.name} reconciled`);
+        }),
+
+      reopenReconciliation: (bankId: string, reason: string) =>
+        commit((s) => {
+          const bank = s.bankAccounts.find((b) => b.id === bankId);
+          if (!bank) return fail("Bank account not found.");
+          const at = bank.last_reconciled_at;
+          if (!at) return fail(`${bank.name} has not been reconciled yet.`);
+          if (!reason.trim()) return fail("Give a reason for reopening.");
+          const lines = s.statementLines.filter((l) => l.bank_account_id === bankId && l.reconciled_at === at);
+          for (const l of lines) l.reconciled_at = null;
+          const previous = s.statementLines
+            .filter((l) => l.bank_account_id === bankId && l.reconciled_at)
+            .map((l) => l.reconciled_at!)
+            .sort()
+            .at(-1);
+          bank.last_reconciled_at = previous ?? null;
+          touch(s, bank);
+          audit(s, {
+            action: "RECON.REOPENED",
+            entity_type: "Bank account",
+            entity_id: bank.id,
+            entity_label: bank.name,
+            summary: `Reconciliation of ${fmtDateTime(at)} reopened (${lines.length} line(s) unlocked): ${reason.trim()}`,
+          });
+          return ok(bank, `${bank.name} reconciliation reopened`);
         }),
 
       // ---- Integrations -----------------------------------------------------
