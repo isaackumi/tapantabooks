@@ -31,6 +31,8 @@ import type {
   BankStatementLine,
   TaxCode,
   TaxCodeInput,
+  AccountingRuleInput,
+  DataSourceInput,
   DataSource,
   ImportRecord,
   FiscalPeriod,
@@ -292,6 +294,13 @@ const createActions = (
         ? call<FieldMapping>("PUT", "/field-mappings/update", { query: { field_mapping_id: id }, body: input })
         : call<FieldMapping>("POST", "/field-mappings/add", { body: input }),
     removeMapping: (id: string) => call<FieldMapping>("DELETE", "/field-mappings/delete", { query: { field_mapping_id: id } }),
+    saveRule: (input: AccountingRuleInput, id?: string) =>
+      id
+        ? call<AccountingRule>("PUT", "/accounting-rules/update", { query: { rule_id: id }, body: input })
+        : call<AccountingRule>("POST", "/accounting-rules/add", { body: input }),
+    deleteRule: (id: string) => call<null>("DELETE", "/accounting-rules/delete", { query: { rule_id: id } }),
+    addSource: (input: DataSourceInput) => call<DataSource>("POST", "/data-sources/add", { body: input }),
+    removeSource: (id: string) => call<null>("DELETE", "/data-sources/delete", { query: { data_source_id: id } }),
     toggleRule: (id: string) => {
       const rule = current().rules.find((r) => r.id === id);
       return call<AccountingRule>("PUT", "/accounting-rules/update", { query: { rule_id: id }, body: { is_active: !rule?.is_active } });

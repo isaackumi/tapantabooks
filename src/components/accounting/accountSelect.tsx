@@ -13,6 +13,7 @@ interface AccountSelectProps {
   types?: AccountType[];
   placeholder?: string;
   id?: string;
+  ariaLabel?: string;
   /** Restrict to accounts matching a predicate (e.g. bank accounts only). */
   filter?: (a: { is_bank: boolean; subtype: string }) => boolean;
 }
@@ -26,6 +27,7 @@ const AccountSelect = ({
   types,
   placeholder = "Select account",
   id,
+  ariaLabel,
   filter,
 }: AccountSelectProps) => {
   const { state } = useLedger();
@@ -41,7 +43,7 @@ const AccountSelect = ({
   }, [state.accounts, includeControl, types, filter]);
 
   return (
-    <select id={id} value={value} onChange={(e) => onChange(e.target.value)} className={className}>
+    <select id={id} aria-label={ariaLabel} value={value} onChange={(e) => onChange(e.target.value)} className={className}>
       <option value="">{placeholder}</option>
       {groups.map((g) => (
         <optgroup key={g.type} label={ACCOUNT_TYPE_LABEL[g.type]}>

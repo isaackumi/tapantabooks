@@ -728,6 +728,8 @@ const HANDLERS: Record<string, Handler> = {
   "POST /data-sources/disconnect": ({ engine, q }) =>
     fromResult(engine.disconnectSource(need(q.get("data_source_id"), "data_source_id"))),
   "POST /data-sources/sync": ({ engine, q }) => fromResult(engine.syncSource(need(q.get("data_source_id"), "data_source_id"))),
+  "POST /data-sources/add": ({ engine, body }) => fromResult(engine.addSource(body), 201),
+  "DELETE /data-sources/delete": ({ engine, q }) => fromResult(engine.removeSource(need(q.get("data_source_id"), "data_source_id"))),
   "GET /field-mappings/list": ({ state, q }) =>
     listResult(state.fieldMappings, q, {
       search: ["source_field", "target_field"],
@@ -740,11 +742,19 @@ const HANDLERS: Record<string, Handler> = {
     fromResult(engine.removeMapping(need(q.get("field_mapping_id"), "field_mapping_id"))),
   "GET /accounting-rules/list": ({ state, q }) =>
     listResult(state.rules, q, { search: ["name", "event"], filters: { source_id: "source_id", is_active: "is_active" } }),
+  "POST /accounting-rules/add": ({ engine, body }) => fromResult(engine.saveRule(body), 201),
   "PUT /accounting-rules/update": ({ engine, state, q, body }) => {
     const rule = found(state.rules.find((r) => r.id === need(q.get("rule_id"), "rule_id")), "Rule");
-    if (body.is_active === undefined || flag(body.is_active) === rule.is_active) return { data: rule };
+    const { is_active, ...rest } = body ?? {};
+    if (Object.keys(rest).length) {
+      const saved = engine.saveRule({ name: rule.name, event: rule.event, source_id: rule.source_id, description: rule.description, lines: rule.lines, sample: rule.sample, ...rest }, rule.id);
+      if (!saved.ok || is_active === undefined || flag(is_active) === saved.data.is_active) return fromResult(saved);
+    } else if (is_active === undefined || flag(is_active) === rule.is_active) {
+      return { data: rule };
+    }
     return fromResult(engine.toggleRule(rule.id));
   },
+  "DELETE /accounting-rules/delete": ({ engine, q }) => fromResult(engine.deleteRule(need(q.get("rule_id"), "rule_id"))),
   "GET /imports/list": ({ state, q }) => {
     const items = importItems(state);
     return listResult(flag(q.get("attention")) ? items.filter((b) => needsAttention(b.status)) : items, q, {

@@ -7,6 +7,11 @@ import type {
   BankAccountInput,
   TaxCode,
   TaxCodeInput,
+  AccountingRule,
+  AccountingRuleInput,
+  DataSource,
+  DataSourceInput,
+  RuleAmountBasis,
   AccountType,
   AuditEvent,
   AuditFields,
@@ -356,6 +361,8 @@ const checkTaxAccounts = (s: LedgerState, kind: TaxCodeInput["kind"], outputId: 
   if (inputId && kind === "OUTPUT_INPUT") return usable(inputId, "ASSET", "input tax");
   return null;
 };
+
+const RULE_BASES: RuleAmountBasis[] = ["TOTAL", "SUBTOTAL", "TAX", "COST", "PRINCIPAL", "INTEREST", "FEES"];
 
 const checkCurrency = (s: LedgerState, currency: string, rate: number): string | null => {
   if (currency === BASE_CURRENCY) return null;
@@ -2319,6 +2326,66 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
           return ok(src, `${src.name} connected`);
         }),
 
+      addSource: (input: DataSourceInput) =>
+        commit((s) => {
+          const name = input.name?.trim();
+          if (!name) return fail("Give the source a name.");
+          if (s.dataSources.some((d) => d.name.toLowerCase() === name.toLowerCase())) return fail(`${name} already exists.`);
+          if (!input.provider?.trim()) return fail("Enter the provider or system name.");
+          if (!["FILE", "API", "ACCOUNTING_SYSTEM", "BANK"].includes(input.kind)) return fail("Choose how the data arrives.");
+          const entities = [...new Set((input.entities ?? []).map((e) => e.trim()).filter(Boolean))];
+          if (!entities.length) return fail("List at least one kind of record it sends.");
+          const src: DataSource = {
+            id: newId("ds"),
+            name,
+            provider: input.provider.trim(),
+            kind: input.kind,
+            status: "NOT_CONNECTED",
+            description: input.description?.trim() ?? "",
+            sync_direction: "INBOUND",
+            schedule: input.kind === "FILE" ? "On upload" : "Hourly",
+            entities,
+            last_run_at: null,
+            last_run_status: null,
+            records_synced: 0,
+            error_count: 0,
+            connection: {},
+            ...stamp(nowIso(), actorOf(s)),
+          };
+          s.dataSources.push(src);
+          audit(s, {
+            action: "SOURCE.CREATED",
+            entity_type: "Data source",
+            entity_id: src.id,
+            entity_label: src.name,
+            summary: `Added ${src.name} (${src.provider}) · ${entities.join(", ")}.`,
+          });
+          return ok(src, `${src.name} added`);
+        }),
+
+      removeSource: (id: string) =>
+        commit((s) => {
+          const src = s.dataSources.find((d) => d.id === id);
+          if (!src) return fail("Source not found.");
+          if (src.kind === "TROVESUITE") return fail(`${src.name} is part of Trovesuite and cannot be removed. Disconnect it instead.`);
+          if (src.status !== "NOT_CONNECTED") return fail(`Disconnect ${src.name} before removing it.`);
+          const batches = s.importBatches.filter((b) => b.source_id === id).length;
+          if (batches) return fail(`${src.name} has ${batches} import batch(es) on record. Keep it disconnected so they stay traceable.`);
+          const rules = s.rules.filter((r) => r.source_id === id).length;
+          if (rules) return fail(`${rules} posting rule(s) use ${src.name}. Delete or move them first.`);
+          s.dataSources = s.dataSources.filter((d) => d.id !== id);
+          const mappings = s.fieldMappings.filter((m) => m.source_id === id).length;
+          s.fieldMappings = s.fieldMappings.filter((m) => m.source_id !== id);
+          audit(s, {
+            action: "SOURCE.REMOVED",
+            entity_type: "Data source",
+            entity_id: src.id,
+            entity_label: src.name,
+            summary: `Removed ${src.name}${mappings ? ` and its ${mappings} field mapping(s)` : ""}.`,
+          });
+          return ok(undefined, `${src.name} removed`);
+        }),
+
       disconnectSource: (id: string) =>
         commit((s) => {
           const src = s.dataSources.find((d) => d.id === id);
@@ -2699,6 +2766,98 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
             summary: `Revalued ${preview.lines.length} open foreign balance(s) at ${asAt}: net unrealised ${net >= 0 ? "gain" : "loss"} ${fmtCurrency(Math.abs(net))}. Reversed on ${nextDay} by ${reversal.number}.`,
           });
           return ok(run, `${period.name} revalued · ${j.number} posted, reversed on ${nextDay}`);
+        }),
+
+      saveRule: (input: AccountingRuleInput, id?: string) =>
+        commit((s) => {
+          const existing = id ? s.rules.find((r) => r.id === id) : undefined;
+          if (id && !existing) return fail("Rule not found.");
+          const name = input.name?.trim();
+          const event = input.event?.trim().toLowerCase() ?? "";
+          if (!name) return fail("Give the rule a name.");
+          if (!/^[a-z0-9_]+(\.[a-z0-9_]+)+$/.test(event)) return fail("Event must be dotted lower case, e.g. store.sale.completed.");
+          const source = s.dataSources.find((d) => d.id === input.source_id);
+          if (!source) return fail("Choose the source system.");
+          if (existing && existing.postings_count > 0 && (existing.event !== event || existing.source_id !== source.id)) {
+            return fail(`${existing.name} has posted ${existing.postings_count} journal(s), so its event and source are fixed. Add a new rule instead.`);
+          }
+          const clash = s.rules.find((r) => r.id !== id && r.source_id === source.id && r.event === event);
+          if (clash) return fail(`${clash.name} already handles ${event} from ${source.name}.`);
+          const lines = input.lines ?? [];
+          if (lines.length < 2) return fail("A rule needs at least two lines.");
+          if (!lines.some((l) => l.side === "DEBIT") || !lines.some((l) => l.side === "CREDIT")) return fail("A rule needs at least one debit and one credit line.");
+          for (const [i, l] of lines.entries()) {
+            const a = s.accounts.find((x) => x.id === l.account_id);
+            if (!a || a.is_group) return fail(`Line ${i + 1}: choose a postable account.`);
+            if (!a.is_active) return fail(`Line ${i + 1}: ${a.code} ${a.name} is inactive.`);
+            if (!RULE_BASES.includes(l.basis)) return fail(`Line ${i + 1}: choose where the amount comes from.`);
+            if (l.side !== "DEBIT" && l.side !== "CREDIT") return fail(`Line ${i + 1}: choose debit or credit.`);
+          }
+          const sample: AccountingRule["sample"] = {};
+          for (const basis of new Set(lines.map((l) => l.basis))) {
+            const v = round2(Number(input.sample?.[basis]));
+            if (!(v > 0)) return fail(`Enter a sample ${basis.toLowerCase()} amount to check the rule balances.`);
+            sample[basis] = v;
+          }
+          const side = (which: "DEBIT" | "CREDIT") => round2(lines.filter((l) => l.side === which).reduce((t, l) => t + (sample[l.basis] ?? 0), 0));
+          if (side("DEBIT") !== side("CREDIT")) {
+            return fail(`With the sample amounts the rule posts debits of ${fmtCurrency(side("DEBIT"))} and credits of ${fmtCurrency(side("CREDIT"))}. Check the sides and amount sources.`);
+          }
+          const clean = lines.map((l) => ({ side: l.side, account_id: l.account_id, basis: l.basis, label: l.label?.trim() ?? "" }));
+          if (existing) {
+            const changes: NonNullable<AuditEvent["changes"]> = [];
+            if (existing.name !== name) changes.push({ field: "name", from: existing.name, to: name });
+            if (existing.event !== event) changes.push({ field: "event", from: existing.event, to: event });
+            if (JSON.stringify(existing.lines) !== JSON.stringify(clean)) changes.push({ field: "lines", from: `${existing.lines.length} lines`, to: `${clean.length} lines` });
+            Object.assign(existing, { name, event, source_id: source.id, description: input.description?.trim() ?? "", lines: clean, sample });
+            touch(s, existing);
+            audit(s, {
+              action: "RULE.UPDATED",
+              entity_type: "Accounting rule",
+              entity_id: existing.id,
+              entity_label: existing.name,
+              summary: `Updated posting rule for ${event}. Journals already posted are unchanged.`,
+              changes,
+            });
+            return ok(existing, `${existing.name} saved`);
+          }
+          const rule: AccountingRule = {
+            id: newId("rule"),
+            name,
+            event,
+            source_id: source.id,
+            description: input.description?.trim() ?? "",
+            is_active: true,
+            lines: clean,
+            sample,
+            postings_count: 0,
+            ...stamp(nowIso(), actorOf(s)),
+          };
+          s.rules.push(rule);
+          audit(s, {
+            action: "RULE.CREATED",
+            entity_type: "Accounting rule",
+            entity_id: rule.id,
+            entity_label: rule.name,
+            summary: `Added posting rule for ${event} from ${source.name}.`,
+          });
+          return ok(rule, `${rule.name} added`);
+        }),
+
+      deleteRule: (id: string) =>
+        commit((s) => {
+          const rule = s.rules.find((r) => r.id === id);
+          if (!rule) return fail("Rule not found.");
+          if (rule.postings_count > 0) return fail(`${rule.name} has posted ${rule.postings_count} journal(s). Deactivate it instead so the history stays explained.`);
+          s.rules = s.rules.filter((r) => r.id !== id);
+          audit(s, {
+            action: "RULE.DELETED",
+            entity_type: "Accounting rule",
+            entity_id: rule.id,
+            entity_label: rule.name,
+            summary: `Deleted unused posting rule for ${rule.event}.`,
+          });
+          return ok(undefined, `${rule.name} deleted`);
         }),
 
       toggleRule: (id: string) =>

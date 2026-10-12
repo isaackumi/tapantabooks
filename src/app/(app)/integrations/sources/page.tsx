@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import toast from "react-hot-toast";
-import { FiAlertCircle, FiAlertTriangle, FiLink, FiRefreshCw, FiSettings, FiZap } from "react-icons/fi";
+import { FiAlertCircle, FiAlertTriangle, FiLink, FiPlus, FiRefreshCw, FiSettings, FiTrash2, FiZap } from "react-icons/fi";
 import { Button, Callout, DetailRow, Field, FormError, PageHeader, inputClass } from "@/components/ui";
 import { Tabs } from "@/components/tabs";
 import StatCard from "@/components/statCard";
@@ -14,7 +14,7 @@ import { QueryError, Skeleton } from "@/components/queryState";
 import { useLedger } from "@/store/ledgerStore";
 import { useReport } from "@/services/useApiQuery";
 import type { ListData } from "@/core/apiClient";
-import type { DataSource, DataSourceKind } from "@/models/accounting";
+import type { DataSource, DataSourceInput, DataSourceKind } from "@/models/accounting";
 import type { ImportListItem } from "@/models/lists";
 import { matchesSearch, useGlobalState } from "@/utils/globalStateContext";
 import { classNames, fmtDateTime, fmtRelative, humanize } from "@/utils/format";
@@ -175,6 +175,72 @@ const ConnectModal = ({ source, onClose }: { source: DataSource | null; onClose:
   );
 };
 
+const ADDABLE_KINDS: DataSourceInput["kind"][] = ["FILE", "API", "ACCOUNTING_SYSTEM", "BANK"];
+
+const AddSourceModal = ({ open, onClose, onAdded }: { open: boolean; onClose: () => void; onAdded: (id: string) => void }) => {
+  const { actions } = useLedger();
+  const [form, setForm] = useState({ name: "", provider: "", kind: "FILE" as DataSourceInput["kind"], description: "", entities: "" });
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setForm({ name: "", provider: "", kind: "FILE", description: "", entities: "" });
+    setError(null);
+  }, [open]);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const res = await actions.addSource({ ...form, entities: form.entities.split(",") });
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Added");
+      onAdded(res.data.id);
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Add data source"
+      description="A system or file that sends records to be posted. It starts disconnected; connect it once the details are ready."
+      buttons={[
+        { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
+        { label: "Add source", onClick: save, className: BTN_PRIMARY, disabled: busy },
+      ]}
+    >
+      <FormError message={error} />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <Field label="Name" required>
+          <input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="e.g. Hubtel POS" className={inputClass} />
+        </Field>
+        <Field label="Provider" required>
+          <input value={form.provider} onChange={(e) => setForm((f) => ({ ...f, provider: e.target.value }))} placeholder="e.g. Hubtel" className={inputClass} />
+        </Field>
+        <Field label="How the data arrives" required>
+          <select value={form.kind} onChange={(e) => setForm((f) => ({ ...f, kind: e.target.value as DataSourceInput["kind"] }))} className={inputClass}>
+            {ADDABLE_KINDS.map((k) => (
+              <option key={k} value={k}>
+                {KIND_LABEL[k]}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Records it sends" required hint="Comma separated, e.g. Sales, Refunds">
+          <input value={form.entities} onChange={(e) => setForm((f) => ({ ...f, entities: e.target.value }))} className={inputClass} />
+        </Field>
+        <Field label="Description" className="sm:col-span-2">
+          <input value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} className={inputClass} />
+        </Field>
+      </div>
+    </Modal>
+  );
+};
+
 export default function SourcesPage() {
   const { state, actions } = useLedger();
   const { searchQuery } = useGlobalState();
@@ -182,6 +248,8 @@ export default function SourcesPage() {
   const [viewId, setViewId] = useState<string | null>(null);
   const [connecting, setConnecting] = useState<DataSource | null>(null);
   const [disconnecting, setDisconnecting] = useState<DataSource | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [removing, setRemoving] = useState<DataSource | null>(null);
 
   const sources = state.dataSources.filter(
     (s) => (tab === "ALL" || s.kind === tab) && matchesSearch(searchQuery, s.name, s.provider, s.description),
@@ -222,6 +290,11 @@ export default function SourcesPage() {
       <PageHeader
         title="Data sources"
         description="Trovesuite apps, other accounting systems, files, banks and APIs. Each one feeds the same governed posting engine."
+        actions={
+          <Button icon={FiPlus} onClick={() => setAdding(true)}>
+            Add source
+          </Button>
+        }
       />
 
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4" data-tour="stats">
@@ -329,6 +402,11 @@ export default function SourcesPage() {
         footer={
           viewing && (
             <div className="flex flex-wrap justify-end gap-2">
+              {viewing.status === "NOT_CONNECTED" && viewing.kind !== "TROVESUITE" && (
+                <Button variant="ghost" icon={FiTrash2} className="mr-auto text-red-600" onClick={() => setRemoving(viewing)}>
+                  Remove source
+                </Button>
+              )}
               {viewing.status !== "NOT_CONNECTED" && (
                 <Button variant="ghost" className="mr-auto text-red-600" onClick={() => setDisconnecting(viewing)}>
                   Disconnect
@@ -435,6 +513,29 @@ export default function SourcesPage() {
       </RightDrawer>
 
       <ConnectModal source={connecting} onClose={() => setConnecting(null)} />
+      <AddSourceModal open={adding} onClose={() => setAdding(false)} onAdded={setViewId} />
+      <Modal
+        open={!!removing}
+        onClose={() => setRemoving(null)}
+        size="sm"
+        title={removing ? `Remove ${removing.name}?` : ""}
+        description="Only sources with no import batches or posting rules can be removed. Its field mappings are removed with it."
+        buttons={[
+          { label: "Cancel", onClick: () => setRemoving(null), className: BTN_SECONDARY },
+          {
+            label: "Remove source",
+            className: BTN_DANGER,
+            onClick: async () => {
+              if (!removing) return;
+              const res = await actions.removeSource(removing.id);
+              if (!res.ok) return toast.error(res.error);
+              toast.success(res.message ?? "Removed");
+              setRemoving(null);
+              setViewId(null);
+            },
+          },
+        ]}
+      />
       <Modal
         open={!!disconnecting}
         onClose={() => setDisconnecting(null)}

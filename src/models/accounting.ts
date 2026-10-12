@@ -466,6 +466,24 @@ export interface AccountingRule extends AuditFields {
   postings_count: number;
 }
 
+export interface AccountingRuleInput {
+  name: string;
+  event: string;
+  source_id: string;
+  description?: string;
+  lines: AccountingRuleLine[];
+  /** Example amounts per basis; the rule is only saved when they post a balanced journal. */
+  sample: Partial<Record<RuleAmountBasis, number>>;
+}
+
+export interface DataSourceInput {
+  name: string;
+  provider: string;
+  kind: Extract<DataSourceKind, "FILE" | "API" | "ACCOUNTING_SYSTEM" | "BANK">;
+  description?: string;
+  entities: string[];
+}
+
 export type ActorType = "USER" | "SYSTEM" | "INTEGRATION";
 
 export interface AuditEvent {

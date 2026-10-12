@@ -3,8 +3,10 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import toast from "react-hot-toast";
-import { FiCheckCircle, FiAlertTriangle, FiZap } from "react-icons/fi";
-import { Callout, PageHeader, Panel, Toggle, compactInputClass } from "@/components/ui";
+import { FiCheckCircle, FiAlertTriangle, FiEdit2, FiPlus, FiTrash2, FiZap } from "react-icons/fi";
+import { Button, Callout, PageHeader, Panel, Toggle, compactInputClass } from "@/components/ui";
+import { BTN_DANGER, BTN_SECONDARY, Modal } from "@/components/modal";
+import RuleFormModal from "@/components/integrations/ruleFormModal";
 import StatusBadge from "@/components/statusBadge";
 import { useLedger } from "@/store/ledgerStore";
 import { lineTotals } from "@/lib/ledger";
@@ -14,7 +16,24 @@ import { classNames, fmtAccounting, fmtCurrency, fmtDateTime, humanize } from "@
 export default function RulesPage() {
   const { state, actions } = useLedger();
   const [selectedId, setSelectedId] = useState(state.rules[0]?.id ?? "");
-  const rule = state.rules.find((r) => r.id === selectedId);
+  const rule = state.rules.find((r) => r.id === selectedId) ?? state.rules[0];
+  const [formOpen, setFormOpen] = useState<"new" | "edit" | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const removeRule = async () => {
+    if (!rule) return;
+    setDeleting(true);
+    try {
+      const res = await actions.deleteRule(rule.id);
+      if (!res.ok) return toast.error(res.error);
+      toast.success(res.message ?? "Deleted");
+      setDeleteOpen(false);
+      setSelectedId(state.rules.find((r) => r.id !== rule.id)?.id ?? "");
+    } finally {
+      setDeleting(false);
+    }
+  };
   const [sample, setSample] = useState<Partial<Record<RuleAmountBasis, string>>>({});
   const accounts = new Map(state.accounts.map((a) => [a.id, a]));
   const sourceName = new Map(state.dataSources.map((s) => [s.id, s.name]));
@@ -38,6 +57,11 @@ export default function RulesPage() {
       <PageHeader
         title="Posting rules"
         description="Each business event from a connected system is turned into a balanced journal by a rule. Rules are configuration, versioned and audited."
+        actions={
+          <Button icon={FiPlus} onClick={() => setFormOpen("new")}>
+            New rule
+          </Button>
+        }
       />
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
@@ -48,7 +72,7 @@ export default function RulesPage() {
               onClick={() => setSelectedId(r.id)}
               className={classNames(
                 "w-full rounded-xl border bg-white p-4 text-left transition dark:bg-neutral-800",
-                r.id === selectedId ? "border-brand-500 ring-1 ring-brand-500" : "border-neutral-200 hover:border-neutral-300 dark:border-neutral-700",
+                r.id === rule?.id ? "border-brand-500 ring-1 ring-brand-500" : "border-neutral-200 hover:border-neutral-300 dark:border-neutral-700",
               )}
             >
               <div className="flex items-start justify-between gap-2">
@@ -71,6 +95,18 @@ export default function RulesPage() {
                 <span>
                   When <span className="font-mono text-brand-700 dark:text-brand-300">{rule.event}</span> arrives from {sourceName.get(rule.source_id)}
                 </span>
+              }
+              actions={
+                <div className="flex gap-2">
+                  <Button size="sm" variant="secondary" icon={FiEdit2} onClick={() => setFormOpen("edit")}>
+                    Edit
+                  </Button>
+                  {rule.postings_count === 0 && (
+                    <Button size="sm" variant="ghost" icon={FiTrash2} className="text-red-600" onClick={() => setDeleteOpen(true)}>
+                      Delete
+                    </Button>
+                  )}
+                </div>
               }
             >
               <p className="mb-4 text-sm text-neutral-600 dark:text-neutral-300">{rule.description}</p>
@@ -195,6 +231,22 @@ export default function RulesPage() {
           </div>
         )}
       </div>
+
+      <RuleFormModal open={formOpen === "new"} onClose={() => setFormOpen(null)} onSaved={setSelectedId} />
+      <RuleFormModal open={formOpen === "edit"} onClose={() => setFormOpen(null)} rule={rule} />
+      {rule && (
+        <Modal
+          open={deleteOpen}
+          onClose={() => setDeleteOpen(false)}
+          size="sm"
+          title={`Delete ${rule.name}?`}
+          description="It has never posted, so no journal refers to it. The deletion is kept on the audit trail."
+          buttons={[
+            { label: "Cancel", onClick: () => setDeleteOpen(false), className: BTN_SECONDARY },
+            { label: "Delete rule", onClick: removeRule, className: BTN_DANGER, disabled: deleting },
+          ]}
+        />
+      )}
     </div>
   );
 }

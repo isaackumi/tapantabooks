@@ -653,7 +653,7 @@ Side effects:
 
 Response: 201 with the `SalesInvoice` or `PurchaseBill`. Detail: `{number} approved and posted` or `{number} saved as draft`.
 
-There are no endpoints to edit or delete draft documents (open question).
+Drafts are edited and deleted with the endpoints in sections 7.7a and 7.7b.
 
 ### 7.6 Approve (`POST /invoices/approve`, `POST /bills/approve`)
 
@@ -1368,7 +1368,26 @@ Response: the updated record. Detail: `Details saved`.
 
 ### 14.1 Data sources
 
-`DataSource` rows describe connectors (Trovesuite apps, other accounting systems, files, bank feeds, APIs). There are no endpoints to create or delete them; they come from provisioning.
+`DataSource` rows describe connectors (Trovesuite apps, other accounting systems, files, bank feeds, APIs). Trovesuite sources come from provisioning; the others can be added and removed.
+
+`POST /data-sources/add` (body `DataSourceInput { name, provider, kind, description?, entities }`):
+
+- `Give the source a name.`; `{name} already exists.` (case-insensitive).
+- `Enter the provider or system name.`
+- `Choose how the data arrives.` unless `kind` is `FILE`, `API`, `ACCOUNTING_SYSTEM` or `BANK`. `TROVESUITE` cannot be added.
+- `List at least one kind of record it sends.` when `entities` is empty after trimming and de-duplicating.
+
+Creates the source as `NOT_CONNECTED`, `sync_direction: INBOUND`, schedule `On upload` for files and `Hourly` otherwise, no connection values. Audit `SOURCE.CREATED`, summary `Added {name} ({provider}) · {entities}.` Response 201: the `DataSource`; detail `{name} added`.
+
+`DELETE /data-sources/delete` (query `data_source_id`):
+
+- `Source not found.`
+- `{name} is part of Trovesuite and cannot be removed. Disconnect it instead.`
+- `Disconnect {name} before removing it.` unless `NOT_CONNECTED`.
+- `{name} has {n} import batch(es) on record. Keep it disconnected so they stay traceable.`
+- `{n} posting rule(s) use {name}. Delete or move them first.`
+
+Removes the source and its field mappings. Audit `SOURCE.REMOVED`, summary `Removed {name}[ and its {n} field mapping(s)].` Response `data: null`; detail `{name} removed`.
 
 `POST /data-sources/connect` (query `data_source_id`; body `{ entities, schedule, connection }`):
 
@@ -1406,7 +1425,24 @@ Create audits `MAPPING.CREATED` (label `{source field} → {target field}`). Upd
 
 An accounting rule describes how an external event (for example `store.sale.completed`) becomes a journal: a list of debit and credit lines, each with an account and an amount basis (`TOTAL`, `SUBTOTAL`, `TAX`, `COST`, `PRINCIPAL`, `INTEREST`, `FEES`). `sample` holds example amounts for previewing the rule.
 
-`PUT /accounting-rules/update` (query `rule_id`; body `{ is_active }`): 404 `Rule not found.` for an unknown id; when `is_active` is absent or unchanged the rule is returned as is. Otherwise `is_active` is toggled and audit `RULE.ACTIVATED` or `RULE.DEACTIVATED` is recorded, summary `Activated|Deactivated posting rule for {event}.` Detail `{name} activated|deactivated`.
+`POST /accounting-rules/add` and `PUT /accounting-rules/update` (query `rule_id`) with body `AccountingRuleInput { name, event, source_id, description?, lines, sample }` (on update, omitted fields keep their current values; an `is_active` in the same body is applied after the save):
+
+- Update only: `Rule not found.`
+- `Give the rule a name.`
+- `Event must be dotted lower case, e.g. store.sale.completed.` (`^[a-z0-9_]+(\.[a-z0-9_]+)+$` after lower-casing).
+- `Choose the source system.` when `source_id` is unknown.
+- `{name} has posted {n} journal(s), so its event and source are fixed. Add a new rule instead.` when an update changes the event or source of a rule with `postings_count > 0`.
+- `{other rule} already handles {event} from {source}.` One rule per source and event.
+- `A rule needs at least two lines.`; `A rule needs at least one debit and one credit line.`
+- Per line: `Line {n}: choose a postable account.` (missing or group), `Line {n}: {code} {name} is inactive.`, `Line {n}: choose where the amount comes from.`, `Line {n}: choose debit or credit.`
+- `Enter a sample {basis} amount to check the rule balances.` for every basis used by a line; only those bases are kept in `sample`.
+- `With the sample amounts the rule posts debits of {x} and credits of {y}. Check the sides and amount sources.` when the sample does not balance.
+
+Create: `is_active: true`, `postings_count: 0`, audit `RULE.CREATED`; response 201, detail `{name} added`. Update: replaces name, event, source, description, lines and sample; audit `RULE.UPDATED` with name, event and line-count changes, summary notes that journals already posted are unchanged; detail `{name} saved`.
+
+`PUT /accounting-rules/update` with only `{ is_active }` (no other field): 404 `Rule not found.` for an unknown id; when `is_active` is absent or unchanged the rule is returned as is. Otherwise `is_active` is toggled and audit `RULE.ACTIVATED` or `RULE.DEACTIVATED` is recorded, summary `Activated|Deactivated posting rule for {event}.` Detail `{name} activated|deactivated`.
+
+`DELETE /accounting-rules/delete` (query `rule_id`): `Rule not found.`; `{name} has posted {n} journal(s). Deactivate it instead so the history stays explained.` when `postings_count > 0`. Audit `RULE.DELETED`. Response `data: null`; detail `{name} deleted`.
 
 The mock does not execute rules; `postings_count` is static. Applying rules to incoming events is backend work that the frontend does not yet drive (open question).
 
