@@ -987,7 +987,29 @@ export const ENDPOINTS: EndpointDef[] = [
   },
 
   // ---- Tax -------------------------------------------------------------------
-  list("Tax", "/tax-codes/list", "tax-code", "TaxCode", { kind: "OUTPUT_INPUT | WITHHOLDING | EXEMPT" }),
+  list("Tax", "/tax-codes/list", "tax-code", "TaxCode", { kind: "OUTPUT_INPUT | WITHHOLDING | EXEMPT", is_active: "true | false" }),
+  get("Tax", "/tax-codes/get", "tax-code", "tax_code_id", "TaxCode"),
+  {
+    method: "POST",
+    path: "/tax-codes/add",
+    module: "Tax",
+    summary: "Add a VAT, withholding or exempt tax code",
+    body: "TaxCodeInput { code, name, rate (fraction), kind, output_account_id?, input_account_id?, description? }",
+    returns: "TaxCode",
+    permission: perm("tax-code", "create"),
+    invalidates: ["taxCodes"],
+  },
+  {
+    method: "PUT",
+    path: "/tax-codes/update",
+    module: "Tax",
+    summary: "Edit or (de)activate a tax code. Code, kind and rate are fixed once any document uses it",
+    query: { tax_code_id: "Tax code id" },
+    body: "{ code?, name?, rate?, kind?, output_account_id?, input_account_id?, description?, is_active? }",
+    returns: "TaxCode",
+    permission: perm("tax-code", "update"),
+    invalidates: ["taxCodes"],
+  },
 
   // ---- Integrations ----------------------------------------------------------
   list("Data sources", "/data-sources/list", "data-source", "DataSource", {

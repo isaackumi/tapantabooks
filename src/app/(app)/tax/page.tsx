@@ -2,8 +2,10 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { FiInfo } from "react-icons/fi";
-import { Callout, PageHeader, Panel } from "@/components/ui";
+import { FiEdit2, FiInfo, FiPlus } from "react-icons/fi";
+import { Button, Callout, PageHeader, Panel } from "@/components/ui";
+import TaxCodeModal from "@/components/tax/taxCodeModal";
+import type { TaxCode } from "@/models/accounting";
 import StatCard from "@/components/statCard";
 import StatusBadge from "@/components/statusBadge";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
@@ -45,6 +47,8 @@ export default function TaxPage() {
     if (isIsoDate(v)) setTo(v);
   });
 
+  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<TaxCode | null>(null);
   const summary = useReport<TaxSummaryReport>("/reports/tax-summary", { from_date: from, to_date: to });
   const accounts = new Map(state.accounts.map((a) => [a.id, a]));
 
@@ -183,7 +187,17 @@ export default function TaxPage() {
         }}
       </QueryState>
 
-      <Panel title="Tax codes" subtitle="Applied to invoice and bill lines; each posts to its own liability or recoverable account" className="mt-6" bodyClassName="p-0 pt-2">
+      <Panel
+        title="Tax codes"
+        subtitle="Applied to invoice and bill lines; each posts to its own liability or recoverable account"
+        className="mt-6"
+        bodyClassName="p-0 pt-2"
+        actions={
+          <Button variant="secondary" icon={FiPlus} onClick={() => setAdding(true)}>
+            Add tax code
+          </Button>
+        }
+      >
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="text-left text-neutral-500 dark:text-neutral-400">
@@ -195,6 +209,7 @@ export default function TaxPage() {
                 <th className="px-6 py-2.5 font-normal">Sales post to</th>
                 <th className="px-6 py-2.5 font-normal">Purchases post to</th>
                 <th className="px-6 py-2.5 font-normal">Status</th>
+                <th className="px-6 py-2.5" />
               </tr>
             </thead>
             <tbody className="divide-y divide-neutral-100 dark:divide-neutral-700">
@@ -221,12 +236,25 @@ export default function TaxPage() {
                   <td className="px-6 py-3">
                     <StatusBadge status={t.is_active ? "ACTIVE" : "INACTIVE"} />
                   </td>
+                  <td className="px-6 py-3 text-right">
+                    <button
+                      type="button"
+                      onClick={() => setEditing(t)}
+                      aria-label={`Edit ${t.code}`}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-brand-700 hover:underline dark:text-brand-300"
+                    >
+                      <FiEdit2 className="h-3 w-3" /> Edit
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </Panel>
+
+      <TaxCodeModal open={adding} onClose={() => setAdding(false)} />
+      <TaxCodeModal open={!!editing} onClose={() => setEditing(null)} taxCode={editing && state.taxCodes.find((t) => t.id === editing.id)} />
     </div>
   );
 }

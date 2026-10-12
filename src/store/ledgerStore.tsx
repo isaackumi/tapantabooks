@@ -29,6 +29,8 @@ import type {
   BankAccount,
   BankAccountInput,
   BankStatementLine,
+  TaxCode,
+  TaxCodeInput,
   DataSource,
   ImportRecord,
   FiscalPeriod,
@@ -246,6 +248,11 @@ const createActions = (
       kind === "customer"
         ? call<CreditNote>("POST", "/credit-notes/void", { query: { credit_note_id: id }, body: { reason } })
         : call<CreditNote>("POST", "/supplier-credits/void", { query: { supplier_credit_id: id }, body: { reason } }),
+
+    // ---- Tax --------------------------------------------------------------------------------------------
+    createTaxCode: (input: TaxCodeInput) => call<TaxCode>("POST", "/tax-codes/add", { body: input }),
+    updateTaxCode: (id: string, patch: Partial<TaxCodeInput> & { is_active?: boolean }) =>
+      call<TaxCode>("PUT", "/tax-codes/update", { query: { tax_code_id: id }, body: patch }),
 
     // ---- Banking -------------------------------------------------------------------------------------
     createBankAccount: (input: BankAccountInput) => call<BankAccount>("POST", "/bank-accounts/add", { body: input }),

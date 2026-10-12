@@ -276,6 +276,17 @@ export interface TaxCode extends AuditFields {
   description: string;
 }
 
+export interface TaxCodeInput {
+  code: string;
+  name: string;
+  /** A fraction: 0.2 is 20%. */
+  rate: number;
+  kind: TaxCode["kind"];
+  output_account_id?: string | null;
+  input_account_id?: string | null;
+  description?: string;
+}
+
 export type PeriodStatus = "OPEN" | "LOCKED" | "CLOSED";
 
 export interface FiscalPeriod {

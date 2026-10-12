@@ -694,7 +694,21 @@ const HANDLERS: Record<string, Handler> = {
     fromResult(engine.completeReconciliation(need(q.get("bank_account_id"), "bank_account_id"))),
 
   // ---- Tax ------------------------------------------------------------------------------------------------------------
-  "GET /tax-codes/list": ({ state, q }) => listResult(state.taxCodes, q, { search: ["code", "name"], filters: { kind: "kind" } }),
+  "GET /tax-codes/list": ({ state, q }) =>
+    listResult(state.taxCodes, q, { search: ["code", "name"], filters: { kind: "kind", is_active: "is_active" } }),
+  "GET /tax-codes/get": ({ state, q }) => {
+    const id = need(q.get("tax_code_id"), "tax_code_id");
+    return { data: found(state.taxCodes.find((t) => t.id === id), "Tax code") };
+  },
+  "POST /tax-codes/add": ({ engine, body }) => fromResult(engine.createTaxCode({ ...body, rate: Number(body?.rate) }), 201),
+  "PUT /tax-codes/update": ({ engine, q, body }) =>
+    fromResult(
+      engine.updateTaxCode(need(q.get("tax_code_id"), "tax_code_id"), {
+        ...body,
+        ...(body?.rate !== undefined && { rate: Number(body.rate) }),
+        ...(body?.is_active !== undefined && { is_active: flag(body.is_active) }),
+      }),
+    ),
 
   // ---- Integrations ------------------------------------------------------------------------------------------------------
   "GET /data-sources/list": ({ state, q }) =>

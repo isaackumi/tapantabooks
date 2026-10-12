@@ -5,6 +5,8 @@ import type {
   Account,
   BankAccount,
   BankAccountInput,
+  TaxCode,
+  TaxCodeInput,
   AccountType,
   AuditEvent,
   AuditFields,
@@ -335,6 +337,26 @@ const checkBankInput = (
   return null;
 };
 
+/** Documents whose lines use the tax code; their totals are computed from its rate at read time. */
+const taxCodeUses = (s: LedgerState, id: string) =>
+  [...s.invoices, ...s.bills, ...s.creditNotes, ...s.supplierCredits].filter((d) => d.lines.some((l) => l.tax_code_id === id)).length;
+
+const checkTaxAccounts = (s: LedgerState, kind: TaxCodeInput["kind"], outputId: string | null, inputId: string | null): string | null => {
+  const usable = (id: string, type: AccountType, label: string) => {
+    const a = s.accounts.find((x) => x.id === id);
+    if (!a || a.is_group || a.is_control || a.is_bank) return `Choose a postable ${label} account.`;
+    if (a.type !== type) return `${a.code} ${a.name} is not a ${type.toLowerCase()} account.`;
+    if (!a.is_active) return `${a.code} ${a.name} is inactive.`;
+    return null;
+  };
+  if (kind === "EXEMPT") return null;
+  if (!outputId) return kind === "WITHHOLDING" ? "Choose the withholding tax payable account." : "Choose the output tax (payable) account.";
+  const outErr = usable(outputId, "LIABILITY", kind === "WITHHOLDING" ? "withholding payable" : "output tax");
+  if (outErr) return outErr;
+  if (inputId && kind === "OUTPUT_INPUT") return usable(inputId, "ASSET", "input tax");
+  return null;
+};
+
 const checkCurrency = (s: LedgerState, currency: string, rate: number): string | null => {
   if (currency === BASE_CURRENCY) return null;
   const c = s.currencies.find((x) => x.code === currency);
@@ -417,6 +439,9 @@ const validateDocument = (s: LedgerState, input: DocumentInput, partyLabel: stri
     if (!(l.unit_price > 0)) return `Line ${n}: unit price must be greater than zero.`;
     if (!l.account_id) return `Line ${n}: choose an account.`;
     if (!l.tax_code_id) return `Line ${n}: choose a tax code.`;
+    const tax = s.taxCodes.find((t) => t.id === l.tax_code_id);
+    if (!tax) return `Line ${n}: tax code not found.`;
+    if (!tax.is_active) return `Line ${n}: ${tax.code} is inactive. Choose another tax code.`;
   }
   return checkCustom(s, partyLabel === "customer" ? "Invoice" : "Bill", input.custom_fields);
 };
@@ -683,6 +708,104 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
             changes,
           });
           return ok(account, "Account updated");
+        }),
+
+      // ---- Tax codes --------------------------------------------------------
+      createTaxCode: (input: TaxCodeInput) =>
+        commit((s) => {
+          const code = input.code?.trim().toUpperCase() ?? "";
+          if (!/^[A-Z0-9][A-Z0-9-]{1,11}$/.test(code)) return fail("Code must be 2–12 letters, digits or dashes, e.g. GH-STD.");
+          if (s.taxCodes.some((t) => t.code === code)) return fail(`Code ${code} is already used.`);
+          if (!input.name?.trim()) return fail("Give the tax code a name.");
+          if (!["OUTPUT_INPUT", "WITHHOLDING", "EXEMPT"].includes(input.kind)) return fail("Choose the kind of tax.");
+          const rate = input.kind === "EXEMPT" ? 0 : Number(input.rate);
+          if (!(rate >= 0 && rate < 1)) return fail("Rate must be between 0% and 99.99%.");
+          const outputId = input.kind === "EXEMPT" ? null : input.output_account_id || null;
+          const inputId = input.kind === "OUTPUT_INPUT" ? input.input_account_id || null : null;
+          const accountError = checkTaxAccounts(s, input.kind, outputId, inputId);
+          if (accountError) return fail(accountError);
+          const tax: TaxCode = {
+            id: newId("tax"),
+            code,
+            name: input.name.trim(),
+            rate: Math.round(rate * 100000) / 100000,
+            kind: input.kind,
+            output_account_id: outputId,
+            input_account_id: inputId,
+            is_active: true,
+            description: input.description?.trim() ?? "",
+            ...stamp(nowIso(), actorOf(s)),
+          };
+          s.taxCodes.push(tax);
+          audit(s, {
+            action: "TAX_CODE.CREATED",
+            entity_type: "TaxCode",
+            entity_id: tax.id,
+            entity_label: tax.code,
+            summary: `Added ${tax.code} ${tax.name} at ${Math.round(tax.rate * 10000) / 100}%.`,
+          });
+          return ok(tax, `${tax.code} added`);
+        }),
+
+      updateTaxCode: (id: string, patch: Partial<TaxCodeInput> & { is_active?: boolean }) =>
+        commit((s) => {
+          const tax = s.taxCodes.find((t) => t.id === id);
+          if (!tax) return fail("Tax code not found.");
+          const code = patch.code !== undefined ? patch.code.trim().toUpperCase() : tax.code;
+          const kind = patch.kind ?? tax.kind;
+          const rate = kind === "EXEMPT" ? 0 : patch.rate !== undefined ? Number(patch.rate) : tax.rate;
+          const fixedChanged = code !== tax.code || kind !== tax.kind || Math.abs(rate - tax.rate) > 1e-9;
+          if (fixedChanged) {
+            const uses = taxCodeUses(s, tax.id);
+            if (uses) {
+              return fail(
+                `${tax.code} is on ${uses} document${uses === 1 ? "" : "s"}, so its code, kind and rate are fixed. Add a new code and deactivate this one.`,
+              );
+            }
+            if (!/^[A-Z0-9][A-Z0-9-]{1,11}$/.test(code)) return fail("Code must be 2–12 letters, digits or dashes, e.g. GH-STD.");
+            if (s.taxCodes.some((t) => t.id !== tax.id && t.code === code)) return fail(`Code ${code} is already used.`);
+            if (!(rate >= 0 && rate < 1)) return fail("Rate must be between 0% and 99.99%.");
+          }
+          if (patch.name !== undefined && !patch.name.trim()) return fail("Give the tax code a name.");
+          const outputId = kind === "EXEMPT" ? null : patch.output_account_id !== undefined ? patch.output_account_id || null : tax.output_account_id;
+          const inputId = kind === "OUTPUT_INPUT" ? (patch.input_account_id !== undefined ? patch.input_account_id || null : tax.input_account_id) : null;
+          const accountError = checkTaxAccounts(s, kind, outputId, inputId);
+          if (accountError && (outputId !== tax.output_account_id || inputId !== tax.input_account_id)) return fail(accountError);
+          if (patch.is_active === false && tax.is_active) {
+            const defaultFor = (
+              [
+                ["default_sales_tax_code_id", "sales"],
+                ["default_purchase_tax_code_id", "purchase"],
+              ] as const
+            ).find(([key]) => s.org[key] === tax.id);
+            if (defaultFor) return fail(`${tax.code} is the default ${defaultFor[1]} tax code. Choose another default in Settings first.`);
+          }
+          const changes: NonNullable<AuditEvent["changes"]> = [];
+          const setField = <K extends keyof TaxCode>(field: K, value: TaxCode[K]) => {
+            if (String(tax[field]) === String(value)) return;
+            changes.push({ field: String(field), from: String(tax[field] ?? ""), to: String(value ?? "") });
+            tax[field] = value;
+          };
+          setField("code", code);
+          setField("kind", kind);
+          setField("rate", Math.round(rate * 100000) / 100000);
+          if (patch.name !== undefined) setField("name", patch.name.trim());
+          if (patch.description !== undefined) setField("description", patch.description.trim());
+          setField("output_account_id", outputId);
+          setField("input_account_id", inputId);
+          if (patch.is_active !== undefined) setField("is_active", patch.is_active);
+          if (!changes.length) return ok(tax, "Nothing to change");
+          touch(s, tax);
+          const toggled = changes.length === 1 && changes[0].field === "is_active";
+          audit(s, {
+            action: toggled ? (tax.is_active ? "TAX_CODE.REACTIVATED" : "TAX_CODE.DEACTIVATED") : "TAX_CODE.UPDATED",
+            entity_type: "TaxCode",
+            entity_id: tax.id,
+            entity_label: tax.code,
+            summary: `Updated ${tax.code} ${tax.name}.`,
+            changes,
+          });
+          return ok(tax, toggled ? `${tax.code} ${tax.is_active ? "reactivated" : "deactivated"}` : `${tax.code} saved`);
         }),
 
       // ---- Journals ---------------------------------------------------------

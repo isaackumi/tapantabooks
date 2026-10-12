@@ -1215,7 +1215,7 @@ Response: the `BankAccount`. Detail: `{bank name} reconciled`.
 
 ## 12. Tax
 
-Tax codes are read-only (`GET /tax-codes/list`); there are no endpoints to create or edit them. The standard codes, all in Ghana, are:
+Tax codes are listed by `GET /tax-codes/list` (filters `kind`, `is_active`), read by `GET /tax-codes/get?tax_code_id=`, and managed with the endpoints in section 12.1. The standard codes, all in Ghana, are:
 
 | Code | Name | `rate` | `kind` | Output account | Input account | Active |
 |---|---|---|---|---|---|---|
@@ -1231,8 +1231,26 @@ Rules:
 
 - Document tax is computed as in section 7.3 and posted per code to the code's output account (invoices) or input account (bills), falling back to VAT output or VAT input when the code has none.
 - `WITHHOLDING` codes compute no tax on documents and nothing posts to the WHT payable account from documents or payments. How withholding should be applied is an open question.
-- `is_active` on tax codes is not checked when documents are validated (open question).
+- Invoice and bill lines must use an existing, active tax code: `Line {n}: tax code not found.`, `Line {n}: {code} is inactive. Choose another tax code.` (checked on create and on draft edit).
 - The monthly VAT summary, return status and tax account balances come from `GET /reports/tax-summary` (section 17.10). A VAT return is settled by a journal with `source.reference` `VAT-{YYYY-MM}` for the month it settles; a withholding remittance uses `WHT-{YYYY-MM}`. There is no endpoint that files a return; the settlement is posted as an ordinary journal.
+
+### 12.1 Managing tax codes
+
+**`POST /tax-codes/add`**, body `TaxCodeInput { code, name, rate, kind, output_account_id?, input_account_id?, description? }`. `rate` is a fraction (0.2 = 20%).
+
+- `code` is trimmed and upper-cased: `Code must be 2–12 letters, digits or dashes, e.g. GH-STD.`; `Code {code} is already used.`
+- `Give the tax code a name.` · `Choose the kind of tax.` · `Rate must be between 0% and 99.99%.` (0 ≤ rate < 1).
+- `EXEMPT`: rate forced to 0 and both accounts null. `WITHHOLDING`: input account null.
+- Output account is required unless `EXEMPT` (`Choose the output tax (payable) account.` / `Choose the withholding tax payable account.`). It must be a postable, active `LIABILITY` that is not a control or bank account. The optional input account (`OUTPUT_INPUT` only) must be a postable, active `ASSET`. Messages: `Choose a postable {label} account.`, `{code} {name} is not a {type} account.`, `{code} {name} is inactive.`
+- Audit `TAX_CODE.CREATED`. Response 201, detail `{code} added`.
+
+**`PUT /tax-codes/update`**, query `tax_code_id`, body any of the add fields plus `is_active`.
+
+- Document totals are computed from the tax code at read time, so `code`, `kind` and `rate` are fixed once any invoice, bill, credit note or supplier credit has a line with the code: `{code} is on {n} document(s), so its code, kind and rate are fixed. Add a new code and deactivate this one.` Name, description and accounts can always change; new accounts apply to postings from then on.
+- Deactivating the organisation's default sales or purchase tax code: `{code} is the default {sales|purchase} tax code. Choose another default in Settings first.`
+- Audit `TAX_CODE.UPDATED`, or `TAX_CODE.DEACTIVATED` / `TAX_CODE.REACTIVATED` when only `is_active` changed. Detail `{code} saved` / `deactivated` / `reactivated`; `Nothing to change` when nothing changed.
+
+There is no delete: unused codes are deactivated.
 
 ---
 
