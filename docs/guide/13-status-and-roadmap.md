@@ -8,7 +8,7 @@ _What the prototype covers, what it does not yet, and the order we plan to build
 | --- | --- |
 | **Product research and blueprint** | Done; summarised on page 1 |
 | **Frontend prototype** | Every first-release screen built and working against the in-browser mock, with automated tests. The first roadmap phase (all figures calculated by the server, all lists paged by the server) is complete |
-| **Specification for the backend** | 135 server functions documented, with their rules, error messages and data fields; 38 open questions listed for decision |
+| **Specification for the backend** | 160 server functions documented, with their rules, error messages and data fields; 35 open questions listed for decision (3 more already settled in the prototype) |
 | **Backend (real server and database)** | Not started. Sprint ACC 2 (12–25 October 2026) sets up the server project, settles the blocking decisions, builds the core database structure and the first functions |
 | **Hosting** | Not set up; planned once the backend can run the prototype end to end |
 
@@ -30,6 +30,21 @@ The blueprint says the first version succeeds when a customer can do the followi
 | Trace a financial entry back to its source | Yes: every entry shows its source and reference |
 | Correct mistakes without destroying the audit history | Yes: reversals, voids, credit notes, append-only audit trail |
 
+## Added since the first review
+
+Everything that can be created can now also be corrected in the screens, following the accounting rule that posted entries are reversed or voided, never edited:
+
+- **Payments**: void a receipt or supplier payment; the invoice or bill is owed again.
+- **Invoices and bills**: edit or delete a draft before it is approved.
+- **Bank accounts**: add, rename and deactivate (only when empty and fully reconciled). A new account gets its own ledger account.
+- **Tax codes**: add, edit and deactivate. The rate is locked once a document has used it.
+- **Bank reconciliation**: exclude a statement line (and restore it), delete an imported line, undo the latest import, and reopen a signed-off reconciliation with a reason.
+- **Imports**: fix a failed row and discard a batch that has not been posted.
+- **Posting rules**: add, edit and delete. The event and source are locked once a rule has posted; only unused rules can be deleted.
+- **Data sources**: add a file, API, bank or accounting-system source, and remove it while it is disconnected and unused.
+- **Settings**: rename dimensions and currencies. Deactivating, switching off and deleting now ask for confirmation first.
+- **Chart of accounts**: an account cannot be deactivated while it still has a balance, pending journals or a link to a bank account, setting, tax code or posting rule.
+
 ## What is not in the prototype yet
 
 Grouped by the order they depend on each other. Nothing here is hidden or faked in the screens; these features are simply absent.
@@ -43,9 +58,8 @@ Grouped by the order they depend on each other. Nothing here is hidden or faked 
 **Deeper transactions**
 
 - One payment settling several invoices; customer prepayments and unapplied cash; refunds
-- Editing or deleting draft invoices and bills; voiding a payment
 - Debit notes; recurring invoices, bills and journals; journal templates; emailing invoices
-- Bank rules, splitting a statement line, excluding a line
+- Bank rules, splitting a statement line
 
 **Order to cash and procure to pay**
 
