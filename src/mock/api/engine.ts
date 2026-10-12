@@ -3,6 +3,8 @@
 
 import type {
   Account,
+  BankAccount,
+  BankAccountInput,
   AccountType,
   AuditEvent,
   AuditFields,
@@ -43,6 +45,7 @@ import { documentTotals } from "@/lib/documents";
 import { partitionNewLines } from "@/lib/bankStatementCsv";
 import { fiscalYearFor, fiscalYearsView, NEXT_YEAR_LEAD_DAYS, yearEndPreview } from "@/lib/fiscalYears";
 import {
+  accountBalances,
   carryingBaseFor,
   documentJournalLines,
   isForeign,
@@ -316,6 +319,21 @@ const docJournalLines = (
 
 const checkCustom = (s: LedgerState, entity: CustomFieldEntity, values: Record<string, string> | undefined) =>
   validateCustomValues(s.customFields, entity, normaliseCustomValues(values));
+
+const checkBankInput = (
+  s: LedgerState,
+  input: Pick<BankAccountInput, "name" | "bank" | "account_number" | "currency">,
+  selfId: string | null,
+): string | null => {
+  const name = input.name?.trim();
+  if (!name) return "Give the account a name.";
+  if (!input.bank?.trim()) return "Enter the bank or provider.";
+  if (!input.account_number?.trim()) return "Enter the account number (or a dash for cash).";
+  if (!input.currency) return "Choose the currency.";
+  const clash = s.bankAccounts.find((b) => b.id !== selfId && b.name.toLowerCase() === name.toLowerCase());
+  if (clash) return `${clash.name} already exists.`;
+  return null;
+};
 
 const checkCurrency = (s: LedgerState, currency: string, rate: number): string | null => {
   if (currency === BASE_CURRENCY) return null;
@@ -1266,6 +1284,7 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
           if (input.date < doc.issue_date) return fail("Payment date cannot be before the document date.");
           const bank = s.bankAccounts.find((b) => b.id === input.bank_account_id);
           if (!bank) return fail("Choose the bank or cash account.");
+          if (!bank.is_active) return fail(`${bank.name} is inactive.`);
           if (isForeign(bank.currency) && bank.currency !== doc.currency) {
             return fail(`${bank.name} holds ${bank.currency}. Use it only for ${bank.currency} documents.`);
           }
@@ -1627,6 +1646,134 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
         }),
 
       // ---- Banking ----------------------------------------------------------
+      createBankAccount: (input: BankAccountInput) =>
+        commit((s) => {
+          const err = checkBankInput(s, input, null);
+          if (err) return fail(err);
+          if (input.currency !== BASE_CURRENCY && !s.currencies.some((c) => c.code === input.currency && c.is_active)) {
+            return fail(`${input.currency} is not switched on. Turn it on in Settings → Currencies.`);
+          }
+          const user = actorOf(s);
+          const at = nowIso();
+          let gl: Account | undefined;
+          if (input.gl_account_id) {
+            gl = s.accounts.find((a) => a.id === input.gl_account_id);
+            if (!gl || gl.is_group || !gl.is_bank) return fail("Link a bank or cash ledger account.");
+            if (!gl.is_active) return fail(`${gl.code} ${gl.name} is inactive.`);
+            const linked = s.bankAccounts.find((b) => b.gl_account_id === gl!.id);
+            if (linked) return fail(`${gl.code} ${gl.name} is already linked to ${linked.name}.`);
+          } else {
+            const parent = s.accounts.find((a) => a.is_group && a.type === "ASSET" && !a.parent_id);
+            const used = new Set(s.accounts.map((a) => a.code));
+            const codes = Array.from({ length: 89 }, (_, i) => 1010 + i);
+            const free = [...codes.filter((c) => c % 10 === 0), ...codes].map(String).find((c) => !used.has(c));
+            if (!parent || !free) return fail("No free ledger code between 1010 and 1098. Link an existing ledger account instead.");
+            gl = {
+              id: `acc_${free}`,
+              code: free,
+              name: input.name.trim(),
+              type: "ASSET",
+              subtype: "CASH",
+              parent_id: parent.id,
+              is_group: false,
+              is_active: true,
+              is_control: false,
+              is_bank: true,
+              description: isForeign(input.currency) ? `Held in ${input.currency}. Carried in ${BASE_CURRENCY} and revalued at each month end.` : undefined,
+              ...stamp(at, user),
+            };
+            s.accounts.push(gl);
+            audit(s, {
+              action: "ACCOUNT.CREATED",
+              entity_type: "Account",
+              entity_id: gl.id,
+              entity_label: `${gl.code} ${gl.name}`,
+              summary: `Opened for bank account ${gl.name}.`,
+            });
+          }
+          const bank: BankAccount = {
+            id: newId("ba"),
+            name: input.name.trim(),
+            bank: input.bank.trim(),
+            account_number: input.account_number.trim(),
+            gl_account_id: gl.id,
+            currency: input.currency,
+            statement_balance: 0,
+            statement_date: todayIso(),
+            last_reconciled_at: null,
+            is_active: true,
+            ...stamp(at, user),
+          };
+          s.bankAccounts.push(bank);
+          audit(s, {
+            action: "BANK_ACCOUNT.CREATED",
+            entity_type: "BankAccount",
+            entity_id: bank.id,
+            entity_label: bank.name,
+            summary: `Added ${bank.name} (${bank.currency}) on ledger ${gl.code}.`,
+          });
+          return ok(bank, `${bank.name} added`);
+        }),
+
+      updateBankAccount: (id: string, patch: Partial<Omit<BankAccountInput, "gl_account_id">> & { is_active?: boolean }) =>
+        commit((s) => {
+          const bank = s.bankAccounts.find((b) => b.id === id);
+          if (!bank) return fail("Bank account not found.");
+          const next = { name: bank.name, bank: bank.bank, account_number: bank.account_number, currency: bank.currency, ...patch };
+          const err = checkBankInput(s, next, bank.id);
+          if (err) return fail(err);
+          const gl = s.accounts.find((a) => a.id === bank.gl_account_id);
+          const hasActivity =
+            s.journals.some((j) => affectsLedger(j) && j.lines.some((l) => l.account_id === bank.gl_account_id)) ||
+            s.statementLines.some((l) => l.bank_account_id === bank.id);
+          if (next.currency !== bank.currency) {
+            if (hasActivity) return fail(`${bank.name} already has postings or statement lines in ${bank.currency}. Open a new account for ${next.currency}.`);
+            if (next.currency !== BASE_CURRENCY && !s.currencies.some((c) => c.code === next.currency && c.is_active)) {
+              return fail(`${next.currency} is not switched on. Turn it on in Settings → Currencies.`);
+            }
+          }
+          if (patch.is_active === false && bank.is_active) {
+            const bal = accountBalances(s.journals, bank.gl_account_id, "9999-12-31");
+            const own = isForeign(bank.currency) ? bal.fc : bal.base;
+            if (round2(own) !== 0 || round2(bal.base) !== 0) {
+              return fail(`${bank.name} still holds ${fmtMoney(own, bank.currency)}. Transfer it out before deactivating.`);
+            }
+            const open = s.statementLines.filter((l) => l.bank_account_id === bank.id && l.status !== "MATCHED").length;
+            if (open) return fail(`${bank.name} has ${open} unmatched statement line${open === 1 ? "" : "s"}. Reconcile them first.`);
+          }
+          const changes: NonNullable<AuditEvent["changes"]> = [];
+          for (const field of ["name", "bank", "account_number", "currency"] as const) {
+            const value = next[field].trim();
+            if (value !== bank[field]) {
+              changes.push({ field, from: bank[field], to: value });
+              if (field === "name" && gl && gl.name === bank.name) gl.name = value;
+              bank[field] = value;
+            }
+          }
+          if (patch.is_active !== undefined && patch.is_active !== bank.is_active) {
+            changes.push({ field: "is_active", from: String(bank.is_active), to: String(patch.is_active) });
+            bank.is_active = patch.is_active;
+            if (gl) {
+              gl.is_active = patch.is_active;
+              touch(s, gl);
+            }
+          }
+          if (!changes.length) return ok(bank, "Nothing to change");
+          touch(s, bank);
+          audit(s, {
+            action: patch.is_active === false ? "BANK_ACCOUNT.DEACTIVATED" : patch.is_active === true && changes.length === 1 ? "BANK_ACCOUNT.REACTIVATED" : "BANK_ACCOUNT.UPDATED",
+            entity_type: "BankAccount",
+            entity_id: bank.id,
+            entity_label: bank.name,
+            summary: `Updated ${bank.name}.`,
+            changes,
+          });
+          return ok(
+            bank,
+            patch.is_active === false ? `${bank.name} deactivated` : patch.is_active === true && changes.length === 1 ? `${bank.name} reactivated` : `${bank.name} saved`,
+          );
+        }),
+
       /** `amount` is in the currency of the account the money leaves; `rate` converts the foreign side. */
       transferFunds: (input: { from: string; to: string; amount: number; date: string; memo: string; rate?: number }) =>
         commit((s) => {
@@ -1634,6 +1781,8 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
           const from = s.bankAccounts.find((b) => b.id === input.from);
           const to = s.bankAccounts.find((b) => b.id === input.to);
           if (!from || !to) return fail("Choose both accounts.");
+          const inactive = [from, to].find((b) => !b.is_active);
+          if (inactive) return fail(`${inactive.name} is inactive.`);
           const amount = round2(Number(input.amount) || 0);
           if (amount <= 0) return fail("Enter an amount greater than zero.");
           const foreignCurrencies = [...new Set([from.currency, to.currency].filter(isForeign))];
@@ -1758,6 +1907,7 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
         commit((s): Result<StatementImportResult> => {
           const bank = s.bankAccounts.find((b) => b.id === input.bank_account_id);
           if (!bank) return fail("Bank account not found.");
+          if (!bank.is_active) return fail(`${bank.name} is inactive.`);
           const rows = input.lines ?? [];
           if (rows.length === 0) return fail("The statement has no lines.");
           if (rows.length > MAX_STATEMENT_IMPORT_LINES) return fail(`Import at most ${MAX_STATEMENT_IMPORT_LINES} lines at a time.`);

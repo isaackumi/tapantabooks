@@ -4,17 +4,19 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import toast from "react-hot-toast";
-import { FiArrowDownLeft, FiArrowUpRight, FiRepeat, FiCreditCard } from "react-icons/fi";
+import { FiArrowDownLeft, FiArrowUpRight, FiCreditCard, FiEdit2, FiPlus, FiRepeat } from "react-icons/fi";
 import { Button, Field, FormError, PageHeader, Panel, inputClass } from "@/components/ui";
 import StatCard from "@/components/statCard";
 import SourceBadge from "@/components/sourceBadge";
 import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { QueryError, QueryState, Skeleton } from "@/components/queryState";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
+import BankAccountModal from "@/components/banking/bankAccountModal";
 import { useLedger } from "@/store/ledgerStore";
 import { useReport } from "@/services/useApiQuery";
 import type { ListData } from "@/core/apiClient";
 import type { BankAccountBalances, BankActivityItem } from "@/models/banking";
+import type { BankAccount } from "@/models/accounting";
 import { FxRateField, useFxRate } from "@/components/fxRateField";
 import { isForeign, toBase } from "@/lib/fx";
 import { BASE_CURRENCY, fmtCurrency, fmtDate, fmtMoney, fmtRelative, round2 } from "@/utils/format";
@@ -24,7 +26,9 @@ const useBankBalances = () => useReport<BankAccountBalances>("/bank-accounts/bal
 
 const TransferModal = ({ open, onClose }: { open: boolean; onClose: () => void }) => {
   const { state, actions } = useLedger();
-  const [form, setForm] = useState({ from: "ba_gcb", to: "ba_eco", amount: "", date: todayIso(), memo: "" });
+  const active = state.bankAccounts.filter((b) => b.is_active);
+  const blank = () => ({ from: active[0]?.id ?? "", to: active[1]?.id ?? "", amount: "", date: todayIso(), memo: "" });
+  const [form, setForm] = useState(blank);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const balanceQuery = useBankBalances();
@@ -46,9 +50,10 @@ const TransferModal = ({ open, onClose }: { open: boolean; onClose: () => void }
 
   useEffect(() => {
     if (open) {
-      setForm({ from: "ba_gcb", to: "ba_eco", amount: "", date: todayIso(), memo: "" });
+      setForm(blank());
       setError(null);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const submit = async () => {
@@ -79,7 +84,7 @@ const TransferModal = ({ open, onClose }: { open: boolean; onClose: () => void }
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <Field label="From" required hint={balanceHint(form.from, from?.currency)}>
           <select value={form.from} onChange={(e) => setForm((f) => ({ ...f, from: e.target.value }))} className={inputClass}>
-            {state.bankAccounts.map((b) => (
+            {active.map((b) => (
               <option key={b.id} value={b.id}>
                 {b.name}
               </option>
@@ -88,7 +93,7 @@ const TransferModal = ({ open, onClose }: { open: boolean; onClose: () => void }
         </Field>
         <Field label="To" required hint={balanceHint(form.to, to?.currency)}>
           <select value={form.to} onChange={(e) => setForm((f) => ({ ...f, to: e.target.value }))} className={inputClass}>
-            {state.bankAccounts.map((b) => (
+            {active.map((b) => (
               <option key={b.id} value={b.id}>
                 {b.name}
               </option>
@@ -137,6 +142,10 @@ export default function BankAccountsPage() {
   const { openJournal } = useJournalViewer();
   const router = useRouter();
   const [transferOpen, setTransferOpen] = useState(false);
+  const [editing, setEditing] = useState<BankAccount | null>(null);
+  const [adding, setAdding] = useState(false);
+  const accounts = [...state.bankAccounts].sort((a, b) => Number(b.is_active) - Number(a.is_active));
+  const inactiveCount = accounts.filter((b) => !b.is_active).length;
   const balanceQuery = useBankBalances();
   const activityQuery = useReport<ListData<BankActivityItem>>("/bank-accounts/activity", { size: 14 });
   const summary = balanceQuery.data;
@@ -155,6 +164,9 @@ export default function BankAccountsPage() {
             <Button variant="secondary" icon={FiRepeat} onClick={() => router.push("/banking/reconciliation")}>
               Reconcile
             </Button>
+            <Button variant="secondary" icon={FiPlus} onClick={() => setAdding(true)}>
+              Add account
+            </Button>
             <Button icon={FiRepeat} onClick={() => setTransferOpen(true)}>
               Transfer funds
             </Button>
@@ -168,7 +180,7 @@ export default function BankAccountsPage() {
         <StatCard
           label="Total cash position"
           value={summary ? fmtCurrency(summary.total_base) : pending}
-          sub={`${state.bankAccounts.length} accounts${foreignBanks.length ? ` · foreign at booked rates` : ""}`}
+          sub={`${accounts.length - inactiveCount} active${inactiveCount ? ` · ${inactiveCount} inactive` : ""}${foreignBanks.length ? " · foreign at booked rates" : ""}`}
           info={
             foreignBanks.length
               ? "Foreign-currency accounts are counted at the GH₵ value they were booked at. Month-end revaluation restates them at the closing rate."
@@ -190,13 +202,17 @@ export default function BankAccountsPage() {
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {state.bankAccounts.map((b) => {
+        {accounts.map((b) => {
           const bal = balanceOf.get(b.id);
           const open = bal?.unmatched_lines ?? 0;
           const diff = bal?.statement_difference ?? 0;
           const foreign = isForeign(b.currency);
           return (
-            <div key={b.id} className="flex flex-col rounded-xl border border-neutral-200 bg-white p-5 dark:border-neutral-700 dark:bg-neutral-800">
+            <div
+              key={b.id}
+              data-testid={`bank-card-${b.id}`}
+              className={`flex flex-col rounded-xl border border-neutral-200 bg-white p-5 dark:border-neutral-700 dark:bg-neutral-800 ${b.is_active ? "" : "opacity-60"}`}
+            >
               <div className="flex items-start justify-between">
                 <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-brand-50 text-brand-600 dark:bg-brand-900/30 dark:text-brand-300">
                   <FiCreditCard className="h-5 w-5" />
@@ -205,6 +221,11 @@ export default function BankAccountsPage() {
               </div>
               <p className="mt-3 flex items-center gap-2 font-semibold">
                 {b.name}
+                {!b.is_active && (
+                  <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-600 dark:bg-neutral-700 dark:text-neutral-300">
+                    Inactive
+                  </span>
+                )}
                 {foreign && (
                   <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
                     {b.currency}
@@ -239,6 +260,14 @@ export default function BankAccountsPage() {
                 >
                   Ledger
                 </Link>
+                <button
+                  type="button"
+                  onClick={() => setEditing(b)}
+                  aria-label={`Edit ${b.name}`}
+                  className="flex items-center justify-center gap-1 rounded-lg border border-neutral-200 px-3 py-1.5 text-xs font-medium hover:bg-neutral-50 dark:border-neutral-600 dark:hover:bg-neutral-700"
+                >
+                  <FiEdit2 className="h-3 w-3" /> Edit
+                </button>
                 {open > 0 && (
                   <Link
                     href={`/banking/reconciliation?account=${b.id}`}
@@ -309,6 +338,8 @@ export default function BankAccountsPage() {
       </Panel>
 
       <TransferModal open={transferOpen} onClose={() => setTransferOpen(false)} />
+      <BankAccountModal open={adding} onClose={() => setAdding(false)} />
+      <BankAccountModal open={!!editing} onClose={() => setEditing(null)} account={editing && state.bankAccounts.find((b) => b.id === editing.id)} />
     </div>
   );
 }

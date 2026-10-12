@@ -31,7 +31,12 @@ const read = (tenantId: string): LedgerState | null => {
     if (saved.version !== SCHEMA_VERSION || !saved.state?.journals) return null;
     // Collections added after a tenant was provisioned start empty.
     const state = saved.state as Partial<LedgerState>;
-    return { ...saved.state, creditNotes: state.creditNotes ?? [], supplierCredits: state.supplierCredits ?? [] };
+    return {
+      ...saved.state,
+      creditNotes: state.creditNotes ?? [],
+      supplierCredits: state.supplierCredits ?? [],
+      bankAccounts: saved.state.bankAccounts.map((b) => ({ ...b, is_active: b.is_active ?? true })),
+    };
   } catch {
     return null;
   }

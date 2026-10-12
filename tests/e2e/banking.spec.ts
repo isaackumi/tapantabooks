@@ -40,3 +40,32 @@ test("reconciles the GCB statement line by line and signs it off", async ({ sign
   await complete.click();
   await expect(page.getByText("GCB Operating Account reconciled")).toBeVisible();
 });
+
+test("adds a bank account, renames it and deactivates it", async ({ signedIn: page }) => {
+  await page.goto("/banking/accounts");
+  await page.getByRole("button", { name: "Add account" }).click();
+  const add = dialog(page, "Add bank or cash account");
+  await add.getByPlaceholder("e.g. Fidelity Bank – Collections").fill("E2E Fidelity Collections");
+  await add.getByPlaceholder("e.g. Fidelity Bank Ghana").fill("Fidelity Bank Ghana");
+  await add.getByPlaceholder("••••1234").fill("••••5521");
+  await add.getByRole("button", { name: "Add account" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "E2E Fidelity Collections added" })).toBeVisible();
+  await expectNoDialogs(page);
+
+  await page.getByRole("button", { name: "Edit E2E Fidelity Collections" }).click();
+  const edit = dialog(page, "Edit E2E Fidelity Collections");
+  await expect(edit.getByText(/^10\d0 E2E Fidelity Collections$/)).toBeVisible();
+  await edit.getByPlaceholder("e.g. Fidelity Bank – Collections").fill("E2E Fidelity Main");
+  await edit.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "E2E Fidelity Main saved" })).toBeVisible();
+  await expectNoDialogs(page);
+
+  await page.getByRole("button", { name: "Edit E2E Fidelity Main" }).click();
+  await dialog(page, "Edit E2E Fidelity Main").getByRole("button", { name: "Deactivate" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "E2E Fidelity Main deactivated" })).toBeVisible();
+  const card = page.locator("[data-testid^=bank-card-]").filter({ hasText: "E2E Fidelity Main" });
+  await expect(card.getByText("Inactive", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Transfer funds" }).click();
+  await expect(dialog(page, "Transfer between accounts").locator("option", { hasText: "E2E Fidelity Main" })).toHaveCount(0);
+});

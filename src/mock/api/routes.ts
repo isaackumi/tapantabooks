@@ -609,7 +609,33 @@ const HANDLERS: Record<string, Handler> = {
     fromResult(engine.voidCreditNote("supplier", need(q.get("supplier_credit_id"), "supplier_credit_id"), String(body?.reason ?? ""))),
 
   // ---- Banking -----------------------------------------------------------------------------------------------------
-  "GET /bank-accounts/list": ({ state, q }) => listResult(state.bankAccounts, q, { search: ["name", "bank", "account_number"] }),
+  "GET /bank-accounts/list": ({ state, q }) =>
+    listResult(state.bankAccounts, q, { search: ["name", "bank", "account_number"], filters: { currency: "currency", is_active: "is_active" } }),
+  "GET /bank-accounts/get": ({ state, q }) => {
+    const id = need(q.get("bank_account_id"), "bank_account_id");
+    return { data: found(state.bankAccounts.find((b) => b.id === id), "Bank account") };
+  },
+  "POST /bank-accounts/add": ({ engine, body }) =>
+    fromResult(
+      engine.createBankAccount({
+        name: String(body?.name ?? ""),
+        bank: String(body?.bank ?? ""),
+        account_number: String(body?.account_number ?? ""),
+        currency: String(body?.currency ?? ""),
+        gl_account_id: body?.gl_account_id || null,
+      }),
+      201,
+    ),
+  "PUT /bank-accounts/update": ({ engine, q, body }) =>
+    fromResult(
+      engine.updateBankAccount(need(q.get("bank_account_id"), "bank_account_id"), {
+        ...(body?.name !== undefined && { name: String(body.name) }),
+        ...(body?.bank !== undefined && { bank: String(body.bank) }),
+        ...(body?.account_number !== undefined && { account_number: String(body.account_number) }),
+        ...(body?.currency !== undefined && { currency: String(body.currency) }),
+        ...(body?.is_active !== undefined && { is_active: flag(body.is_active) }),
+      }),
+    ),
   "GET /bank-accounts/balances": ({ state, q }) => ({ data: bankBalances(state, q.get("as_at") || undefined) }),
   "GET /bank-accounts/activity": ({ state, q }) =>
     listResult(bankActivity(state, q.get("bank_account_id") || null), q, {

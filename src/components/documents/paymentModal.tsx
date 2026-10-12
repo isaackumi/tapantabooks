@@ -48,7 +48,7 @@ const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) =>
   const currency = row?.currency ?? BASE_CURRENCY;
   const foreign = isForeign(currency);
   const fx = useFxRate(currency, date, open);
-  const banks = state.bankAccounts.filter((b) => b.currency === BASE_CURRENCY || b.currency === currency);
+  const banks = state.bankAccounts.filter((b) => b.is_active && (b.currency === BASE_CURRENCY || b.currency === currency));
 
   const amountFc = Number(amount) || 0;
   const preview =
@@ -60,8 +60,10 @@ const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) =>
         })()
       : null;
 
+  const usable = (id: string) => (banks.some((b) => b.id === id) ? id : (banks.find((b) => b.currency === currency) ?? banks[0])?.id ?? "");
+
   useEffect(() => {
-    if (!banks.some((b) => b.id === bankId)) setBankId(banks.find((b) => b.currency === currency)?.id ?? "ba_gcb");
+    if (!banks.some((b) => b.id === bankId)) setBankId(usable(defaultBankFor(method)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currency]);
 
@@ -71,9 +73,10 @@ const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) =>
     setAmount("");
     setDate(todayIso());
     setMethod("BANK_TRANSFER");
-    setBankId("ba_gcb");
+    setBankId(usable(defaultBankFor("BANK_TRANSFER")));
     setReference("");
     setError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, documentId]);
 
   useEffect(() => {
@@ -192,7 +195,7 @@ const PaymentModal = ({ kind, open, onClose, documentId }: PaymentModalProps) =>
               onChange={(e) => {
                 const m = e.target.value as PaymentMethod;
                 setMethod(m);
-                setBankId(defaultBankFor(m));
+                setBankId(usable(defaultBankFor(m)));
               }}
               className={inputClass}
             >

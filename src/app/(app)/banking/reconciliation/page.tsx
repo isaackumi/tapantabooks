@@ -82,10 +82,18 @@ export default function ReconciliationPage() {
               {state.bankAccounts.map((b) => (
                 <option key={b.id} value={b.id}>
                   {b.name}
+                  {b.is_active ? "" : " (inactive)"}
                 </option>
               ))}
             </select>
-            <Button variant="secondary" icon={FiUpload} disabled={!bank} onClick={() => setImporting(true)} data-tour="rec-import">
+            <Button
+              variant="secondary"
+              icon={FiUpload}
+              disabled={!bank?.is_active}
+              title={bank && !bank.is_active ? `${bank.name} is inactive` : undefined}
+              onClick={() => setImporting(true)}
+              data-tour="rec-import"
+            >
               Import statement
             </Button>
             <Button

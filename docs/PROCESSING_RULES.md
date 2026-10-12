@@ -1023,7 +1023,35 @@ Standard list (section 1.1), newest `as_at` first. Each `FxRevaluation` is retur
 
 ### 11.1 Bank accounts
 
-Bank accounts (`GET /bank-accounts/list`) link a bank or cash account to a GL account and a currency. There are no endpoints to create or edit them; they come from provisioning. `statement_balance` and `statement_date` describe the latest bank statement and are in the bank account's currency. A foreign bank account's ledger balance is shown in its own currency (the FC balance of its GL account); base-currency accounts show the base balance.
+Bank accounts (`GET /bank-accounts/list`, filters `currency`, `is_active`; `GET /bank-accounts/get?bank_account_id=`) link a bank or cash account to a GL account and a currency. `statement_balance` and `statement_date` describe the latest bank statement and are in the bank account's currency. A foreign bank account's ledger balance is shown in its own currency (the FC balance of its GL account); base-currency accounts show the base balance.
+
+#### `POST /bank-accounts/add`
+
+Body `BankAccountInput { name, bank, account_number, currency, gl_account_id? }`.
+
+Validation, in order:
+
+- `Give the account a name.` · `Enter the bank or provider.` · `Enter the account number (or a dash for cash).` · `Choose the currency.`
+- `{name} already exists.` when another bank account has the same name (case-insensitive).
+- `{code} is not switched on. Turn it on in Settings → Currencies.` for a foreign currency that is not active.
+- With `gl_account_id`: `Link a bank or cash ledger account.` unless it is a postable `is_bank` account; `{code} {name} is inactive.`; `{code} {name} is already linked to {bank}.`
+- Without `gl_account_id`: a new GL account is opened under the top-level Assets group, subtype `CASH`, `is_bank: true`, named after the bank account. Its code is the first free multiple of ten from 1010 to 1090, else the first free code from 1010 to 1098; if none is free: `No free ledger code between 1010 and 1098. Link an existing ledger account instead.` Audit `ACCOUNT.CREATED`.
+
+The bank account starts with `statement_balance` 0, `statement_date` today, `last_reconciled_at` null and `is_active` true. No opening balance is posted; use opening balances (section 18) or a journal. Audit `BANK_ACCOUNT.CREATED`. Response 201, detail `{name} added`.
+
+#### `PUT /bank-accounts/update`
+
+Query `bank_account_id`; body `{ name?, bank?, account_number?, currency?, is_active? }`. The GL link cannot change.
+
+- The add rules for name, bank, account number and duplicate name apply to the merged values.
+- Currency change: `{name} already has postings or statement lines in {old}. Open a new account for {new}.` when any ledger-affecting journal touches the GL account or any statement line exists; otherwise the new currency must be active.
+- Deactivation (`is_active: false`): `{name} still holds {balance}. Transfer it out before deactivating.` when the GL balance (all dates, own currency or base) is not zero; `{name} has {n} unmatched statement line(s). Reconcile them first.`
+- Renaming also renames the GL account when the GL name still equals the old bank name.
+- (De)activation sets the GL account's `is_active` to match, so manual journals cannot post to it either.
+
+Audit `BANK_ACCOUNT.UPDATED`, `BANK_ACCOUNT.DEACTIVATED` or `BANK_ACCOUNT.REACTIVATED` with per-field changes. Detail `{name} saved` / `deactivated` / `reactivated`; `Nothing to change` when the body changes nothing.
+
+Inactive bank accounts are refused by receipts and payments (section 8.1), transfers (section 11.2) and statement imports (section 11.3a) with `{name} is inactive.` They stay in balances, activity, reconciliation history and reports.
 
 ### 11.1a `GET /bank-accounts/balances`
 

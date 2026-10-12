@@ -1638,6 +1638,7 @@ const buildBanking = (journals: JournalEntry[]) => {
       statement_balance: statementBalance,
       statement_date: statementTo,
       last_reconciled_at: "2026-09-12T15:20:00.000Z",
+      is_active: true,
       ...bankStamp,
     },
     {
@@ -1650,6 +1651,7 @@ const buildBanking = (journals: JournalEntry[]) => {
       statement_balance: ledgerBalance(ACC.eco, statementTo),
       statement_date: statementTo,
       last_reconciled_at: "2026-10-01T10:05:00.000Z",
+      is_active: true,
       ...bankStamp,
     },
     {
@@ -1662,6 +1664,7 @@ const buildBanking = (journals: JournalEntry[]) => {
       statement_balance: ledgerBalance(ACC.momo, statementTo),
       statement_date: statementTo,
       last_reconciled_at: "2026-10-01T10:12:00.000Z",
+      is_active: true,
       ...bankStamp,
     },
     {
@@ -1674,6 +1677,7 @@ const buildBanking = (journals: JournalEntry[]) => {
       statement_balance: accountBalances(journals, ACC.usd, statementTo).fc,
       statement_date: statementTo,
       last_reconciled_at: "2026-10-01T10:20:00.000Z",
+      is_active: true,
       ...bankStamp,
     },
     {
@@ -1686,6 +1690,7 @@ const buildBanking = (journals: JournalEntry[]) => {
       statement_balance: ledgerBalance(ACC.cash, statementTo),
       statement_date: statementTo,
       last_reconciled_at: "2026-09-30T18:00:00.000Z",
+      is_active: true,
       ...bankStamp,
     },
   ];

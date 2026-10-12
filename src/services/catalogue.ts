@@ -864,7 +864,29 @@ export const ENDPOINTS: EndpointDef[] = [
   },
 
   // ---- Banking -------------------------------------------------------------
-  list("Banking", "/bank-accounts/list", "bank-account", "BankAccount"),
+  list("Banking", "/bank-accounts/list", "bank-account", "BankAccount", { currency: "Currency code", is_active: "true | false" }),
+  get("Banking", "/bank-accounts/get", "bank-account", "bank_account_id", "BankAccount"),
+  {
+    method: "POST",
+    path: "/bank-accounts/add",
+    module: "Banking",
+    summary: "Add a bank, MoMo or cash account; opens a new ledger account under Assets unless an unlinked bank ledger account is given",
+    body: "BankAccountInput { name, bank, account_number, currency, gl_account_id? }",
+    returns: "BankAccount",
+    permission: perm("bank-account", "create"),
+    invalidates: ["bankAccounts", "accounts"],
+  },
+  {
+    method: "PUT",
+    path: "/bank-accounts/update",
+    module: "Banking",
+    summary: "Rename or re-describe a bank account, or (de)activate it. Deactivation needs a zero balance and no unmatched statement lines",
+    query: { bank_account_id: "Bank account id" },
+    body: "{ name?, bank?, account_number?, currency?, is_active? }",
+    returns: "BankAccount",
+    permission: perm("bank-account", "update"),
+    invalidates: ["bankAccounts", "accounts"],
+  },
   {
     method: "GET",
     path: "/bank-accounts/balances",

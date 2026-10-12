@@ -27,6 +27,7 @@ import type {
   Supplier,
   AccountingRule,
   BankAccount,
+  BankAccountInput,
   BankStatementLine,
   DataSource,
   ImportRecord,
@@ -247,6 +248,9 @@ const createActions = (
         : call<CreditNote>("POST", "/supplier-credits/void", { query: { supplier_credit_id: id }, body: { reason } }),
 
     // ---- Banking -------------------------------------------------------------------------------------
+    createBankAccount: (input: BankAccountInput) => call<BankAccount>("POST", "/bank-accounts/add", { body: input }),
+    updateBankAccount: (id: string, patch: Partial<Omit<BankAccountInput, "gl_account_id">> & { is_active?: boolean }) =>
+      call<BankAccount>("PUT", "/bank-accounts/update", { query: { bank_account_id: id }, body: patch }),
     transferFunds: (input: { from: string; to: string; amount: number; date: string; memo: string; rate?: number }) =>
       call<JournalEntry>("POST", "/bank-accounts/transfer", { body: input }),
     matchStatementLine: (lineId: string, journalId: string) =>

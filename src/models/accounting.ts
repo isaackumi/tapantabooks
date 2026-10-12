@@ -233,6 +233,17 @@ export interface BankAccount extends AuditFields {
   statement_balance: number;
   statement_date: string;
   last_reconciled_at: string | null;
+  /** Inactive accounts keep their history but cannot take new payments, transfers or statements. */
+  is_active: boolean;
+}
+
+export interface BankAccountInput {
+  name: string;
+  bank: string;
+  account_number: string;
+  currency: string;
+  /** An existing, unlinked bank-type ledger account; omitted to open a new one under Assets. */
+  gl_account_id?: string | null;
 }
 
 export type StatementLineStatus = "UNMATCHED" | "SUGGESTED" | "MATCHED";
