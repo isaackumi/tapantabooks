@@ -213,7 +213,15 @@ export interface Payment extends AuditFields {
   bank_account_id: string;
   reference?: string;
   journal_id: string;
+  /** Missing on payments recorded before voiding existed; treat as POSTED. */
+  state?: PaymentState;
+  void_reason?: string | null;
 }
+
+export type PaymentState = "POSTED" | "VOID";
+
+/** A payment still counts towards what has been settled. */
+export const isLivePayment = (p: { state?: PaymentState }) => p.state !== "VOID";
 
 export interface BankAccount extends AuditFields {
   id: string;

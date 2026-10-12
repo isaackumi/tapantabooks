@@ -1,4 +1,5 @@
 import type { CreditNote, Party, Payment, PurchaseBill, SalesInvoice, TaxCode } from "@/models/accounting";
+import { isLivePayment } from "@/models/accounting";
 import { ageingBucket, documentTotals, emptyAgeing, type AgeingBucket } from "@/lib/documents";
 import { round2 } from "@/utils/format";
 
@@ -90,7 +91,7 @@ export const partyStatement = (
       credit: 0,
     })),
     ...(isCustomer ? s.receipts : s.supplierPayments)
-      .filter((p) => docIds.has(p.document_id))
+      .filter((p) => isLivePayment(p) && docIds.has(p.document_id))
       .map((p) => ({
         date: p.date,
         type: (isCustomer ? "RECEIPT" : "PAYMENT") as StatementEntryType,

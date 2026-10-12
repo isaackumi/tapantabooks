@@ -1,4 +1,5 @@
 import type { CreditNote, DocumentDisplayStatus, Party, PurchaseBill, SalesInvoice } from "@/models/accounting";
+import { isLivePayment } from "@/models/accounting";
 import type {
   CreditListItem,
   CreditStatistics,
@@ -7,6 +8,7 @@ import type {
   DocumentListFields,
   PartyBalance,
   PartyBalances,
+  PaymentDetail,
   PaymentListItem,
 } from "@/models/lists";
 import { displayStatus, documentTotals, type DocumentTotals } from "@/lib/documents";
@@ -81,6 +83,8 @@ export const paymentItems = (state: LedgerState, kind: "receipt" | "payment"): P
   const banks = new Map(state.bankAccounts.map((b) => [b.id, b.name]));
   return (isReceipt ? state.receipts : state.supplierPayments).map((p) => ({
     ...p,
+    state: p.state ?? "POSTED",
+    void_reason: p.void_reason ?? null,
     party_name: parties.get(p.party_id) ?? "",
     document_number: docs.get(p.document_id) ?? "",
     bank_account_name: banks.get(p.bank_account_id) ?? "",
@@ -88,6 +92,18 @@ export const paymentItems = (state: LedgerState, kind: "receipt" | "payment"): P
 };
 
 const journalNumbers = (state: LedgerState) => new Map(state.journals.map((j) => [j.id, j.number]));
+
+export const paymentDetail = (state: LedgerState, kind: "receipt" | "payment", id: string): PaymentDetail => {
+  const item = found(
+    paymentItems(state, kind).find((p) => p.id === id),
+    kind === "receipt" ? "Receipt" : "Supplier payment",
+  );
+  return {
+    ...item,
+    journal_number: journalNumbers(state).get(item.journal_id) ?? null,
+    is_reconciled: state.statementLines.some((l) => l.matched_journal_id === item.journal_id),
+  };
+};
 
 export const creditItems = (state: LedgerState, kind: "customer" | "supplier"): CreditListItem[] => {
   const isCustomer = kind === "customer";
@@ -154,7 +170,7 @@ export const documentDetail = (state: LedgerState, kind: "invoice" | "bill", id:
     credits: creditItems(state, isInvoice ? "customer" : "supplier")
       .filter((c) => c.document_id === id)
       .sort(byDate),
-    realised_fx: round2(payments.reduce((t, p) => t + p.fx_gain_loss, 0)),
+    realised_fx: round2(payments.filter(isLivePayment).reduce((t, p) => t + p.fx_gain_loss, 0)),
   };
 };
 

@@ -1,4 +1,5 @@
 import type { CustomFieldEntity, JournalStatus, Payment, PeriodStatus } from "@/models/accounting";
+import { isLivePayment } from "@/models/accounting";
 import type {
   DocumentListItem,
   DocumentStatistics,
@@ -50,6 +51,7 @@ import {
   documentItems,
   invoiceRows,
   partyBalances,
+  paymentDetail,
   paymentItems,
   type DocumentRow,
 } from "./documents";
@@ -283,10 +285,13 @@ const DOCUMENT_LIST: ListOptions<DocumentListItem> = {
 
 const PAYMENT_LIST: ListOptions<PaymentListItem> = {
   search: ["number", "reference", "party_name", "document_number"],
-  filters: { party_id: "party_id", document_id: "document_id", method: "method", bank_account_id: "bank_account_id" },
+  filters: { party_id: "party_id", document_id: "document_id", method: "method", bank_account_id: "bank_account_id", state: "state" },
   dateField: "date",
   defaultSort: { field: "date", order: "desc", then: "number" },
-  summarise: (rows) => ({ totals: { count: rows.length, base_amount: round2(rows.reduce((t, p) => t + p.base_amount, 0)) } }),
+  summarise: (rows) => {
+    const live = rows.filter(isLivePayment);
+    return { totals: { count: live.length, base_amount: round2(live.reduce((t, p) => t + p.base_amount, 0)) } };
+  },
 };
 
 /** Entries the ledger creates itself; everything else came from an integration or import. */
@@ -539,7 +544,7 @@ const HANDLERS: Record<string, Handler> = {
       ...DOCUMENT_LIST,
       filters: { state: "state", status: "status", customer_id: "customer_id", currency: "currency" },
     }),
-  "GET /invoices/statistics": ({ state }) => ({ data: documentStatistics(documentItems(invoiceRows(state)), state.receipts) }),
+  "GET /invoices/statistics": ({ state }) => ({ data: documentStatistics(documentItems(invoiceRows(state)), state.receipts.filter(isLivePayment)) }),
   "GET /invoices/get": ({ state, q }) => ({ data: documentDetail(state, "invoice", need(q.get("invoice_id"), "invoice_id")) }),
   "POST /invoices/add": ({ engine, body }) => {
     const { approve, ...input } = body;
@@ -549,8 +554,11 @@ const HANDLERS: Record<string, Handler> = {
   "POST /invoices/void": ({ engine, q, body }) =>
     fromResult(engine.voidDocument("invoice", need(q.get("invoice_id"), "invoice_id"), String(body.reason ?? ""))),
   "GET /receipts/list": ({ state, q }) => listResult(paymentItems(state, "receipt"), q, PAYMENT_LIST),
-  "GET /receipts/statistics": ({ state }) => ({ data: paymentStatistics(state, state.receipts) }),
+  "GET /receipts/statistics": ({ state }) => ({ data: paymentStatistics(state, state.receipts.filter(isLivePayment)) }),
+  "GET /receipts/get": ({ state, q }) => ({ data: paymentDetail(state, "receipt", need(q.get("receipt_id"), "receipt_id")) }),
   "POST /receipts/add": ({ engine, body }) => fromResult(engine.recordPayment("receipt", body), 201),
+  "POST /receipts/void": ({ engine, q, body }) =>
+    fromResult(engine.voidPayment("receipt", need(q.get("receipt_id"), "receipt_id"), String(body?.reason ?? ""))),
   "GET /credit-notes/list": ({ state, q }) => creditList(state, "customer", q),
   "GET /credit-notes/statistics": ({ state }) => ({ data: creditStatistics(state, "customer") }),
   "GET /credit-notes/get": ({ state, q }) => {
@@ -567,7 +575,7 @@ const HANDLERS: Record<string, Handler> = {
       ...DOCUMENT_LIST,
       filters: { state: "state", status: "status", supplier_id: "supplier_id", currency: "currency" },
     }),
-  "GET /bills/statistics": ({ state }) => ({ data: documentStatistics(documentItems(billRows(state)), state.supplierPayments) }),
+  "GET /bills/statistics": ({ state }) => ({ data: documentStatistics(documentItems(billRows(state)), state.supplierPayments.filter(isLivePayment)) }),
   "GET /bills/get": ({ state, q }) => ({ data: documentDetail(state, "bill", need(q.get("bill_id"), "bill_id")) }),
   "POST /bills/add": ({ engine, body }) => {
     const { approve, ...input } = body;
@@ -577,8 +585,15 @@ const HANDLERS: Record<string, Handler> = {
   "POST /bills/void": ({ engine, q, body }) =>
     fromResult(engine.voidDocument("bill", need(q.get("bill_id"), "bill_id"), String(body.reason ?? ""))),
   "GET /supplier-payments/list": ({ state, q }) => listResult(paymentItems(state, "payment"), q, PAYMENT_LIST),
-  "GET /supplier-payments/statistics": ({ state }) => ({ data: paymentStatistics(state, state.supplierPayments) }),
+  "GET /supplier-payments/statistics": ({ state }) => ({ data: paymentStatistics(state, state.supplierPayments.filter(isLivePayment)) }),
+  "GET /supplier-payments/get": ({ state, q }) => ({
+    data: paymentDetail(state, "payment", need(q.get("supplier_payment_id"), "supplier_payment_id")),
+  }),
   "POST /supplier-payments/add": ({ engine, body }) => fromResult(engine.recordPayment("payment", body), 201),
+  "POST /supplier-payments/void": ({ engine, q, body }) =>
+    fromResult(
+      engine.voidPayment("payment", need(q.get("supplier_payment_id"), "supplier_payment_id"), String(body?.reason ?? "")),
+    ),
   "GET /supplier-credits/list": ({ state, q }) => creditList(state, "supplier", q),
   "GET /supplier-credits/statistics": ({ state }) => ({ data: creditStatistics(state, "supplier") }),
   "GET /supplier-credits/get": ({ state, q }) => {

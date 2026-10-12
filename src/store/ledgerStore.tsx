@@ -231,6 +231,10 @@ const createActions = (
       call<SalesInvoice | PurchaseBill>("POST", `/${kind}s/void`, { query: { [`${kind}_id`]: id }, body: { reason } }),
     recordPayment: (kind: "receipt" | "payment", input: PaymentInput) =>
       call<Payment>("POST", kind === "receipt" ? "/receipts/add" : "/supplier-payments/add", { body: input }),
+    voidPayment: (kind: "receipt" | "payment", id: string, reason: string) =>
+      kind === "receipt"
+        ? call<Payment>("POST", "/receipts/void", { query: { receipt_id: id }, body: { reason } })
+        : call<Payment>("POST", "/supplier-payments/void", { query: { supplier_payment_id: id }, body: { reason } }),
     createCreditNote: (kind: "customer" | "supplier", input: CreditNoteInput) =>
       call<CreditNote>("POST", kind === "customer" ? "/credit-notes/add" : "/supplier-credits/add", { body: input }),
     voidCreditNote: (kind: "customer" | "supplier", id: string, reason: string) =>

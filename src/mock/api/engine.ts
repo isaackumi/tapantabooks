@@ -36,6 +36,7 @@ import type {
   SourceRef,
   Supplier,
 } from "@/models/accounting";
+import { isLivePayment } from "@/models/accounting";
 import { buildSeed, CURRENT_USER, USERS, ACC, TAX, openingEquityAccount, stamp, type SeedData } from "@/mock/seed";
 import { affectsLedger, isBalanced, lineTotals } from "@/lib/ledger";
 import { documentTotals } from "@/lib/documents";
@@ -1147,7 +1148,7 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
           if (!doc) return fail("Document not found.");
           if (doc.state === "VOID") return fail("Already void.");
           if (doc.source.type === "OPENING_BALANCE") return fail("Brought-forward items are removed from Accounting → Opening balances.");
-          if (doc.amount_paid > 0) return fail("Payments or credit notes have been recorded against it. Reverse those first.");
+          if (doc.amount_paid > 0) return fail("Payments or credit notes have been recorded against it. Void those first.");
           if (!reason.trim()) return fail("Give a reason for voiding.");
           if (doc.journal_id) {
             const j = s.journals.find((x) => x.id === doc.journal_id);
@@ -1247,6 +1248,8 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
             bank_account_id: bank.id,
             reference: input.reference?.trim() || undefined,
             journal_id: j.id,
+            state: "POSTED",
+            void_reason: null,
             ...stamp(nowIso(), user),
           };
           list.push(payment);
@@ -1265,6 +1268,45 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
             summary: `${fmtMoney(amount, doc.currency)} ${isReceipt ? "from" : "to"} ${party.name} against ${doc.number}.${fxNote}`,
           });
           return ok(payment, `${number} recorded · ${fmtMoney(amount, doc.currency)}${fxNote}`);
+        }),
+
+      voidPayment: (kind: "receipt" | "payment", id: string, reason: string) =>
+        commit((s) => {
+          const isReceipt = kind === "receipt";
+          const payment = (isReceipt ? s.receipts : s.supplierPayments).find((p) => p.id === id);
+          if (!payment) return fail(isReceipt ? "Receipt not found." : "Payment not found.");
+          if (!isLivePayment(payment)) return fail("Already void.");
+          if (!reason?.trim()) return fail("Give a reason for voiding.");
+          if (s.statementLines.some((l) => l.matched_journal_id === payment.journal_id)) {
+            return fail(`${payment.number} is matched to a bank statement line. Unmatch it in Banking → Reconciliation first.`);
+          }
+          const periodError = checkPeriod(s, todayIso());
+          if (periodError) return fail(periodError);
+          const doc = isReceipt
+            ? s.invoices.find((i) => i.id === payment.document_id)
+            : s.bills.find((b) => b.id === payment.document_id);
+          const j = s.journals.find((x) => x.id === payment.journal_id);
+          const partyAccount = isReceipt ? ACC.ar : ACC.ap;
+          const partyLine = j?.lines.find((l) => l.account_id === partyAccount);
+          const carrying = partyLine ? round2(partyLine.debit + partyLine.credit) : payment.base_amount;
+          if (j && j.status === "POSTED") reverseInto(s, j, todayIso(), `void ${payment.number}: ${reason.trim()}`);
+          if (doc) {
+            doc.amount_paid = round2(Math.max(0, doc.amount_paid - payment.amount));
+            doc.amount_paid_base = round2(Math.max(0, doc.amount_paid_base - carrying));
+            touch(s, doc);
+          }
+          payment.state = "VOID";
+          payment.void_reason = reason.trim();
+          touch(s, payment);
+          audit(s, {
+            action: isReceipt ? "RECEIPT.VOIDED" : "PAYMENT.VOIDED",
+            entity_type: isReceipt ? "Receipt" : "Supplier payment",
+            entity_id: payment.id,
+            entity_label: payment.number,
+            summary: `Voided: ${reason.trim()}${doc ? ` · ${fmtMoney(payment.amount, payment.currency)} is owed again on ${doc.number}` : ""}`,
+            changes: [{ field: "state", from: "POSTED", to: "VOID" }],
+          });
+          return ok(payment, `${payment.number} voided${doc ? ` · ${doc.number} is owed again` : ""}`);
         }),
 
       // ---- Credit notes -----------------------------------------------------

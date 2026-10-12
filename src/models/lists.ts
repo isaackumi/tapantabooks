@@ -6,6 +6,7 @@ import type {
   JournalEntry,
   JournalStatus,
   Payment,
+  PaymentState,
   PurchaseBill,
   SalesInvoice,
 } from "./accounting";
@@ -36,9 +37,18 @@ export type BillListItem = PurchaseBill & DocumentListFields;
 export type DocumentListItem = InvoiceListItem | BillListItem;
 
 export type PaymentListItem = Payment & {
+  state: PaymentState;
+  void_reason: string | null;
   party_name: string;
   document_number: string;
   bank_account_name: string;
+};
+
+/** GET /receipts/get and /supplier-payments/get. */
+export type PaymentDetail = PaymentListItem & {
+  journal_number: string | null;
+  /** True while a bank statement line is matched to its ledger entry; unmatch before voiding. */
+  is_reconciled: boolean;
 };
 
 /** A credit note or supplier credit as listed; amounts in the credit's (the document's) currency. */

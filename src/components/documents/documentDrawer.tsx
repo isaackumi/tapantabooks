@@ -219,11 +219,16 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
               ) : (
                 <ul className="divide-y divide-neutral-100 rounded-xl border border-neutral-200 dark:divide-neutral-700 dark:border-neutral-700">
                   {doc.payments.map((p) => (
-                    <li key={p.id} className="flex items-center justify-between px-4 py-2.5 text-sm">
+                    <li key={p.id} className={classNames("flex items-center justify-between px-4 py-2.5 text-sm", p.state === "VOID" && "opacity-50")}>
                       <div>
-                        <button onClick={() => openJournal(p.journal_id)} className="font-mono text-brand-700 hover:underline dark:text-brand-300">
+                        <Link
+                          href={`${isInvoice ? "/sales/receipts" : "/purchases/payments"}?open=${p.id}`}
+                          onClick={onClose}
+                          className="font-mono text-brand-700 hover:underline dark:text-brand-300"
+                        >
                           {p.number}
-                        </button>
+                        </Link>
+                        {p.state === "VOID" && <span className="ml-2 text-xs font-medium text-red-600">Void</span>}
                         <p className="text-xs text-neutral-500 dark:text-neutral-400">
                           {fmtDate(p.date)} · {humanize(p.method)}
                           {p.bank_account_name && ` · ${p.bank_account_name}`}

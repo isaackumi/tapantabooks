@@ -680,7 +680,7 @@ Validation, in order:
 
 - `Document not found.`
 - `Already void.`
-- `Payments have been recorded against it. Reverse those first.` when `amount_paid` > 0.
+- `Payments or credit notes have been recorded against it. Void those first.` when `amount_paid` > 0.
 - `Give a reason for voiding.`
 - When the document has a `POSTED` journal: the posting-date check on today.
 
@@ -692,7 +692,7 @@ Side effects:
 
 Response: `data: null`. Detail: `{number} voided`.
 
-There is no endpoint to reverse a payment, so a document with any payment can never be voided (open question).
+To void a paid or credited document, void its payments (section 8.6) and credit notes (section 19.2) first.
 
 ### 7.8 Lists and statistics
 
@@ -721,7 +721,7 @@ There is no endpoint to reverse a payment, so a document with any payment can ne
 | `journal_number` | Number of the posting journal, null for drafts |
 | `payments` | Receipts (or supplier payments) against the document as `PaymentListItem`s (section 8.5), oldest first |
 | `credits` | Credit notes (or supplier credits) against it as `CreditListItem`s (section 19.4), voided ones included, oldest first |
-| `realised_fx` | Sum of `fx_gain_loss` over `payments`, base currency |
+| `realised_fx` | Sum of `fx_gain_loss` over `payments` that are not `VOID`, base currency |
 
 **`GET /invoices/statistics`, `GET /bills/statistics`.** Computed over every invoice (or bill), ignoring list filters. Amounts are base currency.
 
@@ -731,7 +731,7 @@ There is no endpoint to reverse a payment, so a document with any payment can ne
 | `outstanding`, `open_count` | Sum and count of `outstanding_base` over documents with `outstanding_base > 0`. Equals the ageing report total as at today |
 | `overdue`, `overdue_count` | Same over `status = OVERDUE` |
 | `due_7_days` | `outstanding_base` of open documents due from today to today + 7 days inclusive |
-| `settled_this_month`, `settled_this_month_count` | Sum of `base_amount` and count of receipts (for invoices) or supplier payments (for bills) dated from the 1st of this month to today |
+| `settled_this_month`, `settled_this_month_count` | Sum of `base_amount` and count of receipts (for invoices) or supplier payments (for bills) that are not `VOID`, dated from the 1st of this month to today |
 | `currencies` | Distinct document currencies, sorted; the frontend's currency filter options |
 
 ---
@@ -794,7 +794,7 @@ Supplier payment:
 
 ### 8.4 Side effects and response
 
-- A `Payment` row is created: new `number`; `party_id` (the document's customer or supplier); `document_id`; `date`; `amount` (document currency); `currency` (the document's); `exchange_rate` (pay rate); `base_amount` (bank base); `fx_gain_loss`; `method`; `bank_account_id`; `reference` (trimmed, omitted when blank); `journal_id`.
+- A `Payment` row is created: new `number`; `party_id` (the document's customer or supplier); `document_id`; `date`; `amount` (document currency); `currency` (the document's); `exchange_rate` (pay rate); `base_amount` (bank base); `fx_gain_loss`; `method`; `bank_account_id`; `reference` (trimmed, omitted when blank); `journal_id`; `state` `POSTED`; `void_reason` null.
 - The document's `amount_paid` increases by `amount` and `amount_paid_base` increases by the carrying value released (both rounded to two decimals).
 - Audit `RECEIPT.RECORDED` (entity type `Receipt`) or `PAYMENT.RECORDED` (entity type `Supplier payment`), label = payment number, summary `{amount} from|to {party name} against {document number}.` followed by ` Realised exchange gain|loss {amount}.` when there is one.
 
@@ -802,18 +802,43 @@ Response: 201 with the `Payment`. Detail: `{number} recorded · {amount}` plus t
 
 `amount_paid` (document currency) drives the display status and the overpayment check; `amount_paid_base` (base, at the document rate) drives every base-currency outstanding figure. They must both be maintained.
 
-Payment journals carry `source.document_id`, so they cannot be reversed through `POST /journals/reverse`, and there is no payment void endpoint (open question).
+Payment journals carry `source.document_id`, so they cannot be reversed through `POST /journals/reverse`; void the payment instead (section 8.6).
+
+### 8.6 Void (`POST /receipts/void`, `POST /supplier-payments/void`)
+
+Query `receipt_id` or `supplier_payment_id`; body `{ reason }`. Used when a cheque bounces, a transfer fails, or money was recorded against the wrong document. Payments are never edited or deleted.
+
+Validation, in order:
+
+- `Receipt not found.` / `Payment not found.`
+- `Already void.`
+- `Give a reason for voiding.`
+- `{number} is matched to a bank statement line. Unmatch it in Banking → Reconciliation first.` when any statement line has `matched_journal_id` = the payment's journal.
+- Posting-date check on today.
+
+Side effects:
+
+- The payment's journal, when `POSTED`, is reversed into a new journal dated today with memo `Reversal of {journal number} – void {payment number}: {reason}` (section 4.10). The reversal also reverses any realised FX line, so the gain or loss disappears with the payment.
+- The document's `amount_paid` falls by `amount` and `amount_paid_base` by the carrying value the payment released (the debit or credit on the AR or AP control line of its journal), both floored at 0. The document is owed again and its display status is recomputed.
+- `state` becomes `VOID`; `void_reason` = the trimmed reason.
+- Audit `RECEIPT.VOIDED` / `PAYMENT.VOIDED`, summary `Voided: {reason} · {amount} is owed again on {document number}`, change `state` `POSTED` → `VOID`.
+
+Response: the `Payment`. Detail: `{number} voided · {document number} is owed again`.
+
+Void payments stay in lists (filter `state=VOID`) but are excluded from list totals, statistics, `realised_fx`, customer and supplier statements, and FX revaluation of open documents. Payments stored before `state` existed count as `POSTED`.
 
 ### 8.5 Lists and statistics
 
-**`GET /receipts/list`, `GET /supplier-payments/list`.** Each item is the `Payment` plus `party_name`, `document_number` and `bank_account_name`, resolved at read time (empty string when the record is missing).
+**`GET /receipts/list`, `GET /supplier-payments/list`.** Each item is the `Payment` plus `party_name`, `document_number` and `bank_account_name`, resolved at read time (empty string when the record is missing). `state` is always present (`POSTED` when not stored) and `void_reason` is null unless void.
 
 - `search`: number, reference, party name, document number.
-- Filters: `party_id`, `document_id`, `method`, `bank_account_id`; `from_date` / `to_date` on `date`.
+- Filters: `party_id`, `document_id`, `method`, `bank_account_id`, `state` (`POSTED` or `VOID`); `from_date` / `to_date` on `date`.
 - Default order: `date` descending, then `number` descending.
-- `data.totals` = `{ count, base_amount }` over **every** matching payment, not only the returned page, so a filtered list can show its total.
+- `data.totals` = `{ count, base_amount }` over **every** matching payment that is not `VOID`, not only the returned page, so a filtered list can show its total.
 
-**`GET /receipts/statistics`, `GET /supplier-payments/statistics`.** Computed over every payment of that kind, ignoring list filters. "Today" is the server date.
+**`GET /receipts/get`, `GET /supplier-payments/get`.** Query `receipt_id` or `supplier_payment_id`; 404 `Receipt not found.` / `Supplier payment not found.` Returns the list item plus `journal_number` and `is_reconciled` (true while a statement line is matched to its journal; the void button is disabled then).
+
+**`GET /receipts/statistics`, `GET /supplier-payments/statistics`.** Computed over every payment of that kind that is not `VOID`, ignoring list filters. "Today" is the server date.
 
 | Field | Definition |
 |---|---|
@@ -1836,7 +1861,7 @@ These are behaviours that are ambiguous, missing or probably wrong in the mock. 
 **Documents and payments**
 
 14. There are no endpoints to edit or delete draft invoices and bills. Are they needed?
-15. Payments cannot be reversed or voided, and a document with payments cannot be voided. A payment void endpoint is needed; what are its rules (reversal date, FX treatment)?
+15. ~~Payments cannot be reversed or voided.~~ Resolved: `POST /receipts/void` and `POST /supplier-payments/void` (section 8.6) reverse the payment's journal dated today, including any realised FX. Confirm today (not the payment date) is the right reversal date for bounced cheques in a closed month.
 16. Bills do not check the supplier's status; invoice approval does not re-check the customer's status or the custom fields (bill approval does). Should both sides behave the same?
 17. Document lines are not checked for account and tax-code existence, activity, postability, control accounts or document type. What messages should these checks use?
 18. Withholding tax codes are never applied. How should WHT be calculated and posted (on the bill, on payment, against WHT payable)?

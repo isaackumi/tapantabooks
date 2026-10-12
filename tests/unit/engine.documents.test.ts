@@ -59,7 +59,7 @@ describe("sales invoices", () => {
   it("cannot be voided once something has been paid or credited", () => {
     const { books, invoice } = setup();
     expectOk(books.engine.recordPayment("receipt", receipt(invoice.id, 100)));
-    expectFail(books.engine.voidDocument("invoice", invoice.id, "Raised in error"), /Reverse those first/);
+    expectFail(books.engine.voidDocument("invoice", invoice.id, "Raised in error"), /Void those first/);
   });
 
   it("void by reversing their journal when unpaid", () => {
@@ -67,6 +67,50 @@ describe("sales invoices", () => {
     expectOk(books.engine.voidDocument("invoice", invoice.id, "Raised in error"));
     expect(books.state.invoices.find((i) => i.id === invoice.id)?.state).toBe("VOID");
     expect(books.state.journals.find((j) => j.id === invoice.journal_id)?.status).toBe("REVERSED");
+  });
+});
+
+describe("voiding receipts", () => {
+  it("reverse the receipt's journal and put the amount back on the invoice", () => {
+    const { books, invoice } = setup();
+    const r = expectOk(books.engine.recordPayment("receipt", receipt(invoice.id, 700)));
+    expectFail(books.engine.voidPayment("receipt", r.id, "  "), /reason/);
+    const voided = expectOk(books.engine.voidPayment("receipt", r.id, "Cheque returned unpaid"));
+    expect(voided).toMatchObject({ state: "VOID", void_reason: "Cheque returned unpaid" });
+    const inv = books.state.invoices.find((i) => i.id === invoice.id)!;
+    expect(outstanding(books.state, inv)).toBe(1200);
+    expect(inv.amount_paid_base).toBe(0);
+    const original = books.state.journals.find((j) => j.id === r.journal_id)!;
+    expect(original.status).toBe("REVERSED");
+    const reversal = books.state.journals.find((j) => j.id === original.reversed_by_id)!;
+    expect(reversal.date).toBe(DEMO_TODAY);
+    expect(isBalanced(reversal.lines)).toBe(true);
+    expectFail(books.engine.voidPayment("receipt", r.id, "Again"), /Already void/);
+  });
+
+  it("let the invoice be voided once every receipt is void", () => {
+    const { books, invoice } = setup();
+    const r = expectOk(books.engine.recordPayment("receipt", receipt(invoice.id, 1200)));
+    expectFail(books.engine.voidDocument("invoice", invoice.id, "Raised in error"), /Void those first/);
+    expectOk(books.engine.voidPayment("receipt", r.id, "Recorded against the wrong invoice"));
+    expectOk(books.engine.voidDocument("invoice", invoice.id, "Raised in error"));
+  });
+
+  it("are refused while the receipt is matched to a bank statement line", () => {
+    const { books, invoice } = setup();
+    const r = expectOk(books.engine.recordPayment("receipt", receipt(invoice.id, 300)));
+    books.state.statementLines[0].matched_journal_id = r.journal_id;
+    expectFail(books.engine.voidPayment("receipt", r.id, "Bounced"), /Unmatch it/);
+  });
+
+  it("drop out of the customer statement", () => {
+    const { books, customer, invoice } = setup();
+    const r = expectOk(books.engine.recordPayment("receipt", receipt(invoice.id, 400)));
+    const numbers = () =>
+      partyStatement(books.state, "CUSTOMER", customer.id, "2026-01-01", DEMO_TODAY, "GHS")!.entries.map((e) => e.number);
+    expect(numbers()).toContain(r.number);
+    expectOk(books.engine.voidPayment("receipt", r.id, "Bounced"));
+    expect(numbers()).not.toContain(r.number);
   });
 });
 

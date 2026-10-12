@@ -84,10 +84,11 @@ const paymentList = (module: string, path: string, resource: string, filters: Re
     ...filters,
     method: "BANK_TRANSFER | MOBILE_MONEY | CASH | CHEQUE",
     bank_account_id: "Bank account id",
+    state: "POSTED | VOID",
     from_date: "YYYY-MM-DD",
     to_date: "YYYY-MM-DD",
   }),
-  returns: "PaymentListData: { items: PaymentListItem[], totals: { count, base_amount } } (totals cover every matching row)",
+  returns: "PaymentListData: { items: PaymentListItem[], totals: { count, base_amount } } (totals cover every matching row that is not void)",
 });
 
 /** Figures behind a list page's cards and tab counts; unaffected by list filters. */
@@ -659,6 +660,7 @@ export const ENDPOINTS: EndpointDef[] = [
   },
   paymentList("Receipts", "/receipts/list", "receipt", { party_id: "Customer id", document_id: "Invoice id" }),
   statistics("Receipts", "/receipts/statistics", "receipt", "PaymentStatistics", "This month, last month, financial year to date, mobile money share and active months"),
+  get("Receipts", "/receipts/get", "receipt", "receipt_id", "PaymentDetail: list fields plus journal number and whether a statement line is matched to it"),
   {
     method: "POST",
     path: "/receipts/add",
@@ -667,6 +669,16 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "PaymentInput",
     returns: "Payment",
     permission: perm("receipt", "add"),
+  },
+  {
+    method: "POST",
+    path: "/receipts/void",
+    module: "Receipts",
+    summary: "Void a receipt (reverses its journal today; the invoice is owed again). Refused while matched to a statement line",
+    query: { receipt_id: "Receipt id" },
+    body: "{ reason }",
+    returns: "Payment",
+    permission: perm("receipt", "void"),
   },
   list("Credit notes", "/credit-notes/list", "credit-note", "CreditListItem", {
     party_id: "Customer id",
@@ -752,6 +764,13 @@ export const ENDPOINTS: EndpointDef[] = [
     "PaymentStatistics",
     "This month, last month, financial year to date, mobile money share and active months",
   ),
+  get(
+    "Supplier payments",
+    "/supplier-payments/get",
+    "supplier-payment",
+    "supplier_payment_id",
+    "PaymentDetail: list fields plus journal number and whether a statement line is matched to it",
+  ),
   {
     method: "POST",
     path: "/supplier-payments/add",
@@ -760,6 +779,16 @@ export const ENDPOINTS: EndpointDef[] = [
     body: "PaymentInput",
     returns: "Payment",
     permission: perm("supplier-payment", "add"),
+  },
+  {
+    method: "POST",
+    path: "/supplier-payments/void",
+    module: "Supplier payments",
+    summary: "Void a supplier payment (reverses its journal today; the bill is owed again). Refused while matched to a statement line",
+    query: { supplier_payment_id: "Supplier payment id" },
+    body: "{ reason }",
+    returns: "Payment",
+    permission: perm("supplier-payment", "void"),
   },
   list("Supplier credits", "/supplier-credits/list", "supplier-credit", "CreditListItem", {
     party_id: "Supplier id",

@@ -10,6 +10,7 @@ import type {
   SalesInvoice,
   TaxCode,
 } from "@/models/accounting";
+import { isLivePayment } from "@/models/accounting";
 import { documentTotals } from "@/lib/documents";
 import { affectsLedger } from "@/lib/ledger";
 import { BASE_CURRENCY, round2 } from "@/utils/format";
@@ -207,7 +208,7 @@ export const revaluationLines = (
       const rate = rates[doc.currency];
       if (!rate) continue;
       const total = documentTotals(doc.lines, s.taxCodes).total;
-      const paid = payments.filter((p) => p.document_id === doc.id && p.date <= asAt);
+      const paid = payments.filter((p) => p.document_id === doc.id && isLivePayment(p) && p.date <= asAt);
       const credited = credits.filter((c) => c.document_id === doc.id && c.state === "APPROVED" && c.date <= asAt);
       const paidFc = round2(
         paid.reduce((t, p) => t + p.amount, 0) + credited.reduce((t, c) => t + documentTotals(c.lines, s.taxCodes).total, 0),
