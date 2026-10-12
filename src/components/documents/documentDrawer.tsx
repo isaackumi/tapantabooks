@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import toast from "react-hot-toast";
-import { FiCheck, FiCornerUpLeft, FiDollarSign, FiPrinter, FiSlash } from "react-icons/fi";
+import { FiCheck, FiCornerUpLeft, FiDollarSign, FiEdit2, FiPrinter, FiSlash, FiTrash2 } from "react-icons/fi";
 import Link from "next/link";
 import RightDrawer from "@/components/rightDrawer";
 import StatusBadge from "@/components/statusBadge";
@@ -13,6 +13,8 @@ import ReasonModal from "@/components/accounting/reasonModal";
 import { useJournalViewer } from "@/components/accounting/journalViewer";
 import PaymentModal from "./paymentModal";
 import CreditNoteModal from "./creditNoteModal";
+import DocumentFormModal from "./documentFormModal";
+import { BTN_DANGER, BTN_SECONDARY, Modal } from "@/components/modal";
 import { useLedger } from "@/store/ledgerStore";
 import { dimensionName } from "@/store/selectors";
 import { useReport } from "@/services/useApiQuery";
@@ -35,6 +37,9 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
   const [voidOpen, setVoidOpen] = useState(false);
   const [creditOpen, setCreditOpen] = useState(false);
   const [editCustom, setEditCustom] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const isInvoice = kind === "invoice";
 
   const query = useReport<DocumentDetail>(documentId ? (isInvoice ? "/invoices/get" : "/bills/get") : null, {
@@ -55,9 +60,30 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
     else toast.error(res.error);
   };
 
+  const removeDraft = async () => {
+    if (!doc) return;
+    setDeleting(true);
+    try {
+      const res = await actions.deleteDraftDocument(kind, doc.id);
+      if (!res.ok) return toast.error(res.error);
+      toast.success(res.message ?? "Deleted");
+      setDeleteOpen(false);
+      onClose();
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const manualDraft = doc?.state === "DRAFT" && doc.source.type === "MANUAL";
+
   const footer = doc && (
     <div className="flex flex-wrap items-center justify-end gap-2">
-      {doc.state !== "VOID" && doc.amount_paid === 0 && doc.source.type !== "OPENING_BALANCE" && (
+      {manualDraft && (
+        <Button variant="ghost" icon={FiTrash2} className="mr-auto text-red-600" onClick={() => setDeleteOpen(true)}>
+          Delete draft
+        </Button>
+      )}
+      {!manualDraft && doc.state !== "VOID" && doc.amount_paid === 0 && doc.source.type !== "OPENING_BALANCE" && (
         <Button variant="ghost" icon={FiSlash} className="mr-auto text-red-600" onClick={() => setVoidOpen(true)}>
           Void
         </Button>
@@ -65,6 +91,11 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
       <Button variant="secondary" icon={FiPrinter} onClick={() => window.print()}>
         Print
       </Button>
+      {doc.state === "DRAFT" && (
+        <Button variant="secondary" icon={FiEdit2} onClick={() => setEditOpen(true)}>
+          Edit draft
+        </Button>
+      )}
       {doc.state === "DRAFT" && (
         <Button icon={FiCheck} onClick={approve}>
           Approve &amp; post
@@ -309,6 +340,22 @@ const DocumentDrawer = ({ kind, documentId, onClose }: DocumentDrawerProps) => {
           values={doc.custom_fields}
           open={editCustom}
           onClose={() => setEditCustom(false)}
+        />
+      )}
+      {doc?.state === "DRAFT" && (
+        <DocumentFormModal kind={kind} open={editOpen} onClose={() => setEditOpen(false)} document={doc} />
+      )}
+      {doc && (
+        <Modal
+          open={deleteOpen}
+          onClose={() => setDeleteOpen(false)}
+          size="sm"
+          title={`Delete draft ${doc.number}?`}
+          description="The draft never posted, so the ledger does not change. The deletion is kept on the audit trail."
+          buttons={[
+            { label: "Cancel", onClick: () => setDeleteOpen(false), className: BTN_SECONDARY },
+            { label: "Delete draft", onClick: removeDraft, className: BTN_DANGER, disabled: deleting },
+          ]}
         />
       )}
       {doc && (

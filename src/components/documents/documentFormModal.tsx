@@ -9,7 +9,7 @@ import AccountSelect from "@/components/accounting/accountSelect";
 import { defaultDueDate, useLedger } from "@/store/ledgerStore";
 import { dimensionsOf } from "@/store/selectors";
 import { documentTotals, lineAmount } from "@/lib/documents";
-import type { AccountType, DocumentLine, OrgSettings } from "@/models/accounting";
+import type { AccountType, DocumentLine, OrgSettings, PurchaseBill, SalesInvoice } from "@/models/accounting";
 import { todayIso } from "@/utils/dates";
 import { BASE_CURRENCY, fmtCurrency, fmtMoney } from "@/utils/format";
 import { FxRateField, useFxRate } from "@/components/fxRateField";
@@ -48,12 +48,19 @@ interface DocumentFormModalProps {
   onClose: () => void;
   onSaved?: (id: string) => void;
   defaultPartyId?: string;
+  /** A draft to edit; omitted when creating. */
+  document?: SalesInvoice | PurchaseBill | null;
 }
 
-const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: DocumentFormModalProps) => {
+const partyOf = (doc: SalesInvoice | PurchaseBill) => ("customer_id" in doc ? doc.customer_id : doc.supplier_id);
+
+const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId, document }: DocumentFormModalProps) => {
   const { state, actions } = useLedger();
   const isInvoice = kind === "invoice";
-  const parties = (isInvoice ? state.customers : state.suppliers).filter((p) => p.status === "ACTIVE");
+  const editing = document ?? null;
+  const parties = (isInvoice ? state.customers : state.suppliers).filter(
+    (p) => p.status === "ACTIVE" || (editing && p.id === partyOf(editing)),
+  );
   const branches = dimensionsOf(state, "BRANCH");
   const taxCodes = state.taxCodes.filter((t) => t.is_active && t.kind !== "WITHHOLDING");
 
@@ -68,12 +75,34 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
   const [custom, setCustom] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const fx = useFxRate(currency, issueDate, open);
+  const fx = useFxRate(currency, issueDate, open, editing && { currency: editing.currency, rate: editing.exchange_rate });
   const entity = isInvoice ? "Invoice" : "Bill";
   const currencies = state.currencies.filter((c) => c.is_active);
 
   useEffect(() => {
     if (!open) return;
+    setError(null);
+    if (editing) {
+      setPartyId(partyOf(editing));
+      setIssueDate(editing.issue_date);
+      setDueDate(editing.due_date);
+      setSupplierRef("supplier_reference" in editing ? editing.supplier_reference : "");
+      setBranchId(editing.branch_id ?? "");
+      setNotes(editing.notes ?? "");
+      setLines(
+        editing.lines.map((l) => ({
+          key: key++,
+          description: l.description,
+          quantity: String(l.quantity),
+          unit_price: String(l.unit_price),
+          tax_code_id: l.tax_code_id,
+          account_id: l.account_id,
+        })),
+      );
+      setCurrency(editing.currency);
+      setCustom({ ...(editing.custom_fields ?? {}) });
+      return;
+    }
     const party = parties.find((p) => p.id === defaultPartyId);
     setPartyId(party?.id ?? "");
     setIssueDate(todayIso());
@@ -132,6 +161,20 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
     };
     setBusy(true);
     try {
+      if (editing) {
+        const res = await actions.updateDraftDocument(kind, editing.id, input);
+        if (!res.ok) return setError(res.error);
+        if (approve) {
+          const approved = await (isInvoice ? actions.approveInvoice(editing.id) : actions.approveBill(editing.id));
+          if (!approved.ok) return setError(`Saved, but not approved: ${approved.error}`);
+          toast.success(approved.message ?? "Approved");
+        } else {
+          toast.success(res.message ?? "Saved");
+        }
+        onSaved?.(editing.id);
+        onClose();
+        return;
+      }
       const res = await (isInvoice ? actions.createInvoice(input, approve) : actions.createBill(input, approve));
       if (!res.ok) return setError(res.error);
       toast.success(res.message ?? "Saved");
@@ -147,7 +190,7 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
       open={open}
       onClose={onClose}
       size="5xl"
-      title={isInvoice ? "New sales invoice" : "New supplier bill"}
+      title={editing ? `Edit draft ${editing.number}` : isInvoice ? "New sales invoice" : "New supplier bill"}
       description={
         isInvoice
           ? "Approving posts the invoice to Accounts Receivable, revenue and output VAT in one balanced entry."
@@ -155,8 +198,8 @@ const DocumentFormModal = ({ kind, open, onClose, onSaved, defaultPartyId }: Doc
       }
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: "Save draft", onClick: () => save(false), className: BTN_SECONDARY, disabled: busy },
-        { label: "Approve & post", onClick: () => save(true), className: BTN_PRIMARY, disabled: busy },
+        { label: editing ? "Save changes" : "Save draft", onClick: () => save(false), className: BTN_SECONDARY, disabled: busy },
+        { label: editing ? "Save & approve" : "Approve & post", onClick: () => save(true), className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />

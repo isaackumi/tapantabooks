@@ -11,7 +11,8 @@ import { fmtDate, fmtRate } from "@/utils/format";
  * Rate state for a foreign amount. Follows the reference rate for `currency` on
  * `date` until the user types their own, then keeps theirs.
  */
-export const useFxRate = (currency: string, date: string, open = true) => {
+/** `initial`: a saved document's own rate, kept while its currency is selected instead of the day's reference rate. */
+export const useFxRate = (currency: string, date: string, open = true, initial?: { currency: string; rate: number } | null) => {
   const { state } = useLedger();
   const [rate, setRate] = useState("");
   const touched = useRef(false);
@@ -19,7 +20,10 @@ export const useFxRate = (currency: string, date: string, open = true) => {
 
   useEffect(() => {
     if (!open) return;
-    touched.current = false;
+    const keep = !!initial && initial.currency === currency && isForeign(currency);
+    touched.current = keep;
+    if (keep) setRate(String(initial.rate));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, currency]);
 
   useEffect(() => {

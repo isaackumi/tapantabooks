@@ -229,6 +229,10 @@ const createActions = (
     approveBill: (id: string) => call<PurchaseBill>("POST", "/bills/approve", { query: { bill_id: id } }),
     voidDocument: (kind: "invoice" | "bill", id: string, reason: string) =>
       call<SalesInvoice | PurchaseBill>("POST", `/${kind}s/void`, { query: { [`${kind}_id`]: id }, body: { reason } }),
+    updateDraftDocument: (kind: "invoice" | "bill", id: string, input: DocumentInput) =>
+      call<SalesInvoice | PurchaseBill>("PUT", `/${kind}s/update`, { query: { [`${kind}_id`]: id }, body: input }),
+    deleteDraftDocument: (kind: "invoice" | "bill", id: string) =>
+      call<null>("DELETE", `/${kind}s/delete`, { query: { [`${kind}_id`]: id } }),
     recordPayment: (kind: "receipt" | "payment", input: PaymentInput) =>
       call<Payment>("POST", kind === "receipt" ? "/receipts/add" : "/supplier-payments/add", { body: input }),
     voidPayment: (kind: "receipt" | "payment", id: string, reason: string) =>

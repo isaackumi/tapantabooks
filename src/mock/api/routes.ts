@@ -553,6 +553,8 @@ const HANDLERS: Record<string, Handler> = {
   "POST /invoices/approve": ({ engine, q }) => fromResult(engine.approveInvoice(need(q.get("invoice_id"), "invoice_id"))),
   "POST /invoices/void": ({ engine, q, body }) =>
     fromResult(engine.voidDocument("invoice", need(q.get("invoice_id"), "invoice_id"), String(body.reason ?? ""))),
+  "PUT /invoices/update": ({ engine, q, body }) => fromResult(engine.updateDraftDocument("invoice", need(q.get("invoice_id"), "invoice_id"), body)),
+  "DELETE /invoices/delete": ({ engine, q }) => fromResult(engine.deleteDraftDocument("invoice", need(q.get("invoice_id"), "invoice_id"))),
   "GET /receipts/list": ({ state, q }) => listResult(paymentItems(state, "receipt"), q, PAYMENT_LIST),
   "GET /receipts/statistics": ({ state }) => ({ data: paymentStatistics(state, state.receipts.filter(isLivePayment)) }),
   "GET /receipts/get": ({ state, q }) => ({ data: paymentDetail(state, "receipt", need(q.get("receipt_id"), "receipt_id")) }),
@@ -584,6 +586,8 @@ const HANDLERS: Record<string, Handler> = {
   "POST /bills/approve": ({ engine, q }) => fromResult(engine.approveBill(need(q.get("bill_id"), "bill_id"))),
   "POST /bills/void": ({ engine, q, body }) =>
     fromResult(engine.voidDocument("bill", need(q.get("bill_id"), "bill_id"), String(body.reason ?? ""))),
+  "PUT /bills/update": ({ engine, q, body }) => fromResult(engine.updateDraftDocument("bill", need(q.get("bill_id"), "bill_id"), body)),
+  "DELETE /bills/delete": ({ engine, q }) => fromResult(engine.deleteDraftDocument("bill", need(q.get("bill_id"), "bill_id"))),
   "GET /supplier-payments/list": ({ state, q }) => listResult(paymentItems(state, "payment"), q, PAYMENT_LIST),
   "GET /supplier-payments/statistics": ({ state }) => ({ data: paymentStatistics(state, state.supplierPayments.filter(isLivePayment)) }),
   "GET /supplier-payments/get": ({ state, q }) => ({

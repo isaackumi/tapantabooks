@@ -63,3 +63,32 @@ test("voids a receipt and the invoice is owed again", async ({ signedIn: page })
   await page.goto("/sales/invoices");
   await expect(page.getByRole("row").filter({ hasText: invoice }).getByText("Open", { exact: true })).toBeVisible();
 });
+
+test("edits a draft invoice, then deletes it", async ({ signedIn: page }) => {
+  await page.goto("/sales/invoices");
+  await page.getByRole("button", { name: "New invoice" }).click();
+  const form = dialog(page, "New sales invoice");
+  await form.getByRole("combobox", { name: /^Customer/ }).selectOption({ label: "Osu Fresh Mart (C-0003)" });
+  await form.getByPlaceholder("e.g. Rice 25kg × bags").fill("E2E draft to edit");
+  const line = form.getByRole("row").filter({ has: page.getByPlaceholder("e.g. Rice 25kg × bags") });
+  await line.getByRole("spinbutton").nth(1).fill("100");
+  await form.getByRole("button", { name: "Save draft" }).click();
+  const number = await postedNumber(page, /INV-2026-\d+/);
+
+  await page.getByRole("button", { name: "Edit draft" }).click();
+  const edit = dialog(page, `Edit draft ${number}`);
+  await expect(edit.getByPlaceholder("e.g. Rice 25kg × bags")).toHaveValue("E2E draft to edit");
+  const editLine = edit.getByRole("row").filter({ has: page.getByPlaceholder("e.g. Rice 25kg × bags") });
+  await editLine.getByRole("spinbutton").nth(0).fill("3");
+  await expect(edit.locator("dl > div").filter({ has: page.getByText("Total", { exact: true }) })).toContainText("360.00");
+  await edit.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("status").filter({ hasText: `Draft ${number} saved` })).toBeVisible();
+  await expect(edit).toBeHidden();
+
+  await page.getByRole("button", { name: "Delete draft" }).click();
+  const confirm = dialog(page, `Delete draft ${number}?`);
+  await confirm.getByRole("button", { name: "Delete draft" }).click();
+  await expect(page.getByRole("status").filter({ hasText: `Draft ${number} deleted` })).toBeVisible();
+  await expectNoDialogs(page);
+  await expect(page.getByRole("row").filter({ hasText: number })).toHaveCount(0);
+});

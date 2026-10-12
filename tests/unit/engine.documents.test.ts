@@ -114,6 +114,68 @@ describe("voiding receipts", () => {
   });
 });
 
+describe("draft documents", () => {
+  const draftSetup = () => {
+    const books = demoBooks();
+    const customer = books.state.customers.find((c) => c.status === "ACTIVE" && c.currency === "GHS")!;
+    const input = {
+      party_id: customer.id,
+      issue_date: "2026-10-01",
+      due_date: "2026-10-31",
+      branch_id: null,
+      currency: "GHS",
+      exchange_rate: 1,
+      lines: [{ description: "Rice – 25kg bags", quantity: 2, unit_price: 500, tax_code_id: TAX.std, account_id: ACC.sales }],
+    };
+    const draft = expectOk(books.engine.createInvoice(input, false));
+    return { books, input, draft };
+  };
+
+  it("can be edited while still a draft", () => {
+    const { books, input, draft } = draftSetup();
+    const saved = expectOk(
+      books.engine.updateDraftDocument("invoice", draft.id, {
+        ...input,
+        notes: "Price agreed on the phone",
+        lines: [{ ...input.lines[0], quantity: 3 }],
+      }),
+    );
+    expect(saved).toMatchObject({ id: draft.id, number: draft.number, state: "DRAFT", notes: "Price agreed on the phone" });
+    expect(saved.lines[0].quantity).toBe(3);
+    expect(books.state.journals.some((j) => j.source?.document_id === draft.id)).toBe(false);
+    expectOk(books.engine.approveInvoice(draft.id));
+    expectFail(books.engine.updateDraftDocument("invoice", draft.id, input), /Only draft invoices/);
+  });
+
+  it("can be deleted while still a draft, never once approved", () => {
+    const { books, input, draft } = draftSetup();
+    expectOk(books.engine.deleteDraftDocument("invoice", draft.id));
+    expect(books.state.invoices.some((i) => i.id === draft.id)).toBe(false);
+    const approved = expectOk(books.engine.createInvoice(input, true));
+    expectFail(books.engine.deleteDraftDocument("invoice", approved.id), /Only draft/);
+  });
+
+  it("refuse a bill edit that duplicates another supplier reference", () => {
+    const books = demoBooks();
+    const supplier = books.state.suppliers.find((p) => p.status === "ACTIVE" && p.currency === "GHS")!;
+    const bill = (reference: string) => ({
+      party_id: supplier.id,
+      issue_date: "2026-10-01",
+      due_date: "2026-10-31",
+      branch_id: null,
+      currency: "GHS",
+      exchange_rate: 1,
+      supplier_reference: reference,
+      custom_fields: { purchase_order_no: "PO-7001" },
+      lines: [{ description: "Diesel", quantity: 1, unit_price: 100, tax_code_id: TAX.std, account_id: ACC.cogs }],
+    });
+    expectOk(books.engine.createBill(bill("SUP-A-1"), false));
+    const second = expectOk(books.engine.createBill(bill("SUP-A-2"), false));
+    expectFail(books.engine.updateDraftDocument("bill", second.id, bill("sup-a-1")), /already/);
+    expectOk(books.engine.updateDraftDocument("bill", second.id, bill("SUP-A-2")));
+  });
+});
+
 describe("credit notes", () => {
   const credit = (documentId: string, unitPrice: number) => ({
     document_id: documentId,

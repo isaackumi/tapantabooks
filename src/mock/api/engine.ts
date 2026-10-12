@@ -1171,6 +1171,83 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
           return ok(undefined, `${doc.number} voided`);
         }),
 
+      updateDraftDocument: (kind: "invoice" | "bill", id: string, input: DocumentInput) =>
+        commit((s) => {
+          const isInvoice = kind === "invoice";
+          const doc = isInvoice ? s.invoices.find((i) => i.id === id) : s.bills.find((b) => b.id === id);
+          if (!doc) return fail(isInvoice ? "Invoice not found." : "Bill not found.");
+          if (doc.state !== "DRAFT") {
+            return fail(
+              isInvoice
+                ? "Only draft invoices can be edited. Issue a credit note, or void it and raise a new one."
+                : "Only draft bills can be edited. Record a supplier credit, or void it and enter a new one.",
+            );
+          }
+          const err = validateDocument(s, input, isInvoice ? "customer" : "supplier");
+          if (err) return fail(err);
+          const party = (isInvoice ? s.customers : s.suppliers).find((p) => p.id === input.party_id);
+          if (!party) return fail(`Choose a ${isInvoice ? "customer" : "supplier"}.`);
+          const partyId = isInvoice ? (doc as SalesInvoice).customer_id : (doc as PurchaseBill).supplier_id;
+          if (party.id !== partyId && party.status !== "ACTIVE") return fail(`${party.name} is inactive.`);
+          if (!isInvoice) {
+            const reference = input.supplier_reference?.trim();
+            if (!reference) return fail("Enter the supplier's invoice number.");
+            const duplicate = s.bills.find(
+              (b) =>
+                b.id !== doc.id &&
+                b.supplier_id === party.id &&
+                b.supplier_reference.toLowerCase() === reference.toLowerCase() &&
+                b.state !== "VOID",
+            );
+            if (duplicate) return fail(`${party.name} invoice ${reference} is already ${duplicate.number}.`);
+            (doc as PurchaseBill).supplier_reference = reference;
+            (doc as PurchaseBill).supplier_id = party.id;
+          } else {
+            (doc as SalesInvoice).customer_id = party.id;
+          }
+          const before = documentTotals(doc.lines, s.taxCodes).total;
+          doc.issue_date = input.issue_date;
+          doc.due_date = input.due_date;
+          doc.lines = input.lines.map((l) => ({ ...l, id: newId(isInvoice ? "il" : "bl") }));
+          doc.currency = input.currency;
+          doc.exchange_rate = input.currency === BASE_CURRENCY ? 1 : input.exchange_rate;
+          doc.branch_id = input.branch_id;
+          doc.notes = input.notes;
+          doc.custom_fields = normaliseCustomValues(input.custom_fields, doc.custom_fields);
+          touch(s, doc);
+          const after = documentTotals(doc.lines, s.taxCodes).total;
+          audit(s, {
+            action: isInvoice ? "INVOICE.UPDATED" : "BILL.UPDATED",
+            entity_type: isInvoice ? "Invoice" : "Bill",
+            entity_id: doc.id,
+            entity_label: doc.number,
+            summary: `Draft edited · ${party.name} · ${fmtMoney(after, doc.currency)}`,
+            changes: before !== after ? [{ field: "total", from: String(before), to: String(after) }] : undefined,
+          });
+          return ok(doc, `Draft ${doc.number} saved`);
+        }),
+
+      deleteDraftDocument: (kind: "invoice" | "bill", id: string) =>
+        commit((s) => {
+          const isInvoice = kind === "invoice";
+          const doc = isInvoice ? s.invoices.find((i) => i.id === id) : s.bills.find((b) => b.id === id);
+          if (!doc) return fail(isInvoice ? "Invoice not found." : "Bill not found.");
+          if (doc.state !== "DRAFT") return fail("Only drafts can be deleted. Approved documents are voided.");
+          if (doc.source.type !== "MANUAL") {
+            return fail(`This draft came from ${doc.source.type.toLowerCase().replace(/_/g, " ")}. Void it instead so the source record stays traceable.`);
+          }
+          if (isInvoice) s.invoices = s.invoices.filter((i) => i.id !== id);
+          else s.bills = s.bills.filter((b) => b.id !== id);
+          audit(s, {
+            action: isInvoice ? "INVOICE.DELETED" : "BILL.DELETED",
+            entity_type: isInvoice ? "Invoice" : "Bill",
+            entity_id: doc.id,
+            entity_label: doc.number,
+            summary: `Deleted draft · ${fmtMoney(documentTotals(doc.lines, s.taxCodes).total, doc.currency)}`,
+          });
+          return ok(undefined, `Draft ${doc.number} deleted`);
+        }),
+
       recordPayment: (kind: "receipt" | "payment", input: PaymentInput) =>
         commit((s) => {
           const isReceipt = kind === "receipt";

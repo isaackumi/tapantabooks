@@ -694,6 +694,35 @@ Response: `data: null`. Detail: `{number} voided`.
 
 To void a paid or credited document, void its payments (section 8.6) and credit notes (section 19.2) first.
 
+### 7.7a Edit a draft (`PUT /invoices/update`, `PUT /bills/update`)
+
+Query `invoice_id` or `bill_id`; body is the same shape as create (section 7.2), without `approve`.
+
+Validation, in order:
+
+- `Invoice not found.` / `Bill not found.`
+- Not `DRAFT`: `Only draft invoices can be edited. Issue a credit note, or void it and raise a new one.` (bills: `Only draft bills can be edited. Record a supplier credit, or void it and enter a new one.`)
+- Every create rule in section 7.2, including required custom fields.
+- A changed customer or supplier must be `ACTIVE`: `{name} is inactive.` Keeping an inactive party that the draft already had is allowed.
+- Bills: `Enter the supplier's invoice number.`; and a duplicate check against the supplier's other non-void bills (this draft excluded): `{supplier} invoice {reference} is already {number}.`
+
+Side effects:
+
+- Party, dates, lines (new line ids), currency, exchange rate (forced to 1 for the base currency), branch, notes and custom fields are replaced. `number`, `state` and `source` do not change.
+- No journal: drafts never post.
+- Audit `INVOICE.UPDATED` / `BILL.UPDATED`, summary `Draft edited · {party} · {total}`, with a `total` change when the total moved.
+
+Response: the updated document. Detail: `Draft {number} saved`. "Save & approve" in the UI is this call followed by approve (section 7.6).
+
+### 7.7b Delete a draft (`DELETE /invoices/delete`, `DELETE /bills/delete`)
+
+Query `invoice_id` or `bill_id`.
+
+- Not `DRAFT`: `Only drafts can be deleted. Approved documents are voided.`
+- `source.type` other than `MANUAL` (import, opening balance, integration): `This draft came from {source}. Void it instead so the source record stays traceable.`
+
+The document is removed. Its number is not reserved, so the next document can reuse it if it was the latest. Audit `INVOICE.DELETED` / `BILL.DELETED`. Response `data: null`, detail `Draft {number} deleted`.
+
 ### 7.8 Lists and statistics
 
 **`GET /invoices/list`, `GET /bills/list`.** Each item is the stored document plus derived fields, computed at read time:
@@ -1860,7 +1889,7 @@ These are behaviours that are ambiguous, missing or probably wrong in the mock. 
 
 **Documents and payments**
 
-14. There are no endpoints to edit or delete draft invoices and bills. Are they needed?
+14. ~~There are no endpoints to edit or delete draft invoices and bills.~~ Resolved: `PUT /invoices/update`, `PUT /bills/update`, `DELETE /invoices/delete`, `DELETE /bills/delete` (sections 7.7a and 7.7b). Confirm whether a deleted draft's number may be reused.
 15. ~~Payments cannot be reversed or voided.~~ Resolved: `POST /receipts/void` and `POST /supplier-payments/void` (section 8.6) reverse the payment's journal dated today, including any realised FX. Confirm today (not the payment date) is the right reversal date for bounced cheques in a closed month.
 16. Bills do not check the supplier's status; invoice approval does not re-check the customer's status or the custom fields (bill approval does). Should both sides behave the same?
 17. Document lines are not checked for account and tax-code existence, activity, postability, control accounts or document type. What messages should these checks use?
