@@ -6,7 +6,7 @@ import { FiCheck, FiMinus, FiPlus } from "react-icons/fi";
 import { Button, Field, FormError, PageHeader, Panel, Toggle, inputClass } from "@/components/ui";
 import { Tabs } from "@/components/tabs";
 import StatusBadge from "@/components/statusBadge";
-import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
+import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { useCurrentUser, useLedger } from "@/store/ledgerStore";
 import type { AccountType, Dimension, OrgSettings } from "@/models/accounting";
 import type { JournalStatistics } from "@/models/lists";
@@ -254,40 +254,56 @@ const OrganisationTab = () => {
   );
 };
 
-const DimensionModal = ({ kind, onClose }: { kind: Dimension["kind"] | null; onClose: () => void }) => {
+const DimensionModal = ({ kind, dimension, onClose }: { kind: Dimension["kind"] | null; dimension?: Dimension | null; onClose: () => void }) => {
   const { actions } = useLedger();
   const [form, setForm] = useState({ code: "", name: "", description: "" });
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const open = !!kind || !!dimension;
   useEffect(() => {
-    if (kind) {
-      setForm({ code: "", name: "", description: "" });
-      setError(null);
-    }
-  }, [kind]);
-  const label = DIMENSION_KINDS.find((k) => k.id === kind)?.label.replace(/s$/, "").replace(/ie$/, "y") ?? "";
+    if (!open) return;
+    setForm(dimension ? { code: dimension.code, name: dimension.name, description: dimension.description ?? "" } : { code: "", name: "", description: "" });
+    setError(null);
+  }, [open, dimension]);
+  const label = DIMENSION_KINDS.find((k) => k.id === (dimension?.kind ?? kind))?.label.replace(/s$/, "").replace(/ie$/, "y") ?? "";
 
   const submit = async () => {
-    if (!kind) return;
-    const res = await actions.saveDimension({ kind, ...form });
-    if (!res.ok) return setError(res.error);
-    toast.success(res.message ?? "Added");
-    onClose();
+    setBusy(true);
+    try {
+      const res = dimension
+        ? await actions.updateDimension(dimension.id, { name: form.name, description: form.description })
+        : kind
+          ? await actions.saveDimension({ kind, ...form })
+          : null;
+      if (!res) return;
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Saved");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
     <Modal
-      open={!!kind}
+      open={open}
       onClose={onClose}
-      title={`New ${label.toLowerCase()}`}
+      title={dimension ? `Edit ${dimension.code}` : `New ${label.toLowerCase()}`}
+      description={dimension ? "The code is fixed because postings are tagged with it. Renaming changes how it shows everywhere, including past reports." : undefined}
       buttons={[
         { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
-        { label: "Add", onClick: submit, className: BTN_PRIMARY },
+        { label: dimension ? "Save changes" : "Add", onClick: submit, className: BTN_PRIMARY, disabled: busy },
       ]}
     >
       <FormError message={error} />
       <div className="grid grid-cols-3 gap-4">
         <Field label="Code" required>
-          <input value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value }))} className={`${inputClass} font-mono uppercase`} />
+          <input
+            value={form.code}
+            disabled={!!dimension}
+            onChange={(e) => setForm((f) => ({ ...f, code: e.target.value }))}
+            className={`${inputClass} font-mono uppercase`}
+          />
         </Field>
         <Field label="Name" required className="col-span-2">
           <input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className={inputClass} />
@@ -303,6 +319,16 @@ const DimensionModal = ({ kind, onClose }: { kind: Dimension["kind"] | null; onC
 const DimensionsTab = () => {
   const { state, actions } = useLedger();
   const [adding, setAdding] = useState<Dimension["kind"] | null>(null);
+  const [editing, setEditing] = useState<Dimension | null>(null);
+  const [deactivating, setDeactivating] = useState<Dimension | null>(null);
+
+  const toggle = async (d: Dimension) => {
+    const res = await actions.toggleDimension(d.id);
+    if (res.ok) toast.success(res.message ?? "Updated");
+    else toast.error(res.error);
+    return res.ok;
+  };
+
   return (
     <div className="space-y-6">
       {DIMENSION_KINDS.map((k) => {
@@ -334,13 +360,17 @@ const DimensionsTab = () => {
                       <td className="px-6 py-2.5">
                         <StatusBadge status={d.is_active ? "ACTIVE" : "INACTIVE"} />
                       </td>
-                      <td className="px-6 py-2.5 text-right">
+                      <td className="space-x-4 px-6 py-2.5 text-right whitespace-nowrap">
                         <button
-                          onClick={async () => {
-                            const res = await actions.toggleDimension(d.id);
-                            if (res.ok) toast.success(res.message ?? "Updated");
-                            else toast.error(res.error);
-                          }}
+                          onClick={() => setEditing(d)}
+                          aria-label={`Edit ${d.code}`}
+                          className="text-sm text-brand-700 hover:underline dark:text-brand-300"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => (d.is_active ? setDeactivating(d) : toggle(d))}
+                          aria-label={`${d.is_active ? "Deactivate" : "Activate"} ${d.code}`}
                           className="text-sm text-brand-700 hover:underline dark:text-brand-300"
                         >
                           {d.is_active ? "Deactivate" : "Activate"}
@@ -355,6 +385,24 @@ const DimensionsTab = () => {
         );
       })}
       <DimensionModal kind={adding} onClose={() => setAdding(null)} />
+      <DimensionModal kind={null} dimension={editing} onClose={() => setEditing(null)} />
+      <Modal
+        open={!!deactivating}
+        onClose={() => setDeactivating(null)}
+        size="sm"
+        title={deactivating ? `Deactivate ${deactivating.name}?` : ""}
+        description="It will no longer be offered on new postings. Postings already tagged keep it, and reports still show it."
+        buttons={[
+          { label: "Cancel", onClick: () => setDeactivating(null), className: BTN_SECONDARY },
+          {
+            label: "Deactivate",
+            className: BTN_DANGER,
+            onClick: async () => {
+              if (deactivating && (await toggle(deactivating))) setDeactivating(null);
+            },
+          },
+        ]}
+      />
     </div>
   );
 };

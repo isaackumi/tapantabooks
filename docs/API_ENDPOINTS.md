@@ -22,11 +22,11 @@ unless the body says otherwise. Sign-up and login are served by the Core Platfor
 | Organisation | PUT | [`/organisation/update`](#put-organisation-update) | Update profile, numbering, approval threshold, FX accounts; base currency only while nothing is posted |
 | Dimensions | GET | [`/dimensions/list`](#get-dimensions-list) | List dimensions (paginated) |
 | Dimensions | POST | [`/dimensions/add`](#post-dimensions-add) | Add a branch, department, cost centre or project |
-| Dimensions | PUT | [`/dimensions/update`](#put-dimensions-update) | Activate or deactivate a dimension |
+| Dimensions | PUT | [`/dimensions/update`](#put-dimensions-update) | Rename, describe, activate or deactivate a dimension |
 | Currencies | GET | [`/currencies/list`](#get-currencies-list) | List currencies (paginated) |
 | Currencies | GET | [`/currencies/exposure`](#get-currencies-exposure) | Open foreign-currency receivables and payables in each currency, with the number of open documents |
 | Currencies | POST | [`/currencies/add`](#post-currencies-add) | Add a currency (ISO 4217 code) |
-| Currencies | PUT | [`/currencies/update`](#put-currencies-update) | Switch a currency on or off |
+| Currencies | PUT | [`/currencies/update`](#put-currencies-update) | Rename a currency, change its symbol, or switch it on or off |
 | Currencies | GET | [`/exchange-rates/list`](#get-exchange-rates-list) | List exchange rates (paginated) |
 | Currencies | POST | [`/exchange-rates/add`](#post-exchange-rates-add) | Record a manual rate (base per one unit of the currency) |
 | Currencies | DELETE | [`/exchange-rates/delete`](#delete-exchange-rates-delete) | Delete a manual rate (Bank of Ghana reference rates cannot be deleted) |
@@ -282,11 +282,11 @@ Add a branch, department, cost centre or project.
 
 #### PUT `/dimensions/update`
 
-Activate or deactivate a dimension.
+Rename, describe, activate or deactivate a dimension.
 
 - **Permission:** `permission-accounting-dimension-update`
 - **Returns (`data`):** `Dimension`
-- **Body:** `{ is_active }`
+- **Body:** `{ name?, description?, is_active? }`
 - **Client reloads after success:** `dimensions`
 
 | Query parameter | Meaning |
@@ -337,11 +337,11 @@ Add a currency (ISO 4217 code).
 
 #### PUT `/currencies/update`
 
-Switch a currency on or off.
+Rename a currency, change its symbol, or switch it on or off.
 
 - **Permission:** `permission-accounting-currency-update`
 - **Returns (`data`):** `Currency`
-- **Body:** `{ is_active }`
+- **Body:** `{ name?, symbol?, is_active? }`
 - **Client reloads after success:** `currencies`
 
 | Query parameter | Meaning |

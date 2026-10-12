@@ -6,7 +6,7 @@ import Link from "next/link";
 import { FiArrowRight, FiEdit2, FiPlus, FiTrash2, FiInfo } from "react-icons/fi";
 import { Button, Callout, Field, FormError, PageHeader, Toggle, compactInputClass, inputClass } from "@/components/ui";
 import StatusBadge from "@/components/statusBadge";
-import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
+import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { useLedger } from "@/store/ledgerStore";
 import type { FieldMapping } from "@/models/accounting";
 import { matchesSearch, useGlobalState } from "@/utils/globalStateContext";
@@ -140,6 +140,7 @@ export default function MappingsPage() {
   const { searchQuery } = useGlobalState();
   const [sourceId, setSourceId] = useState("");
   const [editing, setEditing] = useState<FieldMapping | null>(null);
+  const [removing, setRemoving] = useState<FieldMapping | null>(null);
   const [mappingOpen, setMappingOpen] = useState(false);
 
   const sourceName = new Map(state.dataSources.map((s) => [s.id, s.name]));
@@ -222,17 +223,15 @@ export default function MappingsPage() {
                             >
                               <FiEdit2 className="h-4 w-4" />
                             </button>
-                            <button
-                              onClick={async () => {
-                                const res = await actions.removeMapping(m.id);
-                                if (res.ok) toast.success(res.message ?? "Removed");
-                                else toast.error(res.error);
-                              }}
-                              className="rounded p-1.5 text-neutral-400 hover:bg-red-50 hover:text-red-600"
-                              aria-label="Remove mapping"
-                            >
-                              <FiTrash2 className="h-4 w-4" />
-                            </button>
+                            {!m.required && (
+                              <button
+                                onClick={() => setRemoving(m)}
+                                className="rounded p-1.5 text-neutral-400 hover:bg-red-50 hover:text-red-600"
+                                aria-label={`Remove mapping ${m.source_field}`}
+                              >
+                                <FiTrash2 className="h-4 w-4" />
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -246,6 +245,27 @@ export default function MappingsPage() {
       </div>
 
       <MappingModal open={mappingOpen} mapping={editing} onClose={() => setMappingOpen(false)} />
+      <Modal
+        open={!!removing}
+        onClose={() => setRemoving(null)}
+        size="sm"
+        title="Remove this mapping?"
+        description={removing ? `${removing.source_field} will no longer fill ${removing.target_field}. Records already imported are unchanged.` : ""}
+        buttons={[
+          { label: "Cancel", onClick: () => setRemoving(null), className: BTN_SECONDARY },
+          {
+            label: "Remove mapping",
+            className: BTN_DANGER,
+            onClick: async () => {
+              if (!removing) return;
+              const res = await actions.removeMapping(removing.id);
+              if (!res.ok) return toast.error(res.error);
+              toast.success(res.message ?? "Removed");
+              setRemoving(null);
+            },
+          },
+        ]}
+      />
     </div>
   );
 }

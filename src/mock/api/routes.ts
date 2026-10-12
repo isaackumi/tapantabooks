@@ -379,7 +379,13 @@ const HANDLERS: Record<string, Handler> = {
   "POST /dimensions/add": ({ engine, body }) => fromResult(engine.saveDimension(body), 201),
   "PUT /dimensions/update": ({ engine, state, q, body }) => {
     const dim = found(state.dimensions.find((d) => d.id === need(q.get("dimension_id"), "dimension_id")), "Dimension");
-    if (body.is_active === undefined || flag(body.is_active) === dim.is_active) return { data: dim };
+    const { is_active, name, description } = body ?? {};
+    if (name !== undefined || description !== undefined) {
+      const saved = engine.updateDimension(dim.id, { name, description });
+      if (!saved.ok || is_active === undefined || flag(is_active) === saved.data.is_active) return fromResult(saved);
+    } else if (is_active === undefined || flag(is_active) === dim.is_active) {
+      return { data: dim };
+    }
     return fromResult(engine.toggleDimension(dim.id));
   },
 
@@ -390,7 +396,13 @@ const HANDLERS: Record<string, Handler> = {
   "PUT /currencies/update": ({ engine, state, q, body }) => {
     const code = need(q.get("currency_code"), "currency_code");
     const c = found(state.currencies.find((x) => x.code === code), "Currency");
-    if (body.is_active === undefined || flag(body.is_active) === c.is_active) return { data: c };
+    const { is_active, name, symbol } = body ?? {};
+    if (name !== undefined || symbol !== undefined) {
+      const saved = engine.updateCurrency(code, { name, symbol });
+      if (!saved.ok || is_active === undefined || flag(is_active) === saved.data.is_active) return fromResult(saved);
+    } else if (is_active === undefined || flag(is_active) === c.is_active) {
+      return { data: c };
+    }
     return fromResult(engine.toggleCurrency(code));
   },
   "GET /exchange-rates/list": ({ state, q }) =>

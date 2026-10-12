@@ -151,6 +151,8 @@ const createActions = (
     updateOrg: (patch: Partial<OrgSettings>) => call<OrgSettings>("PUT", "/organisation/update", { body: patch }),
     saveDimension: (input: { kind: Dimension["kind"]; code: string; name: string; description?: string }) =>
       call<Dimension>("POST", "/dimensions/add", { body: input }),
+    updateDimension: (id: string, patch: { name?: string; description?: string }) =>
+      call<Dimension>("PUT", "/dimensions/update", { query: { dimension_id: id }, body: patch }),
     toggleDimension: (id: string) => {
       const dim = current().dimensions.find((d) => d.id === id);
       return call<Dimension>("PUT", "/dimensions/update", { query: { dimension_id: id }, body: { is_active: !dim?.is_active } });
@@ -158,6 +160,8 @@ const createActions = (
 
     // ---- Currencies -----------------------------------------------------------
     addCurrency: (input: { code: string; name: string; symbol: string }) => call<Currency>("POST", "/currencies/add", { body: input }),
+    updateCurrency: (code: string, patch: { name?: string; symbol?: string }) =>
+      call<Currency>("PUT", "/currencies/update", { query: { currency_code: code }, body: patch }),
     toggleCurrency: (code: string) => {
       const c = current().currencies.find((x) => x.code === code);
       return call<Currency>("PUT", "/currencies/update", { query: { currency_code: code }, body: { is_active: !c?.is_active } });

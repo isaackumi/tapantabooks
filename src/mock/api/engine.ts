@@ -47,7 +47,7 @@ import type {
 } from "@/models/accounting";
 import { isLivePayment, isOpenLine } from "@/models/accounting";
 import { buildSeed, CURRENT_USER, USERS, ACC, TAX, openingEquityAccount, stamp, type SeedData } from "@/mock/seed";
-import { affectsLedger, isBalanced, lineTotals } from "@/lib/ledger";
+import { affectsLedger, balancesByAccount, isBalanced, lineTotals } from "@/lib/ledger";
 import { documentTotals } from "@/lib/documents";
 import { partitionNewLines } from "@/lib/bankStatementCsv";
 import { fiscalYearFor, fiscalYearsView, NEXT_YEAR_LEAD_DAYS, yearEndPreview } from "@/lib/fiscalYears";
@@ -690,6 +690,10 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
           const account = s.accounts.find((a) => a.id === id);
           if (!account) return fail("Account not found.");
           if (patch.name !== undefined && !patch.name.trim()) return fail("Name cannot be empty.");
+          if (patch.is_active !== undefined && patch.is_active !== account.is_active) {
+            const blocker = patch.is_active ? accountReactivationBlocker(s, account) : accountDeactivationBlocker(s, account);
+            if (blocker) return fail(blocker);
+          }
           if (patch.custom_fields) {
             const customError = checkCustom(s, "Account", patch.custom_fields);
             if (customError) return fail(customError);
@@ -2614,6 +2618,35 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
           return ok(c, `${code} added`);
         }),
 
+      updateCurrency: (code: string, patch: { name?: string; symbol?: string }) =>
+        commit((s) => {
+          const c = s.currencies.find((x) => x.code === code);
+          if (!c) return fail("Currency not found.");
+          const changes: NonNullable<AuditEvent["changes"]> = [];
+          if (patch.name !== undefined) {
+            const name = patch.name.trim();
+            if (!name) return fail("Name is required.");
+            if (name !== c.name) changes.push({ field: "name", from: c.name, to: name });
+            c.name = name;
+          }
+          if (patch.symbol !== undefined) {
+            const symbol = patch.symbol.trim() || c.code;
+            if (symbol.length > 4) return fail("Keep the symbol to four characters or fewer.");
+            if (symbol !== c.symbol) changes.push({ field: "symbol", from: c.symbol, to: symbol });
+            c.symbol = symbol;
+          }
+          if (!changes.length) return ok(c, "No changes");
+          audit(s, {
+            action: "CURRENCY.UPDATED",
+            entity_type: "Currency",
+            entity_id: c.code,
+            entity_label: c.code,
+            summary: `Updated ${c.code} ${changes.map((x) => x.field).join(" and ")}. Amounts and rates are unchanged.`,
+            changes,
+          });
+          return ok(c, `${c.code} saved`);
+        }),
+
       toggleCurrency: (code: string) =>
         commit((s) => {
           const c = s.currencies.find((x) => x.code === code);
@@ -3350,18 +3383,87 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
           return ok(dim, `${dim.name} added`);
         }),
 
+      updateDimension: (id: string, patch: { name?: string; description?: string }) =>
+        commit((s) => {
+          const dim = s.dimensions.find((d) => d.id === id);
+          if (!dim) return fail("Dimension not found.");
+          const changes: NonNullable<AuditEvent["changes"]> = [];
+          if (patch.name !== undefined) {
+            const name = patch.name.trim();
+            if (!name) return fail("Name is required.");
+            if (name !== dim.name) changes.push({ field: "name", from: dim.name, to: name });
+            dim.name = name;
+          }
+          if (patch.description !== undefined) {
+            const description = patch.description.trim() || undefined;
+            if (description !== dim.description) changes.push({ field: "description", from: dim.description ?? "", to: description ?? "" });
+            dim.description = description;
+          }
+          if (!changes.length) return ok(dim, "No changes");
+          touch(s, dim);
+          audit(s, {
+            action: "DIMENSION.UPDATED",
+            entity_type: "Dimension",
+            entity_id: dim.id,
+            entity_label: `${dim.code} ${dim.name}`,
+            summary: `Updated ${dim.kind.replace(/_/g, " ").toLowerCase()} ${dim.code}. Tagged postings keep the code and show the new name.`,
+            changes,
+          });
+          return ok(dim, `${dim.name} saved`);
+        }),
+
       toggleDimension: (id: string) =>
         commit((s) => {
           const dim = s.dimensions.find((d) => d.id === id);
-          if (!dim) return fail("Not found.");
+          if (!dim) return fail("Dimension not found.");
           dim.is_active = !dim.is_active;
           touch(s, dim);
+          audit(s, {
+            action: dim.is_active ? "DIMENSION.ACTIVATED" : "DIMENSION.DEACTIVATED",
+            entity_type: "Dimension",
+            entity_id: dim.id,
+            entity_label: `${dim.code} ${dim.name}`,
+            summary: dim.is_active ? `${dim.name} can be tagged on new postings.` : `${dim.name} hidden from new postings. Existing tags are kept.`,
+            changes: [{ field: "is_active", from: String(!dim.is_active), to: String(dim.is_active) }],
+          });
           return ok(dim, `${dim.name} ${dim.is_active ? "activated" : "deactivated"}`);
         }),
   };
 };
 
 export type LedgerEngine = ReturnType<typeof createLedgerEngine>;
+
+const accountDeactivationBlocker = (s: LedgerState, a: Account): string | null => {
+  const label = `${a.code} ${a.name}`;
+  const bank = s.bankAccounts.find((b) => b.gl_account_id === a.id);
+  if (bank) return `${label} is the ledger account for ${bank.name}. Deactivate the bank account in Banking instead.`;
+  if (a.is_group && s.accounts.some((c) => c.parent_id === a.id && c.is_active)) return `${label} still has active accounts under it. Deactivate those first.`;
+  const balance = balancesByAccount(s.accounts, s.journals).get(a.id) ?? 0;
+  if (Math.abs(balance) >= 0.005) return `${label} has a balance of ${fmtCurrency(balance)}. Move it to another account before deactivating.`;
+  const pending = s.journals.find((j) => (j.status === "DRAFT" || j.status === "PENDING_APPROVAL") && j.lines.some((l) => l.account_id === a.id));
+  if (pending) return `${pending.number} (${pending.status === "DRAFT" ? "draft" : "awaiting approval"}) uses ${label}. Post, change or delete it first.`;
+  const settings: [keyof OrgSettings, string][] = [
+    ["fx_realised_account_id", "realised exchange differences"],
+    ["fx_unrealised_account_id", "unrealised exchange differences"],
+    ["default_sales_account_id", "the default sales account"],
+    ["default_purchase_account_id", "the default purchase account"],
+  ];
+  const setting = settings.find(([key]) => s.org[key] === a.id);
+  if (setting) return `${label} is set as ${setting[1]} in Settings. Choose another account there first.`;
+  const tax = s.taxCodes.find((t) => t.is_active && (t.output_account_id === a.id || t.input_account_id === a.id));
+  if (tax) return `${label} is the tax account for ${tax.code}. Change or deactivate the tax code first.`;
+  const rule = s.rules.find((r) => r.is_active && r.lines.some((l) => l.account_id === a.id));
+  if (rule) return `The active posting rule ${rule.name} posts to ${label}. Change or deactivate the rule first.`;
+  return null;
+};
+
+const accountReactivationBlocker = (s: LedgerState, a: Account): string | null => {
+  const bank = s.bankAccounts.find((b) => b.gl_account_id === a.id && !b.is_active);
+  if (bank) return `${a.code} ${a.name} belongs to the inactive bank account ${bank.name}. Reactivate the bank account instead.`;
+  const parent = s.accounts.find((p) => p.id === a.parent_id);
+  if (parent && !parent.is_active) return `${parent.code} ${parent.name} is inactive. Reactivate the group first.`;
+  return null;
+};
 
 const checkFieldOptions = (f: Pick<CustomField, "type" | "options" | "default_value" | "label">): string | null => {
   if (f.type === "SELECT") {

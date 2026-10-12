@@ -7,11 +7,11 @@ import { FiDownloadCloud, FiPlus, FiRefreshCw, FiTrash2, FiTrendingDown, FiTrend
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Button, Field, FormError, Panel, inputClass } from "@/components/ui";
 import StatusBadge from "@/components/statusBadge";
-import { BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
+import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { useChartTheme } from "@/components/charts/chartTheme";
 import { useLedger } from "@/store/ledgerStore";
 import { useReport } from "@/services/useApiQuery";
-import type { OrgSettings } from "@/models/accounting";
+import type { Currency, ExchangeRate, OrgSettings } from "@/models/accounting";
 import type { CurrencyExposure } from "@/models/lists";
 import { rateOn } from "@/lib/fx";
 import { addDays, todayIso } from "@/utils/dates";
@@ -86,11 +86,58 @@ const AddCurrencyModal = ({ open, onClose }: { open: boolean; onClose: () => voi
   );
 };
 
+const EditCurrencyModal = ({ currency, onClose }: { currency: Currency | null; onClose: () => void }) => {
+  const { actions } = useLedger();
+  const [form, setForm] = useState({ name: "", symbol: "" });
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!currency) return;
+    setForm({ name: currency.name, symbol: currency.symbol });
+    setError(null);
+  }, [currency]);
+  const submit = async () => {
+    if (!currency) return;
+    setBusy(true);
+    try {
+      const res = await actions.updateCurrency(currency.code, form);
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Saved");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal
+      open={!!currency}
+      onClose={onClose}
+      title={currency ? `Edit ${currency.code}` : ""}
+      description="The ISO code is fixed. The name and symbol only change how amounts are labelled; amounts and rates are not touched."
+      buttons={[
+        { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
+        { label: "Save changes", onClick: submit, className: BTN_PRIMARY, disabled: busy },
+      ]}
+    >
+      <FormError message={error} />
+      <div className="grid grid-cols-3 gap-4">
+        <Field label="Name" required className="col-span-2">
+          <input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} className={inputClass} />
+        </Field>
+        <Field label="Symbol">
+          <input value={form.symbol} maxLength={4} onChange={(e) => setForm((f) => ({ ...f, symbol: e.target.value }))} className={inputClass} />
+        </Field>
+      </div>
+    </Modal>
+  );
+};
+
 const RateHistory = ({ code }: { code: string }) => {
   const { state, actions } = useLedger();
   const t = useChartTheme();
   const [form, setForm] = useState({ date: todayIso(), rate: "" });
   const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<ExchangeRate | null>(null);
   const rates = useMemo(
     () => state.exchangeRates.filter((r) => r.currency === code).sort((a, b) => b.date.localeCompare(a.date) || b.created_at.localeCompare(a.created_at)),
     [state.exchangeRates, code],
@@ -195,13 +242,9 @@ const RateHistory = ({ code }: { code: string }) => {
                   <td className="px-4 py-2 text-right">
                     {r.source === "MANUAL" && (
                       <button
-                        onClick={async () => {
-                          const res = await actions.deleteExchangeRate(r.id);
-                          if (res.ok) toast.success(res.message ?? "Deleted");
-                          else toast.error(res.error);
-                        }}
+                        onClick={() => setDeleting(r)}
                         className="rounded p-1 text-neutral-400 hover:bg-red-50 hover:text-red-600"
-                        aria-label="Delete rate"
+                        aria-label={`Delete rate for ${fmtDate(r.date)}`}
                       >
                         <FiTrash2 className="h-4 w-4" />
                       </button>
@@ -213,6 +256,27 @@ const RateHistory = ({ code }: { code: string }) => {
           </tbody>
         </table>
       </div>
+      <Modal
+        open={!!deleting}
+        onClose={() => setDeleting(null)}
+        size="sm"
+        title={deleting ? `Delete the ${code} rate for ${fmtDate(deleting.date)}?` : ""}
+        description="Documents already posted keep the rate they used. New documents on that date will fall back to the latest earlier rate."
+        buttons={[
+          { label: "Cancel", onClick: () => setDeleting(null), className: BTN_SECONDARY },
+          {
+            label: "Delete rate",
+            className: BTN_DANGER,
+            onClick: async () => {
+              if (!deleting) return;
+              const res = await actions.deleteExchangeRate(deleting.id);
+              if (!res.ok) return toast.error(res.error);
+              toast.success(res.message ?? "Deleted");
+              setDeleting(null);
+            },
+          },
+        ]}
+      />
     </Panel>
   );
 };
@@ -283,7 +347,15 @@ const FxPostingPanel = () => {
 export const CurrencySettings = () => {
   const { state, actions } = useLedger();
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<Currency | null>(null);
+  const [switchingOff, setSwitchingOff] = useState<Currency | null>(null);
   const base = state.org.base_currency;
+  const toggle = async (code: string) => {
+    const res = await actions.toggleCurrency(code);
+    if (res.ok) toast.success(res.message ?? "Updated");
+    else toast.error(res.error);
+    return res.ok;
+  };
   const foreign = state.currencies.filter((c) => c.code !== base);
   const [selected, setSelected] = useState(foreign.find((c) => c.is_active)?.code ?? "");
   const today = todayIso();
@@ -442,14 +514,18 @@ export const CurrencySettings = () => {
                     <td className="px-4 py-3">
                       <StatusBadge status={c.is_active ? "ACTIVE" : "INACTIVE"} />
                     </td>
-                    <td className="px-6 py-3 text-right">
+                    <td className="space-x-4 px-6 py-3 text-right whitespace-nowrap">
                       <button
-                        onClick={async () => {
-                          const res = await actions.toggleCurrency(c.code);
-                          if (res.ok) toast.success(res.message ?? "Updated");
-                          else toast.error(res.error);
-                        }}
-                        className="whitespace-nowrap text-sm text-brand-700 hover:underline dark:text-brand-300"
+                        onClick={() => setEditing(c)}
+                        aria-label={`Edit ${c.code}`}
+                        className="text-sm text-brand-700 hover:underline dark:text-brand-300"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => (c.is_active ? setSwitchingOff(c) : toggle(c.code))}
+                        aria-label={`${c.is_active ? "Switch off" : "Switch on"} ${c.code}`}
+                        className="text-sm text-brand-700 hover:underline dark:text-brand-300"
                       >
                         {c.is_active ? "Switch off" : "Switch on"}
                       </button>
@@ -473,6 +549,24 @@ export const CurrencySettings = () => {
       {selected && <RateHistory code={selected} />}
       <FxPostingPanel />
       <AddCurrencyModal open={adding} onClose={() => setAdding(false)} />
+      <EditCurrencyModal currency={editing} onClose={() => setEditing(null)} />
+      <Modal
+        open={!!switchingOff}
+        onClose={() => setSwitchingOff(null)}
+        size="sm"
+        title={switchingOff ? `Switch off ${switchingOff.code}?` : ""}
+        description="It will no longer be offered on new customers, suppliers or documents. Open balances in it are still revalued at month end."
+        buttons={[
+          { label: "Cancel", onClick: () => setSwitchingOff(null), className: BTN_SECONDARY },
+          {
+            label: "Switch off",
+            className: BTN_DANGER,
+            onClick: async () => {
+              if (switchingOff && (await toggle(switchingOff.code))) setSwitchingOff(null);
+            },
+          },
+        ]}
+      />
     </div>
   );
 };

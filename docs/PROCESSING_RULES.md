@@ -473,13 +473,24 @@ Validation, in order:
 
 - `Account not found.`
 - `Name cannot be empty.` when `name` is supplied and blank.
+- Deactivation (`is_active: false` on an active account), first failing check wins:
+  - `{code} {name} is the ledger account for {bank}. Deactivate the bank account in Banking instead.`
+  - `{code} {name} still has active accounts under it. Deactivate those first.` (groups)
+  - `{code} {name} has a balance of {amount}. Move it to another account before deactivating.` The balance covers every posted journal, including future-dated ones.
+  - `{journal number} (draft|awaiting approval) uses {code} {name}. Post, change or delete it first.`
+  - `{code} {name} is set as {realised exchange differences|unrealised exchange differences|the default sales account|the default purchase account} in Settings. Choose another account there first.`
+  - `{code} {name} is the tax account for {tax code}. Change or deactivate the tax code first.` (active tax codes only)
+  - `The active posting rule {rule} posts to {code} {name}. Change or deactivate the rule first.`
+- Reactivation (`is_active: true` on an inactive account):
+  - `{code} {name} belongs to the inactive bank account {bank}. Reactivate the bank account instead.`
+  - `{group code} {group name} is inactive. Reactivate the group first.`
 - Custom field rules for `Account` (when `custom_fields` is supplied).
 
 Side effects: name (trimmed), description (trimmed, removed when blank), `is_active` and custom fields (merged) are updated. Code, type, parent and flags cannot change. Audit `ACCOUNT.UPDATED` is always recorded, with `changes` for `name` and `is_active` only.
 
 Response: the `Account`. Detail: `Account updated`.
 
-The mock lets any account be deactivated, including accounts with a balance, control accounts, bank GL accounts and the accounts referenced by `OrgSettings` (open question).
+Bank GL accounts are switched on and off with their bank account (`PUT /bank-accounts/update`), never directly.
 
 ### 5.4 `GET /accounts/balances`
 
@@ -911,7 +922,16 @@ Response: 201 with the `Currency`. Detail: `{code} added`.
 
 ### 9.4 `PUT /currencies/update`
 
-Query `currency_code`; body `{ is_active }`. The route returns 404 `Currency not found.` for an unknown code, and returns the currency unchanged (no audit) when `is_active` is absent or already has that value. Otherwise:
+Query `currency_code`; body `{ name?, symbol?, is_active? }`. The route returns 404 `Currency not found.` for an unknown code.
+
+When `name` or `symbol` is present, they are saved first:
+
+- `Name is required.` when `name` is blank.
+- `Keep the symbol to four characters or fewer.` A blank symbol becomes the ISO code.
+
+The code never changes. Audit `CURRENCY.UPDATED` with a change per edited field; nothing is recorded when the values are unchanged (detail `No changes`). Detail `{code} saved`. Amounts and rates are untouched.
+
+The currency is returned unchanged (no audit) when `is_active` is absent or already has that value. Otherwise:
 
 - `The base currency is always on.`
 - `{bank name} holds {code}. A currency with a bank account cannot be switched off.` when deactivating a currency used by a bank account.
@@ -1591,7 +1611,10 @@ Dimensions are the analysis codes used on journals: `LEGAL_ENTITY`, `BRANCH`, `D
 
 Side effects: the dimension is created active with the code upper-cased. Audit `DIMENSION.CREATED`, label `{code} {name}`. Response: 201 with the `Dimension`; detail `{name} added`. `kind` is not validated by the mock.
 
-`PUT /dimensions/update` (query `dimension_id`; body `{ is_active }`): 404 `Dimension not found.`; returns the dimension unchanged when `is_active` is absent or equal. Otherwise toggles `is_active` without an audit event. Detail `{name} activated|deactivated`.
+`PUT /dimensions/update` (query `dimension_id`; body `{ name?, description?, is_active? }`): 404 `Dimension not found.`
+
+- When `name` or `description` is present they are saved first: `Name is required.` when `name` is blank; a blank description is removed. The code and kind never change, because postings are tagged with the code. Audit `DIMENSION.UPDATED` with a change per edited field, nothing when unchanged (detail `No changes`). Detail `{name} saved`.
+- The dimension is returned unchanged when `is_active` is absent or equal. Otherwise `is_active` is toggled. Audit `DIMENSION.ACTIVATED` or `DIMENSION.DEACTIVATED`. Postings already tagged keep the tag. Detail `{name} activated|deactivated`.
 
 ### 15.5 Users
 
@@ -2031,7 +2054,7 @@ These are behaviours that are ambiguous, missing or probably wrong in the mock. 
 
 30. Custom value validation sees only the submitted map, so partial updates that omit a required field fail. Should validation run on the merged values? Should unknown keys be rejected and `default_value` applied on create?
 31. Which party fields are editable on update (`status`, `code`, `currency`, `external_reference`, `source`)?
-32. Should accounts with a non-zero balance, control accounts, bank GL accounts and the FX accounts in settings be protected from deactivation?
+32. ~~Should accounts with a non-zero balance, control accounts, bank GL accounts and the FX accounts in settings be protected from deactivation?~~ Resolved: `PUT /accounts/update` refuses deactivation while the account has a balance, pending journals, active children, a bank account, a settings reference, an active tax code or an active posting rule (section 5.3). Confirm whether control accounts with a zero balance may be deactivated.
 33. Import posting is a placeholder (fixed accounts, 20% tax split, AR and AP posted without documents, non-financial entities create nothing, row validation done in the browser). What is the real per-entity import pipeline, and does it use field mappings and accounting rules?
 34. Accounting rules are not executed and `postings_count` is static. When and how does the API apply them to incoming events?
 35. Should `BankStatementLine`, `FiscalPeriod`, `FieldMapping`, `Currency` and `OrgSettings` carry the six audit fields, as the backend convention requires for every resource?
