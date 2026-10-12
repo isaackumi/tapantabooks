@@ -763,6 +763,15 @@ const HANDLERS: Record<string, Handler> = {
   "POST /imports/post": ({ engine, q }) => fromResult(engine.postImportBatch(need(q.get("import_batch_id"), "import_batch_id"))),
   "POST /imports/reprocess": ({ engine, q }) =>
     fromResult(engine.reprocessRecord(need(q.get("import_batch_id"), "import_batch_id"), Number(need(q.get("row"), "row")))),
+  "PUT /imports/update-record": ({ engine, q, body }) =>
+    fromResult(
+      engine.updateImportRecord(need(q.get("import_batch_id"), "import_batch_id"), Number(need(q.get("row"), "row")), {
+        ...(body?.external_reference !== undefined && { external_reference: String(body.external_reference) }),
+        ...(body?.summary !== undefined && { summary: String(body.summary) }),
+        ...(body?.amount !== undefined && { amount: Number(body.amount) }),
+      }),
+    ),
+  "DELETE /imports/delete": ({ engine, q }) => fromResult(engine.discardImportBatch(need(q.get("import_batch_id"), "import_batch_id"))),
 
   // ---- Audit ------------------------------------------------------------------------------------------------------------------
   "GET /audit-logs/list": ({ state, q }) =>

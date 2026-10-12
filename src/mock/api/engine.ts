@@ -2780,6 +2780,64 @@ export const createLedgerEngine = (stateRef: StateRef, onCommit: (s: LedgerState
           return ok(record, `Row ${row} is ready to post`);
         }),
 
+      updateImportRecord: (batchId: string, row: number, patch: { external_reference?: string; summary?: string; amount?: number }) =>
+        commit((s) => {
+          const batch = s.importBatches.find((b) => b.id === batchId);
+          const record = batch?.records.find((r) => r.row === row);
+          if (!batch || !record) return fail("Record not found.");
+          if (batch.status === "FAILED") return fail("Nothing was received in this batch. Discard it and have the source resend.");
+          if (record.posted) return fail(`Row ${row} is already posted. Reverse ${batch.number}'s journal to correct it.`);
+          const reference = (patch.external_reference ?? record.external_reference).trim();
+          const summary = (patch.summary ?? record.summary).trim();
+          const amount = patch.amount !== undefined ? round2(Number(patch.amount)) : record.amount;
+          if (!reference) return fail("Enter the source reference.");
+          if (!summary) return fail("Enter a summary of the row.");
+          if (!Number.isFinite(amount) || amount === 0) return fail("Amount must be a non-zero number.");
+          for (const b of s.importBatches) {
+            const clash = b.records.find((r) => !(b.id === batch.id && r.row === row) && r.external_reference.toLowerCase() === reference.toLowerCase());
+            if (clash) return fail(`Reference ${reference} is already ${b.id === batch.id ? `row ${clash.row} of this batch` : `in ${b.number} row ${clash.row}`}.`);
+          }
+          const changes: NonNullable<AuditEvent["changes"]> = [];
+          if (reference !== record.external_reference) changes.push({ field: "external_reference", from: record.external_reference, to: reference });
+          if (summary !== record.summary) changes.push({ field: "summary", from: record.summary, to: summary });
+          if (amount !== record.amount) changes.push({ field: "amount", from: String(record.amount), to: String(amount) });
+          const wasError = record.status === "ERROR";
+          record.external_reference = reference;
+          record.summary = summary;
+          record.amount = amount;
+          record.status = "VALID";
+          record.message = `Corrected by ${actorOf(s).name}.`;
+          touch(s, batch);
+          audit(s, {
+            action: "IMPORT.ROW_CORRECTED",
+            entity_type: "Import batch",
+            entity_id: batch.id,
+            entity_label: `${batch.number} row ${row}`,
+            summary: `Row ${row} (${reference}) corrected${wasError ? " and ready to post" : ""}.`,
+            changes,
+          });
+          return ok(record, `Row ${row} saved and ready to post`);
+        }),
+
+      discardImportBatch: (batchId: string) =>
+        commit((s) => {
+          const batch = s.importBatches.find((b) => b.id === batchId);
+          if (!batch) return fail("Batch not found.");
+          const posted = batch.records.filter((r) => r.posted).length;
+          if (posted || batch.journal_id) {
+            return fail(`${posted} row${posted === 1 ? " of" : "s of"} ${batch.number} ${posted === 1 ? "is" : "are"} already posted. Reverse its journal instead.`);
+          }
+          s.importBatches = s.importBatches.filter((b) => b.id !== batchId);
+          audit(s, {
+            action: "IMPORT.DISCARDED",
+            entity_type: "Import batch",
+            entity_id: batch.id,
+            entity_label: batch.number,
+            summary: `Discarded ${batch.entity.toLowerCase()} batch with ${batch.records.length} row(s)${batch.file_name ? ` from ${batch.file_name}` : ""}.`,
+          });
+          return ok(undefined, `${batch.number} discarded`);
+        }),
+
       // ---- Settings ---------------------------------------------------------
       // ---- Opening balances ---------------------------------------------------
       saveOpeningBalances: (input: OpeningBalancesInput) =>

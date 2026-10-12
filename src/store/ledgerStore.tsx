@@ -300,6 +300,9 @@ const createActions = (
     postImportBatch: (id: string) => call<ImportBatch>("POST", "/imports/post", { query: { import_batch_id: id } }),
     reprocessRecord: (batchId: string, row: ImportRecord["row"]) =>
       call<ImportBatch>("POST", "/imports/reprocess", { query: { import_batch_id: batchId, row } }),
+    updateImportRecord: (batchId: string, row: ImportRecord["row"], patch: { external_reference?: string; summary?: string; amount?: number }) =>
+      call<ImportRecord>("PUT", "/imports/update-record", { query: { import_batch_id: batchId, row }, body: patch }),
+    discardImportBatch: (batchId: string) => call<null>("DELETE", "/imports/delete", { query: { import_batch_id: batchId } }),
   };
 };
 

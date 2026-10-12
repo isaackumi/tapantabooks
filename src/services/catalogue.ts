@@ -1187,6 +1187,25 @@ export const ENDPOINTS: EndpointDef[] = [
     returns: "ImportRecord",
     permission: perm("import", "update"),
   },
+  {
+    method: "PUT",
+    path: "/imports/update-record",
+    module: "Imports",
+    summary: "Correct an unposted row's reference, summary or amount; the row becomes valid and ready to post",
+    query: { import_batch_id: "Batch id", row: "Row number" },
+    body: "{ external_reference?, summary?, amount? }",
+    returns: "ImportRecord",
+    permission: perm("import", "update"),
+  },
+  {
+    method: "DELETE",
+    path: "/imports/delete",
+    module: "Imports",
+    summary: "Discard a batch none of whose rows have been posted",
+    query: { import_batch_id: "Batch id" },
+    returns: "null",
+    permission: perm("import", "delete"),
+  },
 
   // ---- Audit -----------------------------------------------------------------
   list("Audit trail", "/audit-logs/list", "audit-log", "AuditEvent", {

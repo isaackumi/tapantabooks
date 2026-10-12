@@ -1453,7 +1453,19 @@ The import posting in the mock is a placeholder: it ignores field mappings, tax 
 - `Record not found.` when the batch or row does not exist.
 - `Only failed rows need reprocessing.` when the row is not `ERROR`.
 
-Side effects: the row becomes `VALID` with message `Corrected and revalidated by {actor name}.`; a `FAILED` batch becomes `NEEDS_REVIEW` (and a `POSTED` batch would become `PARTIALLY_POSTED`). The mock does not actually re-validate the row. Audit `IMPORT.ROW_REPROCESSED`, label `{batch number} row {row}`. Response: the `ImportRecord`; detail `Row {row} is ready to post`.
+Side effects: the row becomes `VALID` with message `Corrected and revalidated by {actor name}.`; a `FAILED` batch becomes `NEEDS_REVIEW` (and a `POSTED` batch would become `PARTIALLY_POSTED`). The mock does not actually re-validate the row. Audit `IMPORT.ROW_REPROCESSED`, label `{batch number} row {row}`. Response: the `ImportRecord`; detail `Row {row} is ready to post`. The UI now corrects rows with `PUT /imports/update-record` instead; `reprocess` stays for sources that resend a row unchanged.
+
+`PUT /imports/update-record` (query `import_batch_id` and `row`; body `{ external_reference?, summary?, amount? }`), for any row not yet posted:
+
+- `Record not found.`
+- `Nothing was received in this batch. Discard it and have the source resend.` for a `FAILED` batch.
+- `Row {row} is already posted. Reverse {batch}'s journal to correct it.`
+- `Enter the source reference.` · `Enter a summary of the row.` · `Amount must be a non-zero number.` (amount rounded to 2 dp).
+- References stay unique across all batches (case-insensitive): `Reference {ref} is already row {n} of this batch.` / `Reference {ref} is already in {batch} row {n}.`
+
+Side effects: fields replaced; the row becomes `VALID` with message `Corrected by {actor name}.` Audit `IMPORT.ROW_CORRECTED` with per-field changes. Response: the `ImportRecord`; detail `Row {row} saved and ready to post`.
+
+`DELETE /imports/delete` (query `import_batch_id`) discards a batch while none of its rows is posted and it has no journal: `{n} row(s) of {batch} are already posted. Reverse its journal instead.` The batch is removed; its number is not reused unless it was the latest. Audit `IMPORT.DISCARDED`. Response `data: null`, detail `{batch} discarded`.
 
 ### 14.5 Import lists, detail, statistics and the reference check
 

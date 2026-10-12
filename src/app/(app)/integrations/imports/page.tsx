@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import toast from "react-hot-toast";
-import { FiCheck, FiRefreshCw, FiUploadCloud } from "react-icons/fi";
-import { Button, Callout, DetailRow, PageHeader } from "@/components/ui";
+import { FiCheck, FiEdit2, FiTrash2, FiUploadCloud } from "react-icons/fi";
+import { Button, Callout, DetailRow, Field, FormError, PageHeader, inputClass } from "@/components/ui";
+import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, Modal } from "@/components/modal";
 import { Tabs } from "@/components/tabs";
 import StatCard from "@/components/statCard";
 import StatusBadge from "@/components/statusBadge";
@@ -15,6 +16,7 @@ import { useJournalViewer } from "@/components/accounting/journalViewer";
 import { useLedger } from "@/store/ledgerStore";
 import { useDebouncedValue, usePagedList, useReport } from "@/services/useApiQuery";
 import type { ImportListItem, ImportStatistics } from "@/models/lists";
+import type { ImportRecord } from "@/models/accounting";
 import { useGlobalState } from "@/utils/globalStateContext";
 import { useQueryParam } from "@/utils/useQueryParam";
 import { usePending } from "@/services/usePending";
@@ -29,6 +31,8 @@ export default function ImportsPage() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [tab, setTab] = useState("ALL");
   const [viewId, setViewId] = useState<string | null>(null);
+  const [fixing, setFixing] = useState<ImportRecord | null>(null);
+  const [discarding, setDiscarding] = useState(false);
   useQueryParam("open", setViewId);
   const search = useDebouncedValue(searchQuery.trim());
 
@@ -151,6 +155,11 @@ export default function ImportsPage() {
         footer={
           viewing && (
             <div className="flex flex-wrap justify-end gap-2">
+              {viewing.posted_count === 0 && !viewing.journal_id && (
+                <Button variant="ghost" icon={FiTrash2} className="mr-auto text-red-600" onClick={() => setDiscarding(true)}>
+                  Discard batch
+                </Button>
+              )}
               {viewing.journal_id && (
                 <Button variant="secondary" onClick={() => openJournal(viewing.journal_id!)}>
                   View journal
@@ -223,15 +232,16 @@ export default function ImportsPage() {
                         {r.message && <p className="mt-0.5 max-w-xs text-xs text-neutral-500 dark:text-neutral-400">{r.message}</p>}
                       </td>
                       <td className="px-3 py-2 text-right">
-                        {r.status === "ERROR" && viewing.status !== "FAILED" && (
+                        {!r.posted && viewing.status !== "FAILED" && (
                           <Button
                             size="sm"
-                            variant="secondary"
-                            icon={FiRefreshCw}
-                            disabled={pending(`row-${r.row}`) || pending("post")}
-                            onClick={() => track(`row-${r.row}`, async () => run(await actions.reprocessRecord(viewing.id, r.row)))}
+                            variant={r.status === "ERROR" ? "secondary" : "ghost"}
+                            icon={FiEdit2}
+                            disabled={pending("post")}
+                            aria-label={`${r.status === "ERROR" ? "Fix" : "Edit"} row ${r.row}`}
+                            onClick={() => setFixing(r)}
                           >
-                            Mark fixed
+                            {r.status === "ERROR" ? "Fix" : ""}
                           </Button>
                         )}
                       </td>
@@ -245,6 +255,89 @@ export default function ImportsPage() {
       </RightDrawer>
 
       <ImportWizard open={wizardOpen} onClose={() => setWizardOpen(false)} onDone={setViewId} />
+      {viewing && <FixRowModal batchId={viewing.id} record={fixing} onClose={() => setFixing(null)} />}
+      {viewing && (
+        <Modal
+          open={discarding}
+          onClose={() => setDiscarding(false)}
+          size="sm"
+          title={`Discard ${viewing.number}?`}
+          description={`None of its ${viewing.row_count} row${viewing.row_count === 1 ? "" : "s"} posted, so the ledger does not change. The discard is kept on the audit trail.`}
+          buttons={[
+            { label: "Cancel", onClick: () => setDiscarding(false), className: BTN_SECONDARY },
+            {
+              label: "Discard batch",
+              className: BTN_DANGER,
+              disabled: anyPending,
+              onClick: () =>
+                track("discard", async () => {
+                  const res = await actions.discardImportBatch(viewing.id);
+                  run(res);
+                  if (res.ok) {
+                    setDiscarding(false);
+                    setViewId(null);
+                  }
+                }),
+            },
+          ]}
+        />
+      )}
     </div>
   );
 }
+
+const FixRowModal = ({ batchId, record, onClose }: { batchId: string; record: ImportRecord | null; onClose: () => void }) => {
+  const { actions } = useLedger();
+  const [form, setForm] = useState({ external_reference: "", summary: "", amount: "" });
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!record) return;
+    setError(null);
+    setForm({ external_reference: record.external_reference, summary: record.summary, amount: String(record.amount) });
+  }, [record]);
+
+  const save = async () => {
+    if (!record) return;
+    setBusy(true);
+    try {
+      const res = await actions.updateImportRecord(batchId, record.row, { ...form, amount: Number(form.amount) });
+      if (!res.ok) return setError(res.error);
+      toast.success(res.message ?? "Saved");
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={!!record}
+      onClose={onClose}
+      title={record ? `${record.status === "ERROR" ? "Fix" : "Edit"} row ${record.row}` : ""}
+      description={record?.message ?? "Correct the row as it should have arrived. It is checked again and becomes ready to post."}
+      buttons={[
+        { label: "Cancel", onClick: onClose, className: BTN_SECONDARY },
+        { label: "Save row", onClick: save, className: BTN_PRIMARY, disabled: busy },
+      ]}
+    >
+      <FormError message={error} />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <Field label="Source reference" required>
+          <input
+            value={form.external_reference}
+            onChange={(e) => setForm((f) => ({ ...f, external_reference: e.target.value }))}
+            className={`${inputClass} font-mono`}
+          />
+        </Field>
+        <Field label="Amount" required>
+          <input type="number" step="0.01" value={form.amount} onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} className={inputClass} />
+        </Field>
+        <Field label="Summary" required className="sm:col-span-2">
+          <input value={form.summary} onChange={(e) => setForm((f) => ({ ...f, summary: e.target.value }))} className={inputClass} />
+        </Field>
+      </div>
+    </Modal>
+  );
+};
