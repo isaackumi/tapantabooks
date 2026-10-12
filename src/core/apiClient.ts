@@ -70,6 +70,9 @@ let onUnauthorized: (() => boolean) | null = null;
 /** Called before every request; resolves once the transport can take it (the mock service worker is serving this tab). */
 export const whenApiReady = () => ready();
 
+/** Sends a raw request the way the accounting client does (through the mock backend while there is no real API). */
+export const apiTransport = (request: Request) => transport(request);
+
 export const configureApiClient = (opts: {
   ready?: () => Promise<void>;
   transport?: Transport;

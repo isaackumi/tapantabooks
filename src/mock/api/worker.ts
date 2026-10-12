@@ -19,7 +19,11 @@ const ALLOWED_BEFORE_SETUP = new Set([
 
 const REQUIRED_HEADERS = ["app-id", "authorization", "bus-id", "loc-id", "org-id"] as const;
 
-const json = (status: number, body: unknown) => HttpResponse.json(body as Record<string, unknown>, { status });
+/** Marks a response as the mock's, so a call the worker let through to the dev server can be told apart. */
+const MOCK_HEADER = "x-mock-api";
+
+const json = (status: number, body: unknown) =>
+  HttpResponse.json(body as Record<string, unknown>, { status, headers: { [MOCK_HEADER]: "1" } });
 
 const fault = (status: number, detail: string, error: string | null = null, fieldErrors: Record<string, string> | null = null) =>
   json(status, envelope(status, null, { detail, error, field_errors: fieldErrors }));
@@ -121,7 +125,10 @@ export const startMockApi = () => {
     http.all(`${AppConstants.baseUrl}/*`, ({ request }) => accountingHandler(request)),
   )
     .start({ onUnhandledRequest: "bypass", quiet: true, serviceWorker: { url: "/mockServiceWorker.js" } })
-    .then(() => undefined);
+    .then(
+      () => undefined,
+      (e: unknown) => console.warn("[mock api] Service worker unavailable; answering requests in the page.", e),
+    );
   return started;
 };
 
@@ -133,7 +140,7 @@ let activating: Promise<void> | null = null;
 const reactivate = () =>
   new Promise<void>((resolve) => {
     const container = navigator.serviceWorker;
-    const controller = container.controller;
+    const controller = container?.controller;
     if (!controller) return resolve();
     const done = () => {
       clearTimeout(timer);
@@ -148,6 +155,21 @@ const reactivate = () =>
     container.startMessages();
     controller.postMessage("MOCK_ACTIVATE");
   });
+
+const answerInPage = (request: Request) =>
+  request.url.startsWith(`${AppConstants.coreApiUrl}/landingpage/`) ? coreHandler(request) : accountingHandler(request);
+
+/**
+ * Sends through the service worker so calls show in DevTools, and answers in the page when the
+ * worker is not controlling it or let the call through to the server (which has no /api/v1).
+ */
+export const mockTransport = async (request: Request) => {
+  if (navigator.serviceWorker?.controller) {
+    const response = await fetch(request.clone());
+    if (response.headers.has(MOCK_HEADER)) return response;
+  }
+  return answerInPage(request);
+};
 
 /** Resolves when the mock worker has started and is serving this tab. */
 export const mockApiReady = () =>

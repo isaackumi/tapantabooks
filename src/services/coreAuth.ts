@@ -1,6 +1,6 @@
 "use client";
 
-import { whenApiReady } from "@/core/apiClient";
+import { apiTransport, whenApiReady } from "@/core/apiClient";
 import { AppConstants } from "@/core/appConstants";
 import { decodeToken, mockContextFor, startSession, type TroveContext } from "@/core/session";
 
@@ -37,11 +37,13 @@ const coreRequest = async <T>(method: "GET" | "POST", path: string, body?: unkno
   if (body !== undefined) headers["content-type"] = "application/json";
   if (token) headers["authorization"] = `Bearer ${token}`;
   try {
-    const response = await fetch(`${AppConstants.coreApiUrl}${path}`, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    const response = await apiTransport(
+      new Request(`${AppConstants.coreApiUrl}${path}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }),
+    );
     const json = (await response.json().catch(() => null)) as {
       success?: boolean;
       status_code?: number;

@@ -11,6 +11,9 @@ if (typeof window !== "undefined") {
   if (AppConstants.useMockApi) {
     const worker = import("@/mock/api/worker");
     void worker.then((m) => m.startMockApi());
-    configureApiClient({ ready: () => worker.then((m) => m.mockApiReady()) });
+    configureApiClient({
+      ready: () => worker.then((m) => m.mockApiReady()),
+      transport: (request) => worker.then((m) => m.mockTransport(request)),
+    });
   }
 }
